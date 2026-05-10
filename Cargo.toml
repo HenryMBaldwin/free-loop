@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "looper",
+    "free-loop",
 ]
 
 [workspace.lints.rust]
