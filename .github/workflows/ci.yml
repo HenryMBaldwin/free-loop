@@ -45,14 +45,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
       - uses: DeterminateSystems/magic-nix-cache-action@v8
-        env:
+      - env:
           SKIP: cargo-fmt,cargo-clippy
         run: nix develop --command prek run --all-files --show-diff-on-failure
 
   commitlint:
     name: commitlint
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
         with:
