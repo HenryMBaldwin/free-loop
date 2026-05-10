@@ -5,6 +5,11 @@ members = [
     "free-loop",
 ]
 
+[workspace.package]
+edition = "2024"
+repository = "https://github.com/henrymbaldwin/free-loop"
+readme = "README.md"
+
 [workspace.lints.rust]
 future_incompatible = { level = "deny", priority = -1 }
 missing_debug_implementations = "deny"

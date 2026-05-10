@@ -1,7 +1,15 @@
 [package]
 name = "free-loop"
 version = "0.0.0"
-edition = "2024"
+edition.workspace = true
+description = "Simple audio looping for the Novation Launchpad X"
+license = "GPL"
+repository.workspace = true
+readme.workspace = true
+keywords = [ "looping", "launchpad"]
+categories = [ "audio" ]
+
+
 
 [dependencies]
 

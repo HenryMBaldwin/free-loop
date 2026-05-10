@@ -1,6 +1,13 @@
 [package]
 name = "looper"
 version = "0.0.0"
-edition = "2024"
+edition.workspace = true
+description = "A simple audio looping library."
+license = "MIT"
+repository.workspace = true
+readme.workspace = true
+keywords = [ "looping" ]
+categories = [ "audio" ]
+
 
 [dependencies]
