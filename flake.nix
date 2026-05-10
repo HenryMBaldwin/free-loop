@@ -22,6 +22,12 @@
                         pkgs.nodejs
                         pkgs.commitlint
                     ];
+
+                    shellHook = ''
+                        if [ -d .git ] && [ ! -f .git/hooks/.prek-installed ]; then
+                            prek install && touch .git/hooks/.prek-installed
+                        fi
+                    '';
                 };
             });
 }
