@@ -215,7 +215,11 @@ impl ControlSurface for LaunchpadX {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, reason = "tests should fail loudly")]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::panic,
+        reason = "tests should fail loudly"
+    )]
 
     use super::*;
 
