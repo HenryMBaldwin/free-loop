@@ -7,6 +7,7 @@
 //! ```text
 //! free-loop [config path]      # defaults to ./free-loop.toml
 //! free-loop --print-config     # a config file with every default filled in
+//! free-loop --log-surface      # print every gesture the surface reports
 //! ```
 
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -33,9 +34,11 @@ const DEFAULT_CONFIG: &str = "free-loop.toml";
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args().skip(1);
     let mut path = PathBuf::from(DEFAULT_CONFIG);
+    let mut log_surface = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--log-surface" => log_surface = true,
             "--print-config" => {
                 print!("{}", config::EXAMPLE);
                 return Ok(());
@@ -43,6 +46,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             "--help" | "-h" => {
                 println!("free-loop [config path]");
                 println!("free-loop --print-config");
+                println!("free-loop --log-surface");
                 return Ok(());
             }
             "--config" => {
@@ -97,6 +101,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         events.clear();
         surface.poll(&mut events);
         for event in events.drain(..) {
+            if log_surface {
+                println!("surface: {event:?}");
+            }
             controller.on_surface(event);
         }
 
