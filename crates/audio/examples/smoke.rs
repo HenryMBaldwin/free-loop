@@ -1,7 +1,7 @@
 //! Manual check against real hardware.
 //!
-//! Lists devices, opens a pair, and runs a scripted take: four bars of count-in, two
-//! bars of recording, then the loop plays for eight more with the click running.
+//! Lists devices, opens a pair, and runs a scripted take: two bars of count-in, bars 2
+//! and 3 recorded, then the loop plays for four more with the click running.
 //!
 //! ```text
 //! cargo run -p free-loop-audio --example smoke -- [device substring] [input channel]
@@ -23,11 +23,11 @@ use free_loop_engine::{ClickConfig, Engine, EngineConfig};
 
 const TEMPO: f64 = 120.0;
 /// Bars of click before recording starts.
-const COUNT_IN_BARS: u32 = 4;
+const COUNT_IN_BARS: u32 = 2;
 /// Bars to record.
 const RECORD_BARS: u32 = 2;
 /// Bars to let the loop run afterwards.
-const PLAY_BARS: u32 = 8;
+const PLAY_BARS: u32 = 4;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let device = std::env::args().nth(1);
