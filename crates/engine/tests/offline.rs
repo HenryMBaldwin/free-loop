@@ -31,8 +31,13 @@ struct Harness {
 
 impl Harness {
     fn new(block: usize) -> Self {
+        Self::with_offset(block, Frames::ZERO)
+    }
+
+    fn with_offset(block: usize, capture_offset: Frames) -> Self {
         let mut config = EngineConfig::stereo_48k().unwrap();
         config.segment_pool = 12;
+        config.capture_offset = capture_offset;
         config.click = ClickConfig {
             enabled: false,
             level: 0.0,
@@ -167,6 +172,57 @@ fn a_recorded_loop_plays_back_what_was_captured() {
             "frame {frame} channel {channel}"
         );
     }
+}
+
+/// With no compensation a note played at grid position `P` comes back late by the round
+/// trip. Stamping the clip as having started earlier puts it back where it was played.
+#[test]
+fn compensation_puts_playback_back_on_the_grid() {
+    const LATENCY: u64 = 2_048;
+
+    let mut harness = Harness::with_offset(128, Frames(LATENCY));
+    let pad = addr(0, 0);
+    let (start, end) = record(&mut harness, pad, 1_000, 2);
+    let len = end - start;
+
+    let from = harness.position();
+    let out = harness.run_to(from + len);
+
+    for (i, sample) in out.iter().enumerate() {
+        let frame = from + (i / CHANNELS) as u64;
+        let channel = i % CHANNELS;
+        // Frame k of the capture holds what arrived at `start + k`, which was played at
+        // `start + k - LATENCY`. Playback should emit that at its played position.
+        let captured_at = start + (frame + LATENCY - start) % len;
+        assert_eq!(
+            *sample,
+            signal(captured_at, channel),
+            "frame {frame} channel {channel}"
+        );
+    }
+}
+
+#[test]
+fn without_compensation_playback_sits_late_by_the_round_trip() {
+    const LATENCY: u64 = 2_048;
+
+    let mut compensated = Harness::with_offset(128, Frames(LATENCY));
+    let mut raw = Harness::new(128);
+    let pad = addr(0, 0);
+
+    let (start, end) = record(&mut compensated, pad, 1_000, 2);
+    record(&mut raw, pad, 1_000, 2);
+    let len = end - start;
+
+    let from = compensated.position();
+    let with = compensated.run_to(from + len);
+    let without = raw.run_to(from + len);
+
+    assert_ne!(with, without, "compensation must actually move the audio");
+
+    // The uncompensated render is the compensated one delayed by the round trip.
+    let shift = usize::try_from(LATENCY).unwrap() * CHANNELS;
+    assert_eq!(without[shift..], with[..with.len() - shift]);
 }
 
 #[test]

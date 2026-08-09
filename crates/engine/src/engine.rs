@@ -58,6 +58,9 @@ pub struct EngineConfig {
     pub max_bars: u32,
     /// Segments to allocate. This is the ceiling on total recorded audio.
     pub segment_pool: usize,
+    /// Round-trip latency to compensate for, in frames. See
+    /// [`Engine::set_capture_offset`].
+    pub capture_offset: Frames,
     /// Click settings.
     pub click: ClickConfig,
 }
@@ -77,6 +80,7 @@ impl EngineConfig {
             channels: 2,
             max_bars: 32,
             segment_pool: 64,
+            capture_offset: Frames::ZERO,
             click: ClickConfig::default(),
         })
     }
@@ -125,6 +129,8 @@ struct Audio {
     segments: SegmentPool,
     next_clip_id: ClipId,
     channels: usize,
+    /// Copy of [`Engine::capture_offset`], since effects are applied from here.
+    capture_offset: Frames,
 }
 
 impl Audio {
@@ -160,8 +166,12 @@ impl Audio {
                     return;
                 };
                 let len = at.saturating_sub(started_at);
+                // Stamping the clip as having started `capture_offset` earlier is what
+                // undoes the round trip: frame k holds what was played at
+                // `started_at + k - offset`, so that is the grid position it belongs to.
+                let recorded_at = started_at.saturating_sub(self.capture_offset);
                 self.clips[addr.track.index()][addr.slot.index()] =
-                    Some(Clip::new(recording.buffer, len, started_at, self.channels));
+                    Some(Clip::new(recording.buffer, len, recorded_at, self.channels));
                 self.next_clip_id = clip.next();
                 sink.event(Event::ClipRecorded { addr, clip, len });
             }
@@ -199,6 +209,7 @@ pub struct Engine {
     click: Click,
     channels: usize,
     max_bars: u32,
+    capture_offset: Frames,
     sample_rate: SampleRate,
     time_signature: TimeSignature,
 }
@@ -247,10 +258,12 @@ impl Engine {
                 segments: SegmentPool::new(config.segment_pool, config.channels),
                 next_clip_id: ClipId(0),
                 channels: config.channels,
+                capture_offset: config.capture_offset,
             },
             click: Click::new(config.click, config.sample_rate),
             channels: config.channels,
             max_bars: config.max_bars,
+            capture_offset: config.capture_offset,
             sample_rate: config.sample_rate,
             time_signature: config.time_signature,
         })
@@ -274,6 +287,25 @@ impl Engine {
     /// Segments still available for recording.
     pub fn segments_available(&self) -> usize {
         self.audio.segments.available()
+    }
+
+    /// The round-trip latency being compensated for.
+    pub fn capture_offset(&self) -> Frames {
+        self.capture_offset
+    }
+
+    /// Sets the round-trip latency to compensate for.
+    ///
+    /// Captured audio arrives this many frames after it was played, so a clip's frames
+    /// describe a moment that has already passed. Rather than shifting the audio, the
+    /// clip is stamped as having started that much earlier, which puts every frame back
+    /// on the grid position it was played at.
+    ///
+    /// Takes effect on the next recording sealed; a take already in progress keeps the
+    /// value it started with.
+    pub fn set_capture_offset(&mut self, offset: Frames) {
+        self.capture_offset = offset;
+        self.audio.capture_offset = offset;
     }
 
     fn ctx(&self) -> Ctx {

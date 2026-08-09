@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use free_loop_audio::{AudioConfig, InputSource, list_devices, open};
 use free_loop_core::{
-    Command, Event, SampleRate, SlotAddr, SlotId, SlotState, Tempo, TimeSignature, TrackId,
+    Command, Event, Frames, SampleRate, SlotAddr, SlotId, SlotState, Tempo, TimeSignature, TrackId,
 };
 use free_loop_engine::{ClickConfig, Engine, EngineConfig};
 
@@ -70,6 +70,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         channels: negotiated.channels,
         max_bars: 32,
         segment_pool: 64,
+        capture_offset: Frames::ZERO,
         click: ClickConfig::default(),
     })?;
     let frames_per_bar = engine.grid().frames_per_bar().0;
@@ -135,6 +136,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::thread::sleep(Duration::from_millis(5));
     }
 
-    println!("\ndevice errors: {}", io.device_errors());
+    println!(
+        "\nmeasured round trip: {} frames",
+        io.capture_offset_frames()
+    );
+    println!("device errors: {}", io.device_errors());
     Ok(())
 }
