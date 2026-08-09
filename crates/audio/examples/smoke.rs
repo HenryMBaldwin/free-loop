@@ -68,8 +68,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut io = opened.start(engine)?;
     let pad = SlotAddr::new(TrackId::new(0)?, SlotId::new(0)?);
 
+    // Arming during bar 1 starts capture on the bar 2 line, so the stop press has to
+    // land on the bar 4 line to get two bars.
     let bar = Duration::from_secs_f64(60.0 / TEMPO * 4.0);
-    let script = [(bar, Command::Press(pad)), (bar * 3, Command::Press(pad))];
+    let script = [(bar, Command::Press(pad)), (bar * 4, Command::Press(pad))];
     let mut next = 0;
 
     println!("click is running. play something during bars 2 and 3.");
