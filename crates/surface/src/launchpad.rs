@@ -1,8 +1,9 @@
 //! The Launchpad X.
 //!
-//! Layout: rows are tracks, columns are slots. The right-hand column therefore lines up
-//! with tracks and is reserved for per-track actions. The top row carries the transport
-//! controls on the left and the beat indicator on the right.
+//! Layout: rows are tracks, columns are slots. The right-hand column is a separate strip
+//! of eight buttons with their own printed labels, not part of the grid. The top row
+//! carries the transport and session controls, with the beat indicator sharing its first
+//! four buttons.
 //!
 //! The device must be in Programmer layout for the full 9×9 grid to address, which
 //! [`LaunchpadX::connect`] sets.
@@ -12,7 +13,7 @@ use launchy::x;
 use launchy::{InputDevice as _, MsgPollingWrapper as _, OutputDevice as _};
 
 use crate::event::{Control, SurfaceEvent};
-use crate::led::{CONTROL_COUNT, Led, LedColor, LedFrame, LedStyle};
+use crate::led::{CONTROL_COUNT, Led, LedColor, LedFrame, LedStyle, SIDE_COUNT};
 use crate::surface::{ControlSurface, SurfaceError};
 
 /// Buttons the device accepts in one update.
@@ -34,14 +35,14 @@ fn convert(error: launchy::MidiError) -> SurfaceError {
 /// What a physical button stands for.
 enum Target {
     Pad(SlotAddr),
-    Row(TrackId),
+    Side(u8),
     Control(Control),
 }
 
 fn target(button: x::Button) -> Option<Target> {
     match button {
         // Launchy counts the right-hand column as grid column 8.
-        x::Button::GridButton { x: 8, y } => TrackId::new(y).ok().map(Target::Row),
+        x::Button::GridButton { x: 8, y } => Some(Target::Side(y)),
         x::Button::GridButton { x, y } => {
             let track = TrackId::new(y).ok()?;
             let slot = SlotId::new(x).ok()?;
@@ -60,10 +61,10 @@ fn pad_button(addr: SlotAddr) -> x::Button {
     }
 }
 
-fn row_button(track: TrackId) -> x::Button {
+fn side_button(index: usize) -> x::Button {
     x::Button::GridButton {
         x: 8,
-        y: u8::try_from(track.index()).unwrap_or(0),
+        y: u8::try_from(index).unwrap_or(0),
     }
 }
 
@@ -156,10 +157,10 @@ impl LaunchpadX {
                 self.changes.push((pad_button(addr), style(led)));
             }
         }
-        for track in TrackId::all() {
-            let led = frame.row(track);
-            if led != self.shown.row(track) {
-                self.changes.push((row_button(track), style(led)));
+        for index in 0..SIDE_COUNT {
+            let led = frame.side(index);
+            if led != self.shown.side(index) {
+                self.changes.push((side_button(index), style(led)));
             }
         }
         for index in 0..CONTROL_COUNT {
@@ -187,8 +188,8 @@ impl ControlSurface for LaunchpadX {
             events.push(match (target, pressed) {
                 (Target::Pad(addr), true) => SurfaceEvent::PadPressed { addr, velocity },
                 (Target::Pad(addr), false) => SurfaceEvent::PadReleased { addr },
-                (Target::Row(track), true) => SurfaceEvent::RowPressed { track },
-                (Target::Row(track), false) => SurfaceEvent::RowReleased { track },
+                (Target::Side(index), true) => SurfaceEvent::SidePressed { index },
+                (Target::Side(index), false) => SurfaceEvent::SideReleased { index },
                 (Target::Control(control), true) => SurfaceEvent::ControlPressed(control),
                 (Target::Control(control), false) => SurfaceEvent::ControlReleased(control),
             });
@@ -244,11 +245,13 @@ mod tests {
     }
 
     #[test]
-    fn the_right_hand_column_is_a_row_not_a_pad() {
-        for expected in TrackId::all() {
-            match target(row_button(expected)) {
-                Some(Target::Row(actual)) => assert_eq!(actual, expected),
-                _ => panic!("{expected:?} did not come back as a row"),
+    fn the_right_hand_column_is_a_side_button_not_a_pad() {
+        for expected in 0..SIDE_COUNT {
+            match target(side_button(expected)) {
+                Some(Target::Side(actual)) => {
+                    assert_eq!(usize::from(actual), expected);
+                }
+                _ => panic!("side {expected} did not come back as a side button"),
             }
         }
     }
@@ -261,8 +264,8 @@ mod tests {
                 _ => panic!("{control:?} did not come back as a control"),
             }
         }
-        // The rest are the beat indicator, which is output only.
-        for index in 4..CONTROL_COUNT {
+        // The spares carry nothing.
+        for index in [2, 3] {
             assert!(target(control_button(index)).is_none());
         }
     }
