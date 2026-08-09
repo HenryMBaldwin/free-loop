@@ -142,6 +142,7 @@ pub fn open(config: &AudioConfig) -> Result<Opened, AudioError> {
         input_channels: usize::from(input_supported.channels()),
         input_format: input_supported.sample_format(),
         output_format: output_supported.sample_format(),
+        input_source: config.input_source,
         buffer_frames: config.buffer_frames,
         cushion_frames: cushion_frames(config.buffer_frames, config.cushion_blocks),
     };
@@ -176,7 +177,11 @@ impl Opened {
     /// [`AudioError`] if either stream cannot be built or started.
     pub fn start(self, engine: Engine) -> Result<AudioIo, AudioError> {
         let negotiated = self.negotiated;
-        let map = ChannelMap::new(negotiated.input_channels, negotiated.channels);
+        let map = ChannelMap::new(
+            negotiated.input_channels,
+            negotiated.channels,
+            negotiated.input_source,
+        );
 
         let block = usize::try_from(negotiated.buffer_frames.unwrap_or(ASSUMED_BLOCK_FRAMES))
             .unwrap_or(usize::from(u16::MAX));
