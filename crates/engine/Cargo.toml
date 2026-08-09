@@ -11,6 +11,7 @@ categories.workspace = true
 
 [dependencies]
 free-loop-core.workspace = true
+rtrb.workspace = true
 thiserror.workspace = true
 
 [lints]

@@ -31,33 +31,49 @@ const TICK: Duration = Duration::from_millis(2);
 /// Where the config lives unless told otherwise.
 const DEFAULT_CONFIG: &str = "free-loop.toml";
 
-fn main() -> Result<(), Box<dyn Error>> {
+/// What the command line asked for.
+struct Args {
+    path: PathBuf,
+    log_surface: bool,
+}
+
+/// Parses the command line. `None` means the request was answered already.
+fn parse_args() -> Result<Option<Args>, Box<dyn Error>> {
     let mut args = std::env::args().skip(1);
-    let mut path = PathBuf::from(DEFAULT_CONFIG);
-    let mut log_surface = false;
+    let mut parsed = Args {
+        path: PathBuf::from(DEFAULT_CONFIG),
+        log_surface: false,
+    };
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--log-surface" => log_surface = true,
+            "--log-surface" => parsed.log_surface = true,
             "--print-config" => {
                 print!("{}", config::EXAMPLE);
-                return Ok(());
+                return Ok(None);
             }
             "--help" | "-h" => {
                 println!("free-loop [config path]");
                 println!("free-loop --print-config");
                 println!("free-loop --log-surface");
-                return Ok(());
+                return Ok(None);
             }
             "--config" => {
-                path = args
+                parsed.path = args
                     .next()
                     .map(PathBuf::from)
                     .ok_or("--config needs a path")?;
             }
-            other => path = PathBuf::from(other),
+            other => parsed.path = PathBuf::from(other),
         }
     }
+    Ok(Some(parsed))
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let Some(Args { path, log_surface }) = parse_args()? else {
+        return Ok(());
+    };
 
     let config = Config::load(&path)?;
     println!("config: {}", path.display());
@@ -72,7 +88,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         negotiated.cushion_frames
     );
 
-    let engine = Engine::new(config.engine(negotiated.sample_rate, negotiated.channels)?)?;
+    let (engine, mut recycler) =
+        Engine::new(config.engine(negotiated.sample_rate, negotiated.channels)?)?;
     let mut io = opened.start(engine)?;
 
     let mut surface = connect_surface();
@@ -113,6 +130,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             controller.on_surface(event, now);
         }
         controller.tick(now);
+        // Returns clips the engine finished with while something else was reading them.
+        recycler.run();
 
         for command in controller.drain_commands() {
             if io.send(command).is_err() {

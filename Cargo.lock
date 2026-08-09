@@ -273,6 +273,7 @@ name = "free-loop-engine"
 version = "0.1.0"
 dependencies = [
  "free-loop-core",
+ "rtrb",
  "thiserror 2.0.20",
 ]
 
