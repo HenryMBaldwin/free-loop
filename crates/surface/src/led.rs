@@ -2,7 +2,7 @@
 //!
 //! Device-neutral: a colour and a style, with each device deciding how to produce them.
 
-use free_loop_core::{SLOT_COUNT, SlotAddr, SlotId, TRACK_COUNT};
+use free_loop_core::{SLOT_COUNT, SlotAddr, TRACK_COUNT, TrackId};
 
 /// Buttons in the top row.
 pub const CONTROL_COUNT: usize = 8;
@@ -115,7 +115,7 @@ impl Led {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LedFrame {
     pads: [[Led; SLOT_COUNT]; TRACK_COUNT],
-    scenes: [Led; SLOT_COUNT],
+    rows: [Led; TRACK_COUNT],
     controls: [Led; CONTROL_COUNT],
 }
 
@@ -124,7 +124,7 @@ impl LedFrame {
     pub fn new() -> Self {
         Self {
             pads: [[Led::OFF; SLOT_COUNT]; TRACK_COUNT],
-            scenes: [Led::OFF; SLOT_COUNT],
+            rows: [Led::OFF; TRACK_COUNT],
             controls: [Led::OFF; CONTROL_COUNT],
         }
     }
@@ -139,14 +139,14 @@ impl LedFrame {
         self.pads[addr.track.index()][addr.slot.index()] = led;
     }
 
-    /// A button in the right-hand column.
-    pub fn scene(&self, slot: SlotId) -> Led {
-        self.scenes[slot.index()]
+    /// The right-hand column button for a track's row.
+    pub fn row(&self, track: TrackId) -> Led {
+        self.rows[track.index()]
     }
 
-    /// Sets a button in the right-hand column.
-    pub fn set_scene(&mut self, slot: SlotId, led: Led) {
-        self.scenes[slot.index()] = led;
+    /// Sets the right-hand column button for a track's row.
+    pub fn set_row(&mut self, track: TrackId, led: Led) {
+        self.rows[track.index()] = led;
     }
 
     /// A button in the top row. Out-of-range indices read as unlit.
@@ -173,7 +173,7 @@ mod tests {
     #![allow(clippy::unwrap_used, reason = "tests should fail loudly")]
 
     use super::*;
-    use free_loop_core::TrackId;
+    use free_loop_core::SlotId;
 
     fn addr(track: u8, slot: u8) -> SlotAddr {
         SlotAddr::new(TrackId::new(track).unwrap(), SlotId::new(slot).unwrap())
@@ -183,7 +183,7 @@ mod tests {
     fn a_new_frame_is_dark() {
         let frame = LedFrame::new();
         assert!(SlotAddr::all().all(|a| !frame.pad(a).is_lit()));
-        assert!(SlotId::all().all(|s| !frame.scene(s).is_lit()));
+        assert!(TrackId::all().all(|t| !frame.row(t).is_lit()));
         assert!((0..CONTROL_COUNT).all(|i| !frame.control(i).is_lit()));
     }
 

@@ -1,6 +1,6 @@
 //! What the performer did.
 
-use free_loop_core::{SlotAddr, SlotId};
+use free_loop_core::{SlotAddr, TrackId};
 
 /// Top-row buttons that do something.
 ///
@@ -68,14 +68,16 @@ pub enum SurfaceEvent {
         addr: SlotAddr,
     },
     /// A right-hand column button was pressed.
-    ScenePressed {
-        /// Which row.
-        slot: SlotId,
+    ///
+    /// Rows are tracks, so these are per-track rather than per-scene.
+    RowPressed {
+        /// Which track's row.
+        track: TrackId,
     },
     /// A right-hand column button was released.
-    SceneReleased {
-        /// Which row.
-        slot: SlotId,
+    RowReleased {
+        /// Which track's row.
+        track: TrackId,
     },
     /// A top-row control was pressed.
     ControlPressed(Control),
