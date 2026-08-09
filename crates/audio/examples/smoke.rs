@@ -1,7 +1,7 @@
 //! Manual check against real hardware.
 //!
-//! Lists devices, opens a pair, and runs a scripted take: two bars of count-in, bars 2
-//! and 3 recorded, then the loop plays for four more with the click running.
+//! Lists devices, opens a pair, and runs a scripted take: one bar of count-in, two bars
+//! recorded, then the loop plays for four more with the click running.
 //!
 //! ```text
 //! cargo run -p free-loop-audio --example smoke -- [device substring] [input channel]
@@ -23,7 +23,7 @@ use free_loop_engine::{ClickConfig, Engine, EngineConfig};
 
 const TEMPO: f64 = 120.0;
 /// Bars of click before recording starts.
-const COUNT_IN_BARS: u32 = 2;
+const COUNT_IN_BARS: u32 = 1;
 /// Bars to record.
 const RECORD_BARS: u32 = 2;
 /// Bars to let the loop run afterwards.
@@ -77,18 +77,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut io = opened.start(engine)?;
     let pad = SlotAddr::new(TrackId::new(0)?, SlotId::new(0)?);
 
-    // Arming takes effect on the following bar line, so each press sits one bar ahead of
-    // the boundary it acts on.
+    // Presses take effect on the following bar line, so each sits one bar ahead of the
+    // boundary it acts on. Mid-bar keeps them clear of the line itself, where an arm
+    // would race the boundary it is meant to wait for.
     let bar = Duration::from_secs_f64(60.0 / TEMPO * 4.0);
-    let arm_at = bar * (COUNT_IN_BARS - 1);
-    let stop_at = bar * (COUNT_IN_BARS + RECORD_BARS - 1);
+    let arm_at = bar * (COUNT_IN_BARS - 1) + bar / 2;
+    let stop_at = bar * (COUNT_IN_BARS + RECORD_BARS - 1) + bar / 2;
     let script = [
         (arm_at, Command::Press(pad)),
         (stop_at, Command::Press(pad)),
     ];
     let mut next = 0;
-
-    println!("watch this output — it says when to play. do not count bars yourself.\n");
 
     let mut recording = false;
     let start = Instant::now();
