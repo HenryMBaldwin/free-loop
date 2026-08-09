@@ -1,0 +1,16 @@
+[package]
+name = "free-loop-core"
+version = "0.1.0"
+description = "Pure domain model for Free Loop: musical time, the slot state machine, and the realtime control vocabulary"
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[lints]
+workspace = true
