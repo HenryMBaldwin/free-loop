@@ -29,6 +29,14 @@ impl SessionModel {
         self.slots[addr.track.index()][addr.slot.index()] = state;
     }
 
+    /// Overwrites a pad's state without running the machine.
+    ///
+    /// For a mirror kept in step with a report from elsewhere. Using it on the model
+    /// that owns the transitions would skip the rules in [`Self::press`].
+    pub fn mirror(&mut self, addr: SlotAddr, state: SlotState) {
+        self.set(addr, state);
+    }
+
     /// Whether any pad holds a clip. The tempo is locked once this is true — changing
     /// it would leave existing clips misaligned with the grid.
     pub fn has_any_clip(&self) -> bool {
@@ -165,6 +173,17 @@ mod tests {
         model.press(at, &ctx(end, clip), &mut ignore);
         model.advance(&ctx(end, clip), &mut ignore);
         assert_eq!(model.state(at), SlotState::Playing { clip: ClipId(clip) });
+    }
+
+    #[test]
+    fn a_mirrored_state_is_taken_verbatim() {
+        let mut model = SessionModel::new();
+        let target = addr(4, 6);
+        model.mirror(target, SlotState::Playing { clip: ClipId(3) });
+
+        assert_eq!(model.state(target), SlotState::Playing { clip: ClipId(3) });
+        assert!(model.has_any_clip());
+        assert_eq!(model.state(addr(4, 5)), SlotState::Empty);
     }
 
     #[test]

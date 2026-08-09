@@ -1,5 +1,11 @@
 [workspace]
-members = ["crates/core", "crates/engine", "crates/audio", "crates/surface"]
+members = [
+  "crates/core",
+  "crates/engine",
+  "crates/audio",
+  "crates/surface",
+  "crates/app",
+]
 resolver = "3"
 
 [workspace.package]
@@ -12,11 +18,16 @@ categories = ["multimedia::audio"]
 
 [workspace.dependencies]
 cpal = "0.18"
+ctrlc = "3"
+free-loop-audio = { path = "crates/audio", version = "0.1.0" }
 free-loop-core = { path = "crates/core", version = "0.1.0" }
 free-loop-engine = { path = "crates/engine", version = "0.1.0" }
+free-loop-surface = { path = "crates/surface", version = "0.1.0" }
 launchy = { git = "https://github.com/HenryMBaldwin/launchy", rev = "c88be0f13197e8cf098e99f9e766335488e83329" }
 rtrb = "0.3"
+serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+toml = "1"
 
 [workspace.lints.rust]
 future_incompatible = { level = "deny", priority = -1 }
