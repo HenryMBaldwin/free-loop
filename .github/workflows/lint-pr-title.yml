@@ -1,0 +1,33 @@
+name: Lint PR title
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+    branches: [main]
+
+
+permissions:
+  contents: read
+
+jobs:
+  lint-pr-title:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Install Commitlint
+        run: |
+          npm install --no-save --no-package-lock \
+            @commitlint/cli@21 \
+            @commitlint/config-conventional@21
+
+      - name: Lint PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          printf '%s\n' "$PR_TITLE" |
+            ./node_modules/.bin/commitlint --config .commitlintrc.yml

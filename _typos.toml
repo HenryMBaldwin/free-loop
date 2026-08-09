@@ -1,0 +1,9 @@
+# Configuration for the `typos` spell checker.
+# https://github.com/crate-ci/typos
+
+[files]
+extend-exclude = ["Cargo.lock", "flake.lock"]
+
+[default.extend-words]
+# Add project-specific words typos should not flag, e.g.:
+# mmaped = "mmaped"

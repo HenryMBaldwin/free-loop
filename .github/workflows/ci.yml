@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+
+jobs:
+  cargo-fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Format Rust
+        run: cargo fmt --all -- --check
+
+  cargo-clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Lint Rust
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+
+  cargo-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test Rust
+        run: cargo test --workspace
+
+  taplo-fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cargo-bins/cargo-binstall@main
+      - name: Install taplo
+        run: cargo binstall -y taplo-cli
+      - name: Format TOML
+        run: taplo fmt --check
+
+  taplo-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cargo-bins/cargo-binstall@main
+      - name: Install taplo
+        run: cargo binstall -y taplo-cli
+      - name: Lint Toml
+        run: taplo lint
+
+  typos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cargo-bins/cargo-binstall@main
+      - name: Install typos
+        run: cargo binstall -y typos-cli
+      - name: Check spelling
+        run: typos
