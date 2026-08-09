@@ -1,0 +1,18 @@
+[package]
+name = "free-loop-surface"
+version = "0.1.0"
+description = "Control surface for Free Loop: the Launchpad X and a device-neutral interface"
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+free-loop-core.workspace = true
+launchy.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
