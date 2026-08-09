@@ -1,7 +1,7 @@
 //! Manual check against real hardware.
 //!
-//! Lists devices, opens the default pair, and runs a scripted take: arm a pad, record two
-//! bars, then loop it for eight more with the click running.
+//! Lists devices, opens a pair, and runs a scripted take: four bars of count-in, two
+//! bars of recording, then the loop plays for eight more with the click running.
 //!
 //! ```text
 //! cargo run -p free-loop-audio --example smoke -- [device substring] [input channel]
@@ -16,10 +16,18 @@ use std::error::Error;
 use std::time::{Duration, Instant};
 
 use free_loop_audio::{AudioConfig, InputSource, list_devices, open};
-use free_loop_core::{Command, Event, SampleRate, SlotAddr, SlotId, Tempo, TimeSignature, TrackId};
+use free_loop_core::{
+    Command, Event, SampleRate, SlotAddr, SlotId, SlotState, Tempo, TimeSignature, TrackId,
+};
 use free_loop_engine::{ClickConfig, Engine, EngineConfig};
 
 const TEMPO: f64 = 120.0;
+/// Bars of click before recording starts.
+const COUNT_IN_BARS: u32 = 4;
+/// Bars to record.
+const RECORD_BARS: u32 = 2;
+/// Bars to let the loop run afterwards.
+const PLAY_BARS: u32 = 8;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let device = std::env::args().nth(1);
@@ -64,20 +72,29 @@ fn main() -> Result<(), Box<dyn Error>> {
         segment_pool: 64,
         click: ClickConfig::default(),
     })?;
+    let frames_per_bar = engine.grid().frames_per_bar().0;
 
     let mut io = opened.start(engine)?;
     let pad = SlotAddr::new(TrackId::new(0)?, SlotId::new(0)?);
 
-    // Arming during bar 1 starts capture on the bar 2 line, so the stop press has to
-    // land on the bar 4 line to get two bars.
+    // Arming takes effect on the following bar line, so each press sits one bar ahead of
+    // the boundary it acts on.
     let bar = Duration::from_secs_f64(60.0 / TEMPO * 4.0);
-    let script = [(bar, Command::Press(pad)), (bar * 4, Command::Press(pad))];
+    let arm_at = bar * (COUNT_IN_BARS - 1);
+    let stop_at = bar * (COUNT_IN_BARS + RECORD_BARS - 1);
+    let script = [
+        (arm_at, Command::Press(pad)),
+        (stop_at, Command::Press(pad)),
+    ];
     let mut next = 0;
 
-    println!("click is running. play something during bars 2 and 3.");
+    println!("watch this output — it says when to play. do not count bars yourself.\n");
 
+    let mut recording = false;
     let start = Instant::now();
-    while start.elapsed() < bar * 12 {
+    let total = bar * (COUNT_IN_BARS + RECORD_BARS + PLAY_BARS);
+
+    while start.elapsed() < total {
         if let Some((at, command)) = script.get(next)
             && start.elapsed() >= *at
         {
@@ -85,11 +102,32 @@ fn main() -> Result<(), Box<dyn Error>> {
             next += 1;
         }
 
-        // Beats are too chatty to print; everything else is worth seeing.
-        io.drain_events(|event| {
-            if !matches!(event, Event::Beat { .. }) {
-                println!("{event:?}");
+        io.drain_events(|event| match event {
+            Event::Bar { bar } => {
+                let marker = if recording { "   <<< PLAY NOW" } else { "" };
+                println!("bar {bar}{marker}");
             }
+            Event::SlotChanged { state, .. } => match state {
+                SlotState::Recording { .. } => {
+                    recording = true;
+                    println!("=== RECORDING {RECORD_BARS} BARS — PLAY ===");
+                }
+                SlotState::Playing { .. } => {
+                    recording = false;
+                    println!("=== LOOPING ===");
+                }
+                _ => {}
+            },
+            Event::ClipRecorded { len, .. } => {
+                println!(
+                    "captured {} bars ({} frames)",
+                    len.0 / frames_per_bar,
+                    len.0
+                );
+            }
+            Event::Xrun { frames } => println!("xrun: {frames} frames"),
+            Event::Beat { .. } => {}
+            other => println!("{other:?}"),
         });
 
         std::thread::sleep(Duration::from_millis(5));
