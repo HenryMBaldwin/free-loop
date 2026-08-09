@@ -13,8 +13,11 @@ use free_loop_core::{
     SessionModel, SlotAddr, SlotState, TRACK_COUNT, Tempo, TimeError, TimeSignature,
 };
 
-use crate::buffer::{AudioBuffer, Clip, SEGMENT_FRAMES, SegmentPool};
+use std::sync::Arc;
+
+use crate::buffer::{Clip, SEGMENT_FRAMES, SegmentPool};
 use crate::click::{Click, ClickConfig};
+use crate::recycle::{Recycler, Retirement, channel};
 
 /// Saturating `u64` to `usize`.
 fn as_usize(value: u64) -> usize {
@@ -107,10 +110,9 @@ impl EventSink for Vec<Event> {
     }
 }
 
-/// Capture in progress.
+/// Capture in progress. The audio goes straight into the clip the pad will hold.
 #[derive(Debug)]
 struct Recording {
-    buffer: AudioBuffer,
     /// Frames of transport elapsed since capture began, written or not.
     frames: u64,
     /// Whether the segment pool ran dry part way through.
@@ -123,33 +125,60 @@ struct Recording {
 /// mutably borrowed.
 #[derive(Debug)]
 struct Audio {
-    clips: [[Option<Clip>; SLOT_COUNT]; TRACK_COUNT],
+    clips: [[Option<Arc<Clip>>; SLOT_COUNT]; TRACK_COUNT],
     recordings: [[Option<Recording>; SLOT_COUNT]; TRACK_COUNT],
-    shells: Vec<AudioBuffer>,
+    /// Preallocated clips waiting to be recorded into.
+    shells: Vec<Arc<Clip>>,
     segments: SegmentPool,
+    retirement: Retirement,
     next_clip_id: ClipId,
-    channels: usize,
     /// Copy of [`Engine::capture_offset`], since effects are applied from here.
     capture_offset: Frames,
 }
 
 impl Audio {
-    fn clip(&self, addr: SlotAddr) -> Option<&Clip> {
+    fn clip(&self, addr: SlotAddr) -> Option<&Arc<Clip>> {
         self.clips[addr.track.index()][addr.slot.index()].as_ref()
     }
 
-    fn recycle(&mut self, mut buffer: AudioBuffer) {
-        buffer.drain_into(&mut self.segments);
-        self.shells.push(buffer);
+    /// Takes a clip back into the pool, or hands it over if something else is reading it.
+    fn retire(&mut self, mut clip: Arc<Clip>) {
+        match Arc::get_mut(&mut clip) {
+            Some(inner) => {
+                inner.release_segments(&mut self.segments);
+                inner.reset();
+                self.shells.push(clip);
+            }
+            None => self.retirement.retire(clip),
+        }
+    }
+
+    /// Takes back anything the recycler has released.
+    fn reclaim(&mut self) {
+        let Self {
+            retirement,
+            segments,
+            shells,
+            ..
+        } = self;
+
+        retirement.reclaim(|mut clip| {
+            if let Some(inner) = Arc::get_mut(&mut clip) {
+                inner.release_segments(segments);
+                inner.reset();
+                shells.push(clip);
+            }
+        });
     }
 
     fn apply(&mut self, addr: SlotAddr, effect: Effect, sink: &mut impl EventSink) {
         match effect {
             Effect::StartCapture { .. } => {
-                // The shell pool holds one buffer per pad, so this cannot come up empty.
-                if let Some(buffer) = self.shells.pop() {
+                // The shell pool holds one clip per pad, so this only comes up empty when
+                // the recycler is behind.
+                if let Some(shell) = self.shells.pop() {
+                    self.clips[addr.track.index()][addr.slot.index()] = Some(shell);
                     self.recordings[addr.track.index()][addr.slot.index()] = Some(Recording {
-                        buffer,
                         frames: 0,
                         starved: false,
                     });
@@ -161,33 +190,40 @@ impl Audio {
                 started_at,
                 at,
             } => {
-                let Some(recording) = self.recordings[addr.track.index()][addr.slot.index()].take()
-                else {
+                if self.recordings[addr.track.index()][addr.slot.index()]
+                    .take()
+                    .is_none()
+                {
+                    return;
+                }
+                let Some(held) = self.clips[addr.track.index()][addr.slot.index()].as_mut() else {
                     return;
                 };
+                let Some(inner) = Arc::get_mut(held) else {
+                    return;
+                };
+
                 let len = at.saturating_sub(started_at);
-                // Stamping the clip as having started `capture_offset` earlier is what
-                // undoes the round trip: frame k holds what was played at
-                // `started_at + k - offset`, so that is the grid position it belongs to.
-                let recorded_at = started_at.saturating_sub(self.capture_offset);
-                self.clips[addr.track.index()][addr.slot.index()] =
-                    Some(Clip::new(recording.buffer, len, recorded_at, self.channels));
+                // Stamping the clip as having started `capture_offset` earlier undoes the
+                // round trip: frame k holds what was played at `started_at + k - offset`,
+                // so that is the grid position it belongs to.
+                inner.set_len(len);
+                inner.set_recorded_at(started_at.saturating_sub(self.capture_offset));
+
                 self.next_clip_id = clip.next();
                 sink.event(Event::ClipRecorded { addr, clip, len });
             }
 
             Effect::CancelCapture => {
-                if let Some(recording) =
-                    self.recordings[addr.track.index()][addr.slot.index()].take()
-                {
-                    self.recycle(recording.buffer);
+                self.recordings[addr.track.index()][addr.slot.index()] = None;
+                if let Some(held) = self.clips[addr.track.index()][addr.slot.index()].take() {
+                    self.retire(held);
                 }
             }
 
             Effect::ReleaseClip { clip } => {
                 if let Some(held) = self.clips[addr.track.index()][addr.slot.index()].take() {
-                    let buffer = held.into_buffer(&mut self.segments);
-                    self.shells.push(buffer);
+                    self.retire(held);
                 }
                 sink.event(Event::ClipReleased { clip });
             }
@@ -220,10 +256,14 @@ pub struct Engine {
 impl Engine {
     /// Builds an engine and allocates its pools.
     ///
+    /// The [`Recycler`] returns clips that were being read elsewhere when the engine
+    /// finished with them. Run it off the audio thread; clips nobody else holds never
+    /// reach it.
+    ///
     /// # Errors
     ///
     /// [`EngineError`] if the configuration is not usable.
-    pub fn new(config: EngineConfig) -> Result<Self, EngineError> {
+    pub fn new(config: EngineConfig) -> Result<(Self, Recycler), EngineError> {
         if config.channels == 0 {
             return Err(EngineError::ZeroChannels);
         }
@@ -246,11 +286,12 @@ impl Engine {
         let longest = slowest.bars(config.max_bars).0;
         let max_segments = as_usize(longest.div_ceil(as_u64(SEGMENT_FRAMES))).max(1);
 
+        let (retirement, recycler) = channel();
         let shells = (0..TRACK_COUNT * SLOT_COUNT)
-            .map(|_| AudioBuffer::new(max_segments, config.channels))
+            .map(|_| Arc::new(Clip::empty(max_segments, config.channels)))
             .collect();
 
-        Ok(Self {
+        let engine = Self {
             grid,
             position: Frames::ZERO,
             session: SessionModel::new(),
@@ -259,8 +300,8 @@ impl Engine {
                 recordings: core::array::from_fn(|_| core::array::from_fn(|_| None)),
                 shells,
                 segments: SegmentPool::new(config.segment_pool, config.channels),
+                retirement,
                 next_clip_id: ClipId(0),
-                channels: config.channels,
                 capture_offset: config.capture_offset,
             },
             click: Click::new(config.click, config.sample_rate),
@@ -271,7 +312,8 @@ impl Engine {
             capture_offset: config.capture_offset,
             sample_rate: config.sample_rate,
             time_signature: config.time_signature,
-        })
+        };
+        Ok((engine, recycler))
     }
 
     /// The transport position, in frames from the origin.
@@ -400,6 +442,7 @@ impl Engine {
     /// an [`Event::Xrun`] is reported.
     pub fn process(&mut self, input: &[f32], output: &mut [f32], sink: &mut impl EventSink) {
         output.fill(0.0);
+        self.audio.reclaim();
 
         // A frozen transport holds its position, so nothing sounds, nothing is captured
         // and no bar line arrives. Input is dropped rather than buffered: it belongs to a
@@ -483,18 +526,25 @@ impl Engine {
         let captured = &input[offset * self.channels..(offset + available) * self.channels];
 
         for addr in SlotAddr::all() {
-            let segments = &mut self.audio.segments;
-            let Some(recording) =
-                self.audio.recordings[addr.track.index()][addr.slot.index()].as_mut()
-            else {
+            let Audio {
+                clips,
+                recordings,
+                segments,
+                ..
+            } = &mut self.audio;
+
+            let Some(recording) = recordings[addr.track.index()][addr.slot.index()].as_mut() else {
                 continue;
             };
-            if available > 0 {
-                let written = recording.buffer.write(recording.frames, captured, segments);
-                if written < available && !recording.starved {
-                    recording.starved = true;
-                    sink.event(Event::RecordBufferLow { addr });
-                }
+            let written = clips[addr.track.index()][addr.slot.index()]
+                .as_mut()
+                .and_then(Arc::get_mut)
+                .filter(|_| available > 0)
+                .map_or(0, |clip| clip.write(recording.frames, captured, segments));
+
+            if available > 0 && written < available && !recording.starved {
+                recording.starved = true;
+                sink.event(Event::RecordBufferLow { addr });
             }
             recording.frames += as_u64(run);
         }
