@@ -43,7 +43,7 @@ impl Harness {
             level: 0.0,
         };
         Self {
-            engine: Engine::new(config).unwrap(),
+            engine: Engine::new(config).unwrap().0,
             events: Vec::new(),
             block,
         }

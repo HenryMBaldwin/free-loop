@@ -63,7 +63,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         f64::from(millis) / f64::from(negotiated.sample_rate) * 1000.0
     );
 
-    let engine = Engine::new(EngineConfig {
+    let (engine, _recycler) = Engine::new(EngineConfig {
         sample_rate: SampleRate::new(negotiated.sample_rate)?,
         tempo: Tempo::new(TEMPO)?,
         time_signature: TimeSignature::FOUR_FOUR,

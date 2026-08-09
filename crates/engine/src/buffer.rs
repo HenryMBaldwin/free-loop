@@ -185,10 +185,42 @@ impl Clip {
         self.recorded_at
     }
 
-    /// Returns the storage, leaving the clip's segments in `pool`.
-    pub fn into_buffer(mut self, pool: &mut SegmentPool) -> AudioBuffer {
+    /// An empty clip sized for `max_segments`, ready to be recorded into.
+    pub fn empty(max_segments: usize, channels: usize) -> Self {
+        Self::new(
+            AudioBuffer::new(max_segments, channels),
+            Frames::ZERO,
+            Frames::ZERO,
+            channels,
+        )
+    }
+
+    /// Clears the clip for reuse, keeping its storage.
+    pub fn reset(&mut self) {
+        self.len = Frames::ZERO;
+        self.recorded_at = Frames::ZERO;
+    }
+
+    /// Sets the loop length.
+    pub fn set_len(&mut self, len: Frames) {
+        self.len = len;
+    }
+
+    /// Sets the transport position the loop is aligned to.
+    pub fn set_recorded_at(&mut self, at: Frames) {
+        self.recorded_at = at;
+    }
+
+    /// Writes interleaved frames at `frame`, drawing segments from `pool` as needed.
+    ///
+    /// Returns how many frames were written.
+    pub fn write(&mut self, frame: u64, src: &[f32], pool: &mut SegmentPool) -> usize {
+        self.buffer.write(frame, src, pool)
+    }
+
+    /// Returns the clip's segments to `pool`, leaving it empty and reusable.
+    pub fn release_segments(&mut self, pool: &mut SegmentPool) {
         self.buffer.drain_into(pool);
-        self.buffer
     }
 
     /// Adds the loop into `dst`, starting from the phase this clip has at `position`.
@@ -277,10 +309,9 @@ mod tests {
         buffer.write(0, &ramp(10, 0), &mut pool);
         assert_eq!(pool.available(), 3);
 
-        let clip = Clip::new(buffer, Frames(10), Frames(0), CH);
-        let recovered = clip.into_buffer(&mut pool);
+        let mut clip = Clip::new(buffer, Frames(10), Frames(0), CH);
+        clip.release_segments(&mut pool);
         assert_eq!(pool.available(), 4);
-        assert_eq!(recovered.capacity(), 4 * SEGMENT_FRAMES_U64);
     }
 
     #[test]
@@ -327,9 +358,29 @@ mod tests {
             "mixing adds, so silence leaves dst alone"
         );
 
-        let mut buffer = clip.into_buffer(&mut pool);
-        assert_eq!(pool.available(), 2);
-        buffer.drain_into(&mut pool);
+        let mut clip = clip;
+        clip.release_segments(&mut pool);
+        assert_eq!(pool.available(), 2, "an unwritten clip holds no segments");
+    }
+
+    #[test]
+    fn a_reset_clip_keeps_its_storage() {
+        let mut pool = SegmentPool::new(4, CH);
+        let mut clip = Clip::empty(4, CH);
+        clip.write(0, &ramp(10, 0), &mut pool);
+        clip.set_len(Frames(10));
+        assert_eq!(pool.available(), 3);
+
+        clip.reset();
+        assert_eq!(clip.len(), Frames::ZERO);
+        assert_eq!(
+            pool.available(),
+            3,
+            "reset keeps the segments; release_segments hands them back"
+        );
+
+        clip.release_segments(&mut pool);
+        assert_eq!(pool.available(), 4);
     }
 
     #[test]
