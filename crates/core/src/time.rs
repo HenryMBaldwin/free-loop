@@ -303,20 +303,13 @@ impl BarGrid {
 
     /// Where a recording begun at `start` ends, given stop was pressed at `pressed_at`.
     ///
-    /// Rounds back if stop landed within one beat of the boundary that just passed,
-    /// forward otherwise. Result is at least one bar. `start` must be on a boundary.
+    /// Rounds back to the bar line that just passed, so a take is whatever whole bars
+    /// were finished before the press. A bar in progress is discarded rather than
+    /// completed — press after the bar you want, not during it.
+    ///
+    /// Result is at least one bar. `start` must be on a boundary.
     pub fn quantize_record_end(self, start: Frames, pressed_at: Frames) -> Frames {
-        // Clamped for 1/x meters, where one beat is the whole bar and would swallow
-        // the round-forward case entirely.
-        let grace = self.beat_offset(1).0.min(self.frames_per_bar / 2);
-
-        let floor = self.previous_boundary(pressed_at);
-        let end = if pressed_at.0 - floor.0 <= grace {
-            floor
-        } else {
-            Frames(floor.0 + self.frames_per_bar)
-        };
-
+        let end = self.previous_boundary(pressed_at);
         let min_end = Frames(start.0 + self.frames_per_bar);
         if end < min_end { min_end } else { end }
     }
@@ -416,62 +409,45 @@ mod tests {
     }
 
     #[test]
-    fn record_end_rounds_back_inside_the_grace_window() {
+    fn record_end_takes_the_bars_that_finished() {
         let g = grid(120.0);
-        // Stop pressed just after the bar 3 line: keep the two bars just played.
         let start = Frames(96_000);
+
+        // Stop pressed just after the bar 3 line: the two finished bars.
         let end = g.quantize_record_end(start, Frames(288_000 + 5_000));
         assert_eq!(end, Frames(288_000));
         assert_eq!((end - start).0 / g.frames_per_bar().0, 2);
     }
 
     #[test]
-    fn the_grace_window_is_exactly_one_beat() {
+    fn a_bar_still_in_progress_is_discarded() {
         let g = grid(120.0);
-        let beat = g.beat_offset(1);
-        assert_eq!(beat, Frames(24_000));
-
         let start = Frames(96_000);
-        // One beat past the bar 3 line still ends on bar 3.
-        assert_eq!(
-            g.quantize_record_end(start, Frames(288_000) + beat),
-            Frames(288_000)
-        );
-        // A frame later rounds forward.
-        assert_eq!(
-            g.quantize_record_end(start, Frames(288_000) + beat + Frames(1)),
-            Frames(384_000)
-        );
+
+        // Anywhere inside bar 3 gives the same answer: bars 1 and 2.
+        for into_bar in [1, 24_000, 48_000, 95_999] {
+            assert_eq!(
+                g.quantize_record_end(start, Frames(288_000 + into_bar)),
+                Frames(288_000),
+                "{into_bar} frames into the bar"
+            );
+        }
     }
 
     #[test]
-    fn record_end_rounds_forward_from_mid_bar() {
+    fn a_press_on_the_line_keeps_the_bar_that_just_ended() {
         let g = grid(120.0);
-        let start = Frames(96_000);
-        let end = g.quantize_record_end(start, Frames(288_000 + 48_000));
-        assert_eq!(end, Frames(384_000));
-        assert_eq!((end - start).0 / g.frames_per_bar().0, 3);
+        assert_eq!(
+            g.quantize_record_end(Frames(96_000), Frames(288_000)),
+            Frames(288_000)
+        );
     }
 
     #[test]
     fn record_end_is_never_shorter_than_one_bar() {
         let g = grid(120.0);
+        // Stop pressed in the very first bar, which has not finished.
         let end = g.quantize_record_end(Frames(96_000), Frames(96_100));
         assert_eq!(end, Frames(192_000));
-    }
-
-    #[test]
-    fn the_grace_window_is_clamped_for_single_beat_bars() {
-        // In 1/4 one beat is the whole bar, which would round everything back.
-        let g = BarGrid::new(
-            SampleRate::new(48_000).unwrap(),
-            Tempo::new(120.0).unwrap(),
-            TimeSignature::new(1, 4).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(g.frames_per_bar(), Frames(24_000));
-        // Three quarters through the bar: still rounds forward.
-        let end = g.quantize_record_end(Frames(0), Frames(24_000 + 18_000));
-        assert_eq!(end, Frames(48_000));
     }
 }

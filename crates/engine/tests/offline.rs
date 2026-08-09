@@ -190,10 +190,10 @@ fn the_recorded_length_is_a_whole_number_of_bars() {
     harness.run_to(BAR / 3);
     harness.command(Command::Press(pad));
     harness.run_to(BAR);
-    // Stop pressed most of the way through bar 3, so bar 3 completes.
+    // Stop pressed most of the way through bar 3, so bar 3 is discarded.
     harness.run_to(3 * BAR + 3 * BEAT);
     harness.command(Command::Press(pad));
-    harness.run_to(4 * BAR + 1);
+    harness.run_to(3 * BAR + 3 * BEAT + 1);
 
     let recorded: Vec<Frames> = harness
         .drain_events()
@@ -203,7 +203,7 @@ fn the_recorded_length_is_a_whole_number_of_bars() {
             _ => None,
         })
         .collect();
-    assert_eq!(recorded, vec![Frames(3 * BAR)]);
+    assert_eq!(recorded, vec![Frames(2 * BAR)]);
 }
 
 #[test]
