@@ -91,8 +91,8 @@ pub fn frame(session: &SessionModel, chrome: Chrome) -> LedFrame {
     }
     beat_indicator(&mut frame, chrome);
 
-    // The right-hand column is reserved for scene launch and does nothing yet, so it
-    // stays dark rather than implying it works.
+    // Rows are tracks, so the right-hand column lines up with tracks. Nothing is bound
+    // to it yet, so it stays dark rather than implying it works.
     frame
 }
 
@@ -255,8 +255,8 @@ mod tests {
     }
 
     #[test]
-    fn the_scene_column_stays_dark_while_it_does_nothing() {
+    fn the_row_column_stays_dark_while_it_does_nothing() {
         let painted = frame(&SessionModel::new(), Chrome::default());
-        assert!(SlotId::all().all(|slot| !painted.scene(slot).is_lit()));
+        assert!(TrackId::all().all(|track| !painted.row(track).is_lit()));
     }
 }

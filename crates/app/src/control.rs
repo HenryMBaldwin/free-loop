@@ -1,16 +1,32 @@
 //! The control loop's state.
 //!
 //! Sits between the surface and the engine: gestures in, commands out, reports in, a
-//! frame out. Owns no I/O, so the whole mapping is testable without a device.
+//! frame out. Owns no I/O and takes the time as an argument rather than reading a clock,
+//! so the whole mapping — hold timing included — is testable without a device.
 //!
 //! The session model here is a mirror. The engine owns the real one, because only it
 //! knows where the transport is; this copy exists to paint the grid.
 
-use free_loop_core::{Command, Event, MAX_BPM, MIN_BPM, SessionModel, Tempo};
-use free_loop_surface::{Chrome, Control, LedFrame, SurfaceEvent, paint};
+use core::time::Duration;
+
+use free_loop_core::{
+    Command, Event, MAX_BPM, MIN_BPM, SLOT_COUNT, SessionModel, SlotAddr, TRACK_COUNT, Tempo,
+};
+use free_loop_surface::{Chrome, Control, Led, LedColor, LedFrame, SurfaceEvent, paint};
 
 /// Beats per minute one press of the tempo buttons moves.
 pub const TEMPO_STEP: f64 = 1.0;
+
+/// How long a pad must be held to empty it.
+pub const CLEAR_HOLD: Duration = Duration::from_secs(1);
+
+/// How long into a hold the pad starts warning that it is about to empty.
+pub const CLEAR_WARNING: Duration = Duration::from_millis(400);
+
+/// Bit for a pad in the hold masks.
+fn bit(addr: SlotAddr) -> u64 {
+    1 << (addr.track.index() * SLOT_COUNT + addr.slot.index())
+}
 
 /// Turns gestures into commands and reports into a frame.
 #[derive(Debug)]
@@ -20,6 +36,10 @@ pub struct Controller {
     tempo: f64,
     /// Tempo to fall back to if the engine turns a change down.
     tempo_before_request: f64,
+    /// When each held pad went down.
+    held: [[Option<Duration>; SLOT_COUNT]; TRACK_COUNT],
+    /// Pads currently warning that they are about to empty.
+    warning: u64,
     commands: Vec<Command>,
     frame: LedFrame,
     dirty: bool,
@@ -40,6 +60,8 @@ impl Controller {
             chrome,
             tempo,
             tempo_before_request: tempo,
+            held: [[None; SLOT_COUNT]; TRACK_COUNT],
+            warning: 0,
             commands: Vec::new(),
             dirty: true,
         }
@@ -60,10 +82,19 @@ impl Controller {
         self.chrome.click_enabled
     }
 
-    /// Handles something the performer did.
-    pub fn on_surface(&mut self, event: SurfaceEvent) {
+    /// Handles something the performer did, at time `now` since the app started.
+    pub fn on_surface(&mut self, event: SurfaceEvent, now: Duration) {
         match event {
-            SurfaceEvent::PadPressed { addr, .. } => self.commands.push(Command::Press(addr)),
+            SurfaceEvent::PadPressed { addr, .. } => {
+                // The press acts straight away. A hold that follows overrides whatever it
+                // queued, so waiting to find out which gesture this is would only push
+                // every launch past the bar line it was meant for.
+                self.commands.push(Command::Press(addr));
+                self.held[addr.track.index()][addr.slot.index()] = Some(now);
+            }
+            SurfaceEvent::PadReleased { addr } => {
+                self.held[addr.track.index()][addr.slot.index()] = None;
+            }
             SurfaceEvent::ControlPressed(Control::ClickToggle) => {
                 self.chrome.click_enabled = !self.chrome.click_enabled;
                 self.commands
@@ -74,11 +105,39 @@ impl Controller {
             SurfaceEvent::ControlPressed(Control::TempoUp) => self.nudge_tempo(TEMPO_STEP),
             SurfaceEvent::ControlPressed(Control::StopAll) => self.commands.push(Command::StopAll),
 
-            // Releases carry nothing yet, and the scene column is reserved.
-            SurfaceEvent::PadReleased { .. }
-            | SurfaceEvent::ControlReleased(_)
-            | SurfaceEvent::ScenePressed { .. }
-            | SurfaceEvent::SceneReleased { .. } => {}
+            // The right-hand column is reserved.
+            SurfaceEvent::ControlReleased(_)
+            | SurfaceEvent::RowPressed { .. }
+            | SurfaceEvent::RowReleased { .. } => {}
+        }
+    }
+
+    /// Advances anything that depends on time passing rather than on an event.
+    ///
+    /// Call every pass of the control loop, or a hold will only complete when something
+    /// else happens to arrive.
+    pub fn tick(&mut self, now: Duration) {
+        let mut warning = 0;
+
+        for addr in SlotAddr::all() {
+            let Some(since) = self.held[addr.track.index()][addr.slot.index()] else {
+                continue;
+            };
+            let holding = now.saturating_sub(since);
+
+            if holding >= CLEAR_HOLD {
+                self.commands.push(Command::Clear(addr));
+                // Forget the hold rather than wait for the release, so it fires once and
+                // a pad still physically down does not empty again every pass.
+                self.held[addr.track.index()][addr.slot.index()] = None;
+            } else if holding >= CLEAR_WARNING {
+                warning |= bit(addr);
+            }
+        }
+
+        if warning != self.warning {
+            self.warning = warning;
+            self.dirty = true;
         }
     }
 
@@ -134,7 +193,18 @@ impl Controller {
         if !self.dirty {
             return None;
         }
+
         self.frame = paint::frame(&self.session, self.chrome);
+        // Painted over the session colour so a hold about to empty a pad says so before
+        // the audio disappears.
+        if self.warning != 0 {
+            for addr in SlotAddr::all() {
+                if self.warning & bit(addr) != 0 {
+                    self.frame.set_pad(addr, Led::flash(LedColor::White));
+                }
+            }
+        }
+
         self.dirty = false;
         Some(&self.frame)
     }
@@ -151,8 +221,9 @@ mod tests {
     )]
 
     use super::*;
-    use free_loop_core::{ClipId, Frames, SlotAddr, SlotId, SlotState, TrackId};
-    use free_loop_surface::{Led, LedColor};
+    use free_loop_core::{ClipId, Frames, SlotId, SlotState, TrackId};
+
+    const T0: Duration = Duration::ZERO;
 
     fn addr(track: u8, slot: u8) -> SlotAddr {
         SlotAddr::new(TrackId::new(track).unwrap(), SlotId::new(slot).unwrap())
@@ -166,31 +237,44 @@ mod tests {
         controller.drain_commands().collect()
     }
 
+    fn millis(value: u64) -> Duration {
+        Duration::from_millis(value)
+    }
+
+    fn press(controller: &mut Controller, pad: SlotAddr, at: Duration) {
+        controller.on_surface(
+            SurfaceEvent::PadPressed {
+                addr: pad,
+                velocity: 100,
+            },
+            at,
+        );
+    }
+
     #[test]
     fn a_pad_press_becomes_a_press_command() {
         let mut controller = controller();
-        controller.on_surface(SurfaceEvent::PadPressed {
-            addr: addr(2, 3),
-            velocity: 100,
-        });
+        press(&mut controller, addr(2, 3), T0);
         assert_eq!(commands(&mut controller), vec![Command::Press(addr(2, 3))]);
     }
 
     #[test]
-    fn releases_and_scenes_do_nothing_yet() {
+    fn the_right_hand_column_does_nothing_yet() {
         let mut controller = controller();
-        controller.on_surface(SurfaceEvent::PadReleased { addr: addr(0, 0) });
-        controller.on_surface(SurfaceEvent::ScenePressed {
-            slot: SlotId::new(0).unwrap(),
-        });
-        controller.on_surface(SurfaceEvent::ControlReleased(Control::StopAll));
+        controller.on_surface(
+            SurfaceEvent::RowPressed {
+                track: TrackId::new(0).unwrap(),
+            },
+            T0,
+        );
+        controller.on_surface(SurfaceEvent::ControlReleased(Control::StopAll), T0);
         assert!(commands(&mut controller).is_empty());
     }
 
     #[test]
     fn commands_are_taken_once() {
         let mut controller = controller();
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::StopAll));
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::StopAll), T0);
         assert_eq!(commands(&mut controller), vec![Command::StopAll]);
         assert!(commands(&mut controller).is_empty());
     }
@@ -200,14 +284,14 @@ mod tests {
         let mut controller = controller();
         assert!(controller.click_enabled());
 
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::ClickToggle));
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::ClickToggle), T0);
         assert!(!controller.click_enabled());
         assert_eq!(
             commands(&mut controller),
             vec![Command::SetClickEnabled(false)]
         );
 
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::ClickToggle));
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::ClickToggle), T0);
         assert!(controller.click_enabled());
         assert_eq!(
             commands(&mut controller),
@@ -218,11 +302,11 @@ mod tests {
     #[test]
     fn tempo_moves_by_one_beat_per_press() {
         let mut controller = controller();
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp));
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
         assert_eq!(controller.tempo(), 121.0);
 
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoDown));
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoDown));
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoDown), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoDown), T0);
         assert_eq!(controller.tempo(), 119.0);
         assert_eq!(commands(&mut controller).len(), 3);
     }
@@ -230,7 +314,7 @@ mod tests {
     #[test]
     fn tempo_stops_at_the_supported_range() {
         let mut controller = Controller::new(MAX_BPM, 4, true);
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp));
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
         assert_eq!(controller.tempo(), MAX_BPM);
         assert!(
             commands(&mut controller).is_empty(),
@@ -238,14 +322,14 @@ mod tests {
         );
 
         let mut controller = Controller::new(MIN_BPM, 4, true);
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoDown));
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoDown), T0);
         assert_eq!(controller.tempo(), MIN_BPM);
     }
 
     #[test]
     fn a_refused_tempo_change_is_rolled_back() {
         let mut controller = controller();
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp));
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
         assert_eq!(controller.tempo(), 121.0, "assumed to land");
 
         controller.on_engine(Event::TempoRejected);
@@ -319,5 +403,102 @@ mod tests {
 
         let frame = controller.take_frame().unwrap();
         assert_eq!(frame.pad(addr(0, 0)), Led::solid(LedColor::Red));
+    }
+
+    #[test]
+    fn holding_a_pad_empties_it() {
+        let mut controller = controller();
+        let pad = addr(1, 1);
+
+        press(&mut controller, pad, T0);
+        assert_eq!(commands(&mut controller), vec![Command::Press(pad)]);
+
+        controller.tick(millis(999));
+        assert!(commands(&mut controller).is_empty(), "not held long enough");
+
+        controller.tick(millis(1_000));
+        assert_eq!(commands(&mut controller), vec![Command::Clear(pad)]);
+    }
+
+    #[test]
+    fn a_completed_hold_fires_once() {
+        let mut controller = controller();
+        let pad = addr(1, 1);
+
+        press(&mut controller, pad, T0);
+        controller.tick(millis(1_000));
+        assert_eq!(commands(&mut controller).len(), 2, "press and clear");
+
+        // Still physically down.
+        controller.tick(millis(1_500));
+        controller.tick(millis(3_000));
+        assert!(
+            commands(&mut controller).is_empty(),
+            "a pad still held must not empty again"
+        );
+    }
+
+    #[test]
+    fn releasing_early_leaves_the_clip_alone() {
+        let mut controller = controller();
+        let pad = addr(1, 1);
+
+        press(&mut controller, pad, T0);
+        commands(&mut controller);
+        controller.tick(millis(500));
+        controller.on_surface(SurfaceEvent::PadReleased { addr: pad }, millis(600));
+
+        controller.tick(millis(2_000));
+        assert!(commands(&mut controller).is_empty());
+    }
+
+    #[test]
+    fn a_hold_warns_before_it_empties() {
+        let mut controller = controller();
+        let pad = addr(4, 6);
+        controller.on_engine(Event::SlotChanged {
+            addr: pad,
+            state: SlotState::Playing { clip: ClipId(0) },
+        });
+        controller.take_frame();
+
+        press(&mut controller, pad, T0);
+        controller.tick(millis(399));
+        assert!(controller.take_frame().is_none(), "too early to warn");
+
+        controller.tick(millis(400));
+        let frame = controller.take_frame().expect("the warning appeared");
+        assert_eq!(frame.pad(pad), Led::flash(LedColor::White));
+        assert_ne!(frame.pad(addr(4, 5)), Led::flash(LedColor::White));
+    }
+
+    #[test]
+    fn the_warning_clears_when_the_hold_does() {
+        let mut controller = controller();
+        let pad = addr(0, 0);
+
+        press(&mut controller, pad, T0);
+        controller.tick(millis(500));
+        controller.take_frame();
+
+        controller.on_surface(SurfaceEvent::PadReleased { addr: pad }, millis(600));
+        controller.tick(millis(600));
+        let frame = controller.take_frame().expect("the warning went away");
+        assert_ne!(frame.pad(pad), Led::flash(LedColor::White));
+    }
+
+    #[test]
+    fn holds_are_tracked_per_pad() {
+        let mut controller = controller();
+        let held = addr(2, 2);
+        let tapped = addr(3, 3);
+
+        press(&mut controller, held, T0);
+        press(&mut controller, tapped, millis(100));
+        controller.on_surface(SurfaceEvent::PadReleased { addr: tapped }, millis(200));
+        commands(&mut controller);
+
+        controller.tick(millis(1_000));
+        assert_eq!(commands(&mut controller), vec![Command::Clear(held)]);
     }
 }

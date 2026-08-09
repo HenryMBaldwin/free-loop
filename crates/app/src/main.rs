@@ -14,7 +14,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use std::error::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use free_loop::{Config, Controller, config};
 use free_loop_audio::open;
@@ -97,15 +97,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     })?;
 
     let mut events: Vec<SurfaceEvent> = Vec::new();
+    let started = Instant::now();
+
     while running.load(Ordering::Relaxed) {
+        let now = started.elapsed();
+
         events.clear();
         surface.poll(&mut events);
         for event in events.drain(..) {
             if log_surface {
                 println!("surface: {event:?}");
             }
-            controller.on_surface(event);
+            controller.on_surface(event, now);
         }
+        controller.tick(now);
 
         for command in controller.drain_commands() {
             if io.send(command).is_err() {

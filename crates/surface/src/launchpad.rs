@@ -1,8 +1,8 @@
 //! The Launchpad X.
 //!
-//! Layout: columns are tracks, rows are slots, matching Session view. The right-hand
-//! column is reserved for scene launch. The top row carries the transport controls on
-//! the left and the beat indicator on the right.
+//! Layout: rows are tracks, columns are slots. The right-hand column therefore lines up
+//! with tracks and is reserved for per-track actions. The top row carries the transport
+//! controls on the left and the beat indicator on the right.
 //!
 //! The device must be in Programmer layout for the full 9×9 grid to address, which
 //! [`LaunchpadX::connect`] sets.
@@ -34,17 +34,17 @@ fn convert(error: launchy::MidiError) -> SurfaceError {
 /// What a physical button stands for.
 enum Target {
     Pad(SlotAddr),
-    Scene(SlotId),
+    Row(TrackId),
     Control(Control),
 }
 
 fn target(button: x::Button) -> Option<Target> {
     match button {
         // Launchy counts the right-hand column as grid column 8.
-        x::Button::GridButton { x: 8, y } => SlotId::new(y).ok().map(Target::Scene),
+        x::Button::GridButton { x: 8, y } => TrackId::new(y).ok().map(Target::Row),
         x::Button::GridButton { x, y } => {
-            let track = TrackId::new(x).ok()?;
-            let slot = SlotId::new(y).ok()?;
+            let track = TrackId::new(y).ok()?;
+            let slot = SlotId::new(x).ok()?;
             Some(Target::Pad(SlotAddr::new(track, slot)))
         }
         x::Button::ControlButton { index } => {
@@ -55,15 +55,15 @@ fn target(button: x::Button) -> Option<Target> {
 
 fn pad_button(addr: SlotAddr) -> x::Button {
     x::Button::GridButton {
-        x: u8::try_from(addr.track.index()).unwrap_or(0),
-        y: u8::try_from(addr.slot.index()).unwrap_or(0),
+        x: u8::try_from(addr.slot.index()).unwrap_or(0),
+        y: u8::try_from(addr.track.index()).unwrap_or(0),
     }
 }
 
-fn scene_button(slot: SlotId) -> x::Button {
+fn row_button(track: TrackId) -> x::Button {
     x::Button::GridButton {
         x: 8,
-        y: u8::try_from(slot.index()).unwrap_or(0),
+        y: u8::try_from(track.index()).unwrap_or(0),
     }
 }
 
@@ -156,10 +156,10 @@ impl LaunchpadX {
                 self.changes.push((pad_button(addr), style(led)));
             }
         }
-        for slot in SlotId::all() {
-            let led = frame.scene(slot);
-            if led != self.shown.scene(slot) {
-                self.changes.push((scene_button(slot), style(led)));
+        for track in TrackId::all() {
+            let led = frame.row(track);
+            if led != self.shown.row(track) {
+                self.changes.push((row_button(track), style(led)));
             }
         }
         for index in 0..CONTROL_COUNT {
@@ -187,8 +187,8 @@ impl ControlSurface for LaunchpadX {
             events.push(match (target, pressed) {
                 (Target::Pad(addr), true) => SurfaceEvent::PadPressed { addr, velocity },
                 (Target::Pad(addr), false) => SurfaceEvent::PadReleased { addr },
-                (Target::Scene(slot), true) => SurfaceEvent::ScenePressed { slot },
-                (Target::Scene(slot), false) => SurfaceEvent::SceneReleased { slot },
+                (Target::Row(track), true) => SurfaceEvent::RowPressed { track },
+                (Target::Row(track), false) => SurfaceEvent::RowReleased { track },
                 (Target::Control(control), true) => SurfaceEvent::ControlPressed(control),
                 (Target::Control(control), false) => SurfaceEvent::ControlReleased(control),
             });
@@ -228,9 +228,9 @@ mod tests {
     }
 
     #[test]
-    fn pads_map_columns_to_tracks_and_rows_to_slots() {
-        // Track 3, slot 5 is the fourth column, sixth row from the top.
-        assert_eq!(pad_button(addr(3, 5)), x::Button::GridButton { x: 3, y: 5 });
+    fn pads_map_rows_to_tracks_and_columns_to_slots() {
+        // Track 3, slot 5 is the sixth column of the fourth row from the top.
+        assert_eq!(pad_button(addr(3, 5)), x::Button::GridButton { x: 5, y: 3 });
     }
 
     #[test]
@@ -244,11 +244,11 @@ mod tests {
     }
 
     #[test]
-    fn the_right_hand_column_is_a_scene_not_a_pad() {
-        for expected in SlotId::all() {
-            match target(scene_button(expected)) {
-                Some(Target::Scene(actual)) => assert_eq!(actual, expected),
-                _ => panic!("{expected:?} did not come back as a scene"),
+    fn the_right_hand_column_is_a_row_not_a_pad() {
+        for expected in TrackId::all() {
+            match target(row_button(expected)) {
+                Some(Target::Row(actual)) => assert_eq!(actual, expected),
+                _ => panic!("{expected:?} did not come back as a row"),
             }
         }
     }

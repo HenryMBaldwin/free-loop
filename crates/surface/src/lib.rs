@@ -1,8 +1,8 @@
 //! Control surface for Free Loop.
 //!
-//! Columns are tracks and rows are slots, matching Session view. The right-hand column
-//! is reserved for scene launch. The top row carries the transport controls on the left
-//! and the beat indicator on the right.
+//! Rows are tracks and columns are slots, so a track's eight loops sit side by side. The
+//! right-hand column lines up with tracks and is reserved for per-track actions. The top
+//! row carries the transport controls on the left and the beat indicator on the right.
 //!
 //! - [`led`] — what to show, in device-neutral terms.
 //! - [`paint`] — turning session state into a frame. All the colour policy lives here.
