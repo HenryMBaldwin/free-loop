@@ -29,6 +29,11 @@ fn bit(addr: SlotAddr) -> u64 {
 }
 
 /// Turns gestures into commands and reports into a frame.
+///
+/// A pad's action lands on release rather than on press, because a press cannot be told
+/// from the start of a hold. That costs the length of the tap in latency, which only
+/// matters if the tap straddles the bar line it was aimed at — acting on press instead
+/// would mean a hold arms and starts recording before the clear kills it.
 #[derive(Debug)]
 pub struct Controller {
     session: SessionModel,
@@ -86,14 +91,18 @@ impl Controller {
     pub fn on_surface(&mut self, event: SurfaceEvent, now: Duration) {
         match event {
             SurfaceEvent::PadPressed { addr, .. } => {
-                // The press acts straight away. A hold that follows overrides whatever it
-                // queued, so waiting to find out which gesture this is would only push
-                // every launch past the bar line it was meant for.
-                self.commands.push(Command::Press(addr));
+                // Nothing yet: which gesture this is depends on how long it lasts.
                 self.held[addr.track.index()][addr.slot.index()] = Some(now);
             }
             SurfaceEvent::PadReleased { addr } => {
-                self.held[addr.track.index()][addr.slot.index()] = None;
+                // A hold that completed already emptied the pad and took its entry, so
+                // only a release that still has one is a tap.
+                if self.held[addr.track.index()][addr.slot.index()]
+                    .take()
+                    .is_some()
+                {
+                    self.commands.push(Command::Press(addr));
+                }
             }
             SurfaceEvent::ControlPressed(Control::ClickToggle) => {
                 self.chrome.click_enabled = !self.chrome.click_enabled;
@@ -252,10 +261,18 @@ mod tests {
     }
 
     #[test]
-    fn a_pad_press_becomes_a_press_command() {
+    fn a_tap_acts_on_release() {
         let mut controller = controller();
-        press(&mut controller, addr(2, 3), T0);
-        assert_eq!(commands(&mut controller), vec![Command::Press(addr(2, 3))]);
+        let pad = addr(2, 3);
+
+        press(&mut controller, pad, T0);
+        assert!(
+            commands(&mut controller).is_empty(),
+            "a press could still turn into a hold"
+        );
+
+        controller.on_surface(SurfaceEvent::PadReleased { addr: pad }, millis(80));
+        assert_eq!(commands(&mut controller), vec![Command::Press(pad)]);
     }
 
     #[test]
@@ -406,50 +423,54 @@ mod tests {
     }
 
     #[test]
-    fn holding_a_pad_empties_it() {
+    fn holding_a_pad_empties_it_without_acting_first() {
         let mut controller = controller();
         let pad = addr(1, 1);
 
         press(&mut controller, pad, T0);
-        assert_eq!(commands(&mut controller), vec![Command::Press(pad)]);
-
         controller.tick(millis(999));
         assert!(commands(&mut controller).is_empty(), "not held long enough");
 
         controller.tick(millis(1_000));
-        assert_eq!(commands(&mut controller), vec![Command::Clear(pad)]);
+        assert_eq!(
+            commands(&mut controller),
+            vec![Command::Clear(pad)],
+            "a hold must not arm or launch on its way to emptying the pad"
+        );
     }
 
     #[test]
-    fn a_completed_hold_fires_once() {
+    fn releasing_after_a_hold_completes_does_nothing_more() {
         let mut controller = controller();
         let pad = addr(1, 1);
 
         press(&mut controller, pad, T0);
         controller.tick(millis(1_000));
-        assert_eq!(commands(&mut controller).len(), 2, "press and clear");
+        assert_eq!(commands(&mut controller), vec![Command::Clear(pad)]);
 
-        // Still physically down.
         controller.tick(millis(1_500));
-        controller.tick(millis(3_000));
+        controller.on_surface(SurfaceEvent::PadReleased { addr: pad }, millis(2_000));
         assert!(
             commands(&mut controller).is_empty(),
-            "a pad still held must not empty again"
+            "the hold was already spent"
         );
     }
 
     #[test]
-    fn releasing_early_leaves_the_clip_alone() {
+    fn releasing_early_acts_as_a_press_and_leaves_the_clip_alone() {
         let mut controller = controller();
         let pad = addr(1, 1);
 
         press(&mut controller, pad, T0);
-        commands(&mut controller);
         controller.tick(millis(500));
         controller.on_surface(SurfaceEvent::PadReleased { addr: pad }, millis(600));
+        assert_eq!(commands(&mut controller), vec![Command::Press(pad)]);
 
         controller.tick(millis(2_000));
-        assert!(commands(&mut controller).is_empty());
+        assert!(
+            commands(&mut controller).is_empty(),
+            "the hold was abandoned"
+        );
     }
 
     #[test]
@@ -496,7 +517,7 @@ mod tests {
         press(&mut controller, held, T0);
         press(&mut controller, tapped, millis(100));
         controller.on_surface(SurfaceEvent::PadReleased { addr: tapped }, millis(200));
-        commands(&mut controller);
+        assert_eq!(commands(&mut controller), vec![Command::Press(tapped)]);
 
         controller.tick(millis(1_000));
         assert_eq!(commands(&mut controller), vec![Command::Clear(held)]);
