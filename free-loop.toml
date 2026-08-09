@@ -1,0 +1,32 @@
+# Free Loop configuration. Every setting shown at its default.
+
+[audio]
+# Substrings of the device names. Omit to use the system default devices.
+input_device = "Scarlett"
+output_device = "Scarlett"
+
+# Omit to take the device's preference.
+# sample_rate = 48000
+# buffer_frames = 256
+# channels = 2
+
+# The device input channel your instrument is in. Omit for a stereo source.
+# A Scarlett Solo's instrument jack is channel 1.
+input_channel = 1
+
+# Blocks of capture buffered before playback starts consuming. More is safer, later.
+cushion_blocks = 2
+
+[transport]
+tempo = 120.0
+beats_per_bar = 4
+beat_unit = 4
+max_bars = 32
+
+[engine]
+# About 1.4 s of stereo audio each at 48 kHz.
+segment_pool = 64
+
+[click]
+enabled = true
+level = 0.35
