@@ -4,13 +4,18 @@
 //! bars, then loop it for eight more with the click running.
 //!
 //! ```text
-//! cargo run -p free-loop-audio --example smoke -- [device name substring]
+//! cargo run -p free-loop-audio --example smoke -- [device substring] [input channel]
 //! ```
+//!
+//! Naming an input channel spreads that one device channel across both sides. An
+//! interface reports every input whether or not anything is plugged in, so a single
+//! instrument needs to say which channel it is on — a Scarlett Solo's instrument jack
+//! is channel 1.
 
 use std::error::Error;
 use std::time::{Duration, Instant};
 
-use free_loop_audio::{AudioConfig, list_devices, open};
+use free_loop_audio::{AudioConfig, InputSource, list_devices, open};
 use free_loop_core::{Command, Event, SampleRate, SlotAddr, SlotId, Tempo, TimeSignature, TrackId};
 use free_loop_engine::{ClickConfig, Engine, EngineConfig};
 
@@ -18,6 +23,10 @@ const TEMPO: f64 = 120.0;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let device = std::env::args().nth(1);
+    let input_source = match std::env::args().nth(2) {
+        Some(channel) => InputSource::Mono(channel.parse()?),
+        None => InputSource::Direct,
+    };
 
     let devices = list_devices()?;
     println!("inputs:");
@@ -32,6 +41,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let config = AudioConfig {
         input_device: device.clone(),
         output_device: device,
+        input_source,
         ..AudioConfig::new()
     };
 
