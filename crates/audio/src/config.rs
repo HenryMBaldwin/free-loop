@@ -91,6 +91,27 @@ fn format_rank(format: SampleFormat) -> Option<u8> {
     }
 }
 
+/// How far a rate misses.
+///
+/// With no request, ranking by position in [`PREFERRED_RATES`] is what actually makes
+/// the preference bite: `CoreAudio` reports each discrete rate as its own single-rate
+/// range, so preferring 48 kHz *within* a range never gets the chance to choose between
+/// them. Rates outside the list rank below every rate in it, closest to the top
+/// preference first.
+fn rate_penalty(rate: u32, wanted: Option<u32>) -> u32 {
+    if let Some(wanted) = wanted {
+        return wanted.abs_diff(rate);
+    }
+    if let Some(index) = PREFERRED_RATES
+        .iter()
+        .position(|&preferred| preferred == rate)
+    {
+        return u32::try_from(index).unwrap_or(u32::MAX);
+    }
+    let tier = u32::try_from(PREFERRED_RATES.len()).unwrap_or(u32::MAX);
+    tier.saturating_add(rate.abs_diff(PREFERRED_RATES[0]))
+}
+
 /// The rate to use from a range, given what was asked for.
 fn pick_rate(range: &SupportedStreamConfigRange, wanted: Option<u32>) -> u32 {
     let min = range.min_sample_rate();
@@ -133,10 +154,9 @@ pub fn choose(
         .filter_map(|range| Some((range, format_rank(range.sample_format())?)))
         .map(|(range, rank)| {
             let rate = pick_rate(range, wanted_rate);
-            let rate_penalty = wanted_rate.map_or(0, |wanted| wanted.abs_diff(rate));
             let key = (
                 channel_penalty(range.channels(), want_channels),
-                rate_penalty,
+                rate_penalty(rate, wanted_rate),
                 rank,
                 range.channels(),
             );
@@ -228,6 +248,52 @@ mod tests {
 
         let odd = [range(2, 32_000, 32_000, SampleFormat::F32)];
         assert_eq!(choose(&odd, None, None).unwrap().sample_rate(), 32_000);
+    }
+
+    /// `CoreAudio` reports one range per discrete rate, so the preference has to work
+    /// across ranges rather than inside one. Found on a Scarlett Solo, which was landing
+    /// on 44.1 kHz purely because that range was enumerated first.
+    #[test]
+    fn single_rate_ranges_still_prefer_48k() {
+        let ranges = [
+            range(2, 44_100, 44_100, SampleFormat::F32),
+            range(2, 48_000, 48_000, SampleFormat::F32),
+        ];
+        assert_eq!(choose(&ranges, None, None).unwrap().sample_rate(), 48_000);
+
+        // Order must not matter.
+        let reversed = [ranges[1], ranges[0]];
+        assert_eq!(choose(&reversed, None, None).unwrap().sample_rate(), 48_000);
+    }
+
+    #[test]
+    fn an_unlisted_rate_loses_to_a_preferred_one() {
+        let ranges = [
+            range(2, 96_000, 96_000, SampleFormat::F32),
+            range(2, 44_100, 44_100, SampleFormat::F32),
+        ];
+        assert_eq!(choose(&ranges, None, None).unwrap().sample_rate(), 44_100);
+    }
+
+    #[test]
+    fn among_unlisted_rates_the_closest_to_48k_wins() {
+        let ranges = [
+            range(2, 192_000, 192_000, SampleFormat::F32),
+            range(2, 32_000, 32_000, SampleFormat::F32),
+        ];
+        assert_eq!(choose(&ranges, None, None).unwrap().sample_rate(), 32_000);
+    }
+
+    #[test]
+    fn an_explicit_request_still_outranks_the_preference() {
+        let ranges = [
+            range(2, 48_000, 48_000, SampleFormat::F32),
+            range(2, 44_100, 44_100, SampleFormat::F32),
+        ];
+        assert_eq!(
+            choose(&ranges, Some(44_100), None).unwrap().sample_rate(),
+            44_100
+        );
     }
 
     #[test]
