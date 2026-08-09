@@ -1,16 +1,19 @@
 //! Opening devices and running the engine from the output callback.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, FromSample, Host, SampleFormat, SizedSample, Stream, StreamConfig};
-use free_loop_core::{Command, Event};
+use cpal::{
+    Device, FromSample, Host, InputCallbackInfo, OutputCallbackInfo, SampleFormat, SizedSample,
+    Stream, StreamConfig,
+};
+use free_loop_core::{Command, Event, Frames};
 use free_loop_engine::{Engine, EventSink};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::config::{
-    ASSUMED_BLOCK_FRAMES, AudioConfig, Negotiated, buffer_size, choose, cushion_frames,
+    ASSUMED_BLOCK_FRAMES, AudioConfig, Negotiated, buffer_size, choose, cushion_frames, frames_in,
 };
 use crate::error::AudioError;
 use crate::ring::{CaptureReader, CaptureWriter, ChannelMap, MAX_BLOCK_FRAMES, capture_ring};
@@ -145,6 +148,7 @@ pub fn open(config: &AudioConfig) -> Result<Opened, AudioError> {
         input_source: config.input_source,
         buffer_frames: config.buffer_frames,
         cushion_frames: cushion_frames(config.buffer_frames, config.cushion_blocks),
+        capture_offset: config.capture_offset,
     };
 
     Ok(Opened {
@@ -195,7 +199,15 @@ impl Opened {
         let (event_tx, events) = RingBuffer::new(EVENT_SLOTS);
 
         let errors = Arc::new(AtomicU64::new(0));
+        let input_latency = Arc::new(AtomicU32::new(0));
+        let capture_offset = Arc::new(AtomicU32::new(0));
+
         let callback = Render {
+            input_latency: Arc::clone(&input_latency),
+            capture_offset: Arc::clone(&capture_offset),
+            cushion: u32::try_from(negotiated.cushion_frames).unwrap_or(u32::MAX),
+            offset_override: negotiated.capture_offset,
+            sample_rate: negotiated.sample_rate,
             engine,
             reader,
             commands: command_rx,
@@ -212,6 +224,8 @@ impl Opened {
             negotiated.input_format,
             writer,
             Arc::clone(&errors),
+            Arc::clone(&input_latency),
+            negotiated.sample_rate,
         )?;
         let output = build_output(
             &self.output,
@@ -231,6 +245,7 @@ impl Opened {
             events,
             negotiated,
             errors,
+            capture_offset,
         })
     }
 }
@@ -246,12 +261,14 @@ pub struct AudioIo {
     events: Consumer<Event>,
     negotiated: Negotiated,
     errors: Arc<AtomicU64>,
+    capture_offset: Arc<AtomicU32>,
 }
 
 impl core::fmt::Debug for AudioIo {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("AudioIo")
             .field("negotiated", &self.negotiated)
+            .field("capture_offset_frames", &self.capture_offset_frames())
             .field("device_errors", &self.device_errors())
             .finish_non_exhaustive()
     }
@@ -280,6 +297,14 @@ impl AudioIo {
         while let Ok(event) = self.events.pop() {
             handler(event);
         }
+    }
+
+    /// The round-trip latency currently being compensated for, in frames.
+    ///
+    /// Zero until the first output callback has run, since it comes from what the driver
+    /// reports rather than from a guess.
+    pub fn capture_offset_frames(&self) -> u32 {
+        self.capture_offset.load(Ordering::Relaxed)
     }
 
     /// Errors either device has reported since the streams started.
@@ -326,6 +351,13 @@ impl EventSink for RingSink<'_> {
 
 /// The output callback's state.
 struct Render {
+    input_latency: Arc<AtomicU32>,
+    capture_offset: Arc<AtomicU32>,
+    /// Frames of capture buffered before this callback started consuming.
+    cushion: u32,
+    /// A latency the caller pinned, used instead of measuring.
+    offset_override: Option<u32>,
+    sample_rate: u32,
     engine: Engine,
     reader: CaptureReader,
     commands: Consumer<Command>,
@@ -337,6 +369,22 @@ struct Render {
 }
 
 impl Render {
+    /// Tells the engine how far behind captured audio is running.
+    ///
+    /// The driver reports how long its own buffering adds on each side; the cushion
+    /// between the two callbacks is ours and known exactly. Together they are the round
+    /// trip between playing a note and the engine seeing it.
+    fn update_capture_offset(&mut self, output_latency: core::time::Duration) {
+        let total = self.offset_override.unwrap_or_else(|| {
+            frames_in(output_latency, self.sample_rate)
+                .saturating_add(self.input_latency.load(Ordering::Relaxed))
+                .saturating_add(self.cushion)
+        });
+
+        self.capture_offset.store(total, Ordering::Relaxed);
+        self.engine.set_capture_offset(Frames(u64::from(total)));
+    }
+
     fn fill<T: FromSample<f32> + Copy>(&mut self, out: &mut [T]) {
         let Self {
             engine,
@@ -347,6 +395,7 @@ impl Render {
             rendered,
             channels,
             dropped_events,
+            ..
         } = self;
 
         let mut sink = RingSink {
@@ -383,12 +432,22 @@ fn build_input(
     format: SampleFormat,
     writer: CaptureWriter,
     errors: Arc<AtomicU64>,
+    latency: Arc<AtomicU32>,
+    sample_rate: u32,
 ) -> Result<Stream, AudioError> {
     match format {
-        SampleFormat::F32 => input_stream::<f32>(device, config, writer, errors),
-        SampleFormat::I16 => input_stream::<i16>(device, config, writer, errors),
-        SampleFormat::I32 => input_stream::<i32>(device, config, writer, errors),
-        SampleFormat::U16 => input_stream::<u16>(device, config, writer, errors),
+        SampleFormat::F32 => {
+            input_stream::<f32>(device, config, writer, errors, latency, sample_rate)
+        }
+        SampleFormat::I16 => {
+            input_stream::<i16>(device, config, writer, errors, latency, sample_rate)
+        }
+        SampleFormat::I32 => {
+            input_stream::<i32>(device, config, writer, errors, latency, sample_rate)
+        }
+        SampleFormat::U16 => {
+            input_stream::<u16>(device, config, writer, errors, latency, sample_rate)
+        }
         other => Err(AudioError::UnsupportedFormat(other)),
     }
 }
@@ -398,6 +457,8 @@ fn input_stream<T>(
     config: StreamConfig,
     mut writer: CaptureWriter,
     errors: Arc<AtomicU64>,
+    latency: Arc<AtomicU32>,
+    sample_rate: u32,
 ) -> Result<Stream, AudioError>
 where
     T: SizedSample,
@@ -405,7 +466,12 @@ where
 {
     let stream = device.build_input_stream::<T, _, _>(
         config,
-        move |data, _| {
+        move |data, info: &InputCallbackInfo| {
+            // How long the driver held these frames between the ADC and this callback.
+            let stamp = info.timestamp();
+            let held = stamp.callback.saturating_duration_since(stamp.capture);
+            latency.store(frames_in(held, sample_rate), Ordering::Relaxed);
+
             writer.write(data);
         },
         move |_| {
@@ -443,7 +509,11 @@ where
 {
     let stream = device.build_output_stream::<T, _, _>(
         config,
-        move |data, _| {
+        move |data, info: &OutputCallbackInfo| {
+            // How long the driver will hold these frames between this callback and the DAC.
+            let stamp = info.timestamp();
+            render.update_capture_offset(stamp.playback.saturating_duration_since(stamp.callback));
+
             render.fill(data);
         },
         move |_| {
