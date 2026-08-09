@@ -39,6 +39,11 @@ pub struct AudioConfig {
     /// This is the fixed delay between the input and output callbacks, and it is the
     /// part of the round trip the software controls.
     pub cushion_blocks: u32,
+    /// Round-trip latency to compensate for, in frames.
+    ///
+    /// `None` measures it from the driver's own callback timestamps, which is right for
+    /// almost every rig. Set it only to override a driver that reports badly.
+    pub capture_offset: Option<u32>,
 }
 
 impl AudioConfig {
@@ -70,6 +75,8 @@ pub struct Negotiated {
     pub buffer_frames: Option<u32>,
     /// Frames of capture buffered before the output starts consuming.
     pub cushion_frames: usize,
+    /// Round-trip latency the caller pinned, if any.
+    pub capture_offset: Option<u32>,
 }
 
 impl Negotiated {
@@ -77,6 +84,12 @@ impl Negotiated {
     pub fn added_latency_frames(&self) -> usize {
         self.cushion_frames
     }
+}
+
+/// Converts a duration reported by a driver into frames.
+pub fn frames_in(duration: core::time::Duration, sample_rate: u32) -> u32 {
+    let frames = duration.as_nanos() * u128::from(sample_rate) / 1_000_000_000;
+    u32::try_from(frames).unwrap_or(u32::MAX)
 }
 
 /// Formats this crate can convert, best first. Anything else is refused rather than
@@ -343,6 +356,17 @@ mod tests {
             buffer_size(&SupportedBufferSize::Unknown, Some(256)),
             BufferSize::Default
         );
+    }
+
+    #[test]
+    fn driver_durations_become_frames() {
+        use core::time::Duration;
+
+        assert_eq!(frames_in(Duration::ZERO, 48_000), 0);
+        assert_eq!(frames_in(Duration::from_millis(10), 48_000), 480);
+        assert_eq!(frames_in(Duration::from_secs(1), 44_100), 44_100);
+        // Sub-frame durations round down rather than inventing a frame.
+        assert_eq!(frames_in(Duration::from_nanos(1), 48_000), 0);
     }
 
     #[test]
