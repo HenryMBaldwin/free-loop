@@ -516,6 +516,39 @@ fn short_input_is_reported_and_recorded_as_silence() {
 }
 
 #[test]
+fn changing_tempo_keeps_the_click_running_evenly() {
+    use free_loop_core::Tempo;
+
+    let mut harness = Harness::new(128);
+    let slow = harness.engine.grid();
+
+    // Half way between beats, the worst place for a jump to show.
+    harness.run_to(BEAT + BEAT / 2);
+    harness.command(Command::SetTempo(Tempo::new(180.0).unwrap()));
+    let fast = harness.engine.grid();
+
+    // The transport moved with the grid rather than staying put.
+    assert_eq!(fast.beat_of(harness.engine.position()), (0, 1));
+    assert_ne!(slow.frames_per_bar(), fast.frames_per_bar());
+
+    harness.drain_events();
+    let out = harness.run_to(harness.position() + fast.frames_per_bar().0);
+
+    let beats: Vec<(u64, u32)> = harness
+        .drain_events()
+        .iter()
+        .filter_map(|e| match e {
+            Event::Beat { bar, beat } => Some((*bar, *beat)),
+            _ => None,
+        })
+        .collect();
+
+    // Beat 1 already fired before the change and must not fire again on the new grid.
+    assert_eq!(beats, vec![(0, 2), (0, 3), (1, 0), (1, 1)]);
+    assert!(!out.is_empty());
+}
+
+#[test]
 fn the_tempo_locks_once_a_clip_exists() {
     use free_loop_core::Tempo;
 

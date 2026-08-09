@@ -301,6 +301,20 @@ impl BarGrid {
         }
     }
 
+    /// The position under `target` that sits at the same musical place as `position`
+    /// does under `self`.
+    ///
+    /// A tempo change rebuilds the grid, so the same frame count lands on a different
+    /// bar and beat. Moving the transport with the grid keeps the bar number and the
+    /// fraction through it, so the next beat arrives one new-tempo interval later
+    /// instead of the click jumping.
+    pub fn rebase_onto(self, position: Frames, target: Self) -> Frames {
+        let bar = self.bar_of(position);
+        let into_bar = position.0 - self.bar_start(bar).0;
+        let scaled = into_bar * target.frames_per_bar / self.frames_per_bar;
+        Frames(target.bar_start(bar).0 + scaled)
+    }
+
     /// Where a recording begun at `start` ends, given stop was pressed at `pressed_at`.
     ///
     /// Rounds back to the bar line that just passed, so a take is whatever whole bars
@@ -406,6 +420,41 @@ mod tests {
         assert_eq!(g.next_beat_boundary(Frames(0)), Frames(24_000));
         assert_eq!(g.next_beat_boundary(Frames(23_999)), Frames(24_000));
         assert_eq!(g.next_beat_boundary(Frames(72_001)), Frames(96_000));
+    }
+
+    #[test]
+    fn rebasing_keeps_the_bar_and_the_fraction_through_it() {
+        let slow = grid(60.0);
+        let fast = grid(120.0);
+
+        // Half way through bar 3 at 60 bpm.
+        let position = slow.bar_start(3) + Frames(slow.frames_per_bar().0 / 2);
+        let moved = slow.rebase_onto(position, fast);
+
+        assert_eq!(fast.bar_of(moved), 3);
+        assert_eq!(
+            moved,
+            fast.bar_start(3) + Frames(fast.frames_per_bar().0 / 2)
+        );
+    }
+
+    #[test]
+    fn rebasing_holds_the_beat_within_the_bar() {
+        let from = grid(120.0);
+        let to = grid(140.0);
+
+        for beat in 0..4 {
+            let position = from.bar_start(2) + from.beat_offset(beat);
+            let moved = from.rebase_onto(position, to);
+            assert_eq!(to.beat_of(moved), (2, beat), "beat {beat}");
+        }
+    }
+
+    #[test]
+    fn rebasing_onto_the_same_grid_changes_nothing() {
+        let g = grid(123.0);
+        let position = Frames(1_234_567);
+        assert_eq!(g.rebase_onto(position, g), position);
     }
 
     #[test]
