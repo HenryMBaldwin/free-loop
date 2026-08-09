@@ -82,7 +82,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // would race the boundary it is meant to wait for.
     let bar = Duration::from_secs_f64(60.0 / TEMPO * 4.0);
     let arm_at = bar * (COUNT_IN_BARS - 1) + bar / 2;
-    let stop_at = bar * (COUNT_IN_BARS + RECORD_BARS - 1) + bar / 2;
+    // Stop rounds back to the line that just passed, so the press has to land after the
+    // last bar wanted rather than inside it.
+    let stop_at = bar * (COUNT_IN_BARS + RECORD_BARS) + bar / 4;
     let script = [
         (arm_at, Command::Press(pad)),
         (stop_at, Command::Press(pad)),

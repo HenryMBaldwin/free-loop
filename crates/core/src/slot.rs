@@ -477,7 +477,7 @@ mod tests {
             }
         );
 
-        // Half a beat after the bar 7 line, inside the grace window.
+        // Just past the bar 7 line, so bars 3 to 6 are what finished.
         let late = 7 * BAR + 12_000;
         let (state, fx) = step(state, SlotInput::Press, &ctx(late));
         assert_eq!(
@@ -512,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn stop_pressed_mid_bar_lets_the_bar_finish() {
+    fn stop_pressed_mid_bar_discards_that_bar() {
         let started_at = Frames(BAR);
         let recording = SlotState::Recording {
             started_at,
@@ -523,7 +523,7 @@ mod tests {
             state,
             SlotState::Recording {
                 started_at,
-                ends_at: Some(Frames(4 * BAR)),
+                ends_at: Some(Frames(3 * BAR)),
             }
         );
     }
