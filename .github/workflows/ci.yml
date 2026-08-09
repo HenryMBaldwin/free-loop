@@ -19,6 +19,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # cpal reaches ALSA on Linux and alsa-sys needs the headers to build.
+      - name: Install ALSA
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - name: Lint Rust
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
@@ -27,6 +30,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Install ALSA
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - name: Test Rust
         run: cargo test --workspace
 
