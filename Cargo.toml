@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/engine", "crates/audio"]
+members = ["crates/core", "crates/engine", "crates/audio", "crates/surface"]
 resolver = "3"
 
 [workspace.package]
@@ -14,6 +14,7 @@ categories = ["multimedia::audio"]
 cpal = "0.18"
 free-loop-core = { path = "crates/core", version = "0.1.0" }
 free-loop-engine = { path = "crates/engine", version = "0.1.0" }
+launchy = { git = "https://github.com/HenryMBaldwin/launchy", rev = "9fc6d1be35bd78cca5ad165742a622fc70e8f46d" }
 rtrb = "0.3"
 thiserror = "2"
 
