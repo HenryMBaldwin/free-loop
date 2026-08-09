@@ -412,6 +412,7 @@ dependencies = [
 [[package]]
 name = "launchy"
 version = "0.4.1"
+source = "git+https://github.com/HenryMBaldwin/launchy?rev=c88be0f13197e8cf098e99f9e766335488e83329#c88be0f13197e8cf098e99f9e766335488e83329"
 dependencies = [
  "log",
  "midir",
