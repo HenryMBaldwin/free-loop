@@ -210,6 +210,8 @@ pub struct Engine {
     channels: usize,
     max_bars: u32,
     paused: bool,
+    /// The last position a beat fired on, so a grid change cannot fire it twice.
+    last_boundary: Option<Frames>,
     capture_offset: Frames,
     sample_rate: SampleRate,
     time_signature: TimeSignature,
@@ -265,6 +267,7 @@ impl Engine {
             channels: config.channels,
             max_bars: config.max_bars,
             paused: false,
+            last_boundary: None,
             capture_offset: config.capture_offset,
             sample_rate: config.sample_rate,
             time_signature: config.time_signature,
@@ -379,10 +382,15 @@ impl Engine {
             sink.event(Event::TempoRejected);
             return;
         }
-        match BarGrid::new(self.sample_rate, tempo, self.time_signature) {
-            Ok(grid) => self.grid = grid,
-            Err(_) => sink.event(Event::TempoRejected),
-        }
+        let Ok(grid) = BarGrid::new(self.sample_rate, tempo, self.time_signature) else {
+            sink.event(Event::TempoRejected);
+            return;
+        };
+
+        // Move the transport with the grid, or the same frame count would land on a
+        // different beat and the click would jump instead of changing interval.
+        self.position = self.grid.rebase_onto(self.position, grid);
+        self.grid = grid;
     }
 
     /// Renders one block.
@@ -425,9 +433,10 @@ impl Engine {
     fn reach_boundary(&mut self, sink: &mut impl EventSink) {
         let (bar, beat) = self.grid.beat_of(self.position);
         let on_beat = self.grid.bar_start(bar) + self.grid.beat_offset(beat) == self.position;
-        if !on_beat {
+        if !on_beat || self.last_boundary == Some(self.position) {
             return;
         }
+        self.last_boundary = Some(self.position);
 
         if beat == 0 {
             sink.event(Event::Bar { bar });
