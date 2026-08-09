@@ -103,8 +103,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         io.drain_events(|event| match event {
             Event::Bar { bar } => {
+                // Counted from one, the way the click is counted.
                 let marker = if recording { "   <<< PLAY NOW" } else { "" };
-                println!("bar {bar}{marker}");
+                println!("bar {}{marker}", bar + 1);
             }
             Event::SlotChanged { state, .. } => match state {
                 SlotState::Recording { .. } => {
