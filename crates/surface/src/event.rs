@@ -1,41 +1,50 @@
 //! What the performer did.
 
-use free_loop_core::{SlotAddr, TrackId};
+use free_loop_core::SlotAddr;
 
 /// Top-row buttons that do something.
 ///
-/// The remaining top-row buttons are the beat indicator and are output only, so a press
-/// on one produces no event.
+/// The beat indicator shares the first four buttons rather than owning any. The tempo
+/// controls are momentary nudges with no state to display, so lighting them with the
+/// beat costs nothing, and that is what leaves room for everything else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Control {
-    /// Turn the click on or off.
-    ClickToggle,
-    /// Slow down.
-    TempoDown,
     /// Speed up.
     TempoUp,
+    /// Slow down.
+    TempoDown,
+    /// Open the session picker to load.
+    LoadSession,
+    /// Turn the click on or off.
+    ClickToggle,
     /// Stop everything.
     StopAll,
+    /// Open the session picker to save.
+    SaveSession,
 }
 
 impl Control {
     /// The top-row button this control sits on.
     pub fn index(self) -> usize {
         match self {
-            Self::ClickToggle => 0,
+            Self::TempoUp => 0,
             Self::TempoDown => 1,
-            Self::TempoUp => 2,
-            Self::StopAll => 3,
+            Self::LoadSession => 4,
+            Self::ClickToggle => 5,
+            Self::StopAll => 6,
+            Self::SaveSession => 7,
         }
     }
 
     /// The control on a top-row button, if that button carries one.
     pub fn from_index(index: usize) -> Option<Self> {
         match index {
-            0 => Some(Self::ClickToggle),
+            0 => Some(Self::TempoUp),
             1 => Some(Self::TempoDown),
-            2 => Some(Self::TempoUp),
-            3 => Some(Self::StopAll),
+            4 => Some(Self::LoadSession),
+            5 => Some(Self::ClickToggle),
+            6 => Some(Self::StopAll),
+            7 => Some(Self::SaveSession),
             _ => None,
         }
     }
@@ -43,10 +52,12 @@ impl Control {
     /// Every control, in top-row order.
     pub fn all() -> impl Iterator<Item = Self> {
         [
-            Self::ClickToggle,
-            Self::TempoDown,
             Self::TempoUp,
+            Self::TempoDown,
+            Self::LoadSession,
+            Self::ClickToggle,
             Self::StopAll,
+            Self::SaveSession,
         ]
         .into_iter()
     }
@@ -69,15 +80,16 @@ pub enum SurfaceEvent {
     },
     /// A right-hand column button was pressed.
     ///
-    /// Rows are tracks, so these are per-track rather than per-scene.
-    RowPressed {
-        /// Which track's row.
-        track: TrackId,
+    /// The 8×8 grid is the only grid; this column is a plain strip of eight buttons with
+    /// their own printed labels, not an extension of the tracks.
+    SidePressed {
+        /// Which button, top to bottom.
+        index: u8,
     },
     /// A right-hand column button was released.
-    RowReleased {
-        /// Which track's row.
-        track: TrackId,
+    SideReleased {
+        /// Which button, top to bottom.
+        index: u8,
     },
     /// A top-row control was pressed.
     ControlPressed(Control),
@@ -97,10 +109,17 @@ mod tests {
     }
 
     #[test]
-    fn the_beat_indicator_buttons_carry_no_control() {
-        for index in 4..8 {
+    fn the_spare_buttons_carry_no_control() {
+        for index in [2, 3, 99] {
             assert_eq!(Control::from_index(index), None);
         }
-        assert_eq!(Control::from_index(99), None);
+    }
+
+    #[test]
+    fn no_two_controls_share_a_button() {
+        let mut seen = std::collections::HashSet::new();
+        for control in Control::all() {
+            assert!(seen.insert(control.index()), "{control:?} collides");
+        }
     }
 }

@@ -82,6 +82,17 @@ impl Harness {
         out
     }
 
+    /// Runs a fixed number of frames whether or not the transport advances.
+    fn run_frames(&mut self, frames: usize) -> Vec<f32> {
+        let start = self.position();
+        let input: Vec<f32> = (0..frames * CHANNELS)
+            .map(|i| signal(start + (i / CHANNELS) as u64, i % CHANNELS))
+            .collect();
+        let mut out = vec![0.0; frames * CHANNELS];
+        self.engine.process(&input, &mut out, &mut self.events);
+        out
+    }
+
     fn drain_events(&mut self) -> Vec<Event> {
         core::mem::take(&mut self.events)
     }
@@ -223,6 +234,87 @@ fn without_compensation_playback_sits_late_by_the_round_trip() {
     // The uncompensated render is the compensated one delayed by the round trip.
     let shift = usize::try_from(LATENCY).unwrap() * CHANNELS;
     assert_eq!(without[shift..], with[..with.len() - shift]);
+}
+
+#[test]
+fn pausing_freezes_the_transport_and_silences_it() {
+    let mut harness = Harness::with_click(128);
+    let pad = addr(0, 0);
+    record(&mut harness, pad, 1_000, 1);
+
+    let at = harness.position();
+    harness.command(Command::SetPaused(true));
+
+    let out = harness.run_frames(512);
+    assert_eq!(
+        harness.position(),
+        at,
+        "the transport must hold its position"
+    );
+    assert!(out.iter().all(|s| *s == 0.0), "nothing sounds while frozen");
+    assert!(harness.engine.is_paused());
+}
+
+#[test]
+fn resuming_picks_up_the_phase_it_stopped_on() {
+    let pad = addr(0, 0);
+
+    // Render a stretch straight through.
+    let mut straight = Harness::new(128);
+    let (start, end) = record(&mut straight, pad, 0, 1);
+    let from = straight.position();
+    let reference = straight.run_to(from + 2 * BAR);
+
+    // The same stretch with a freeze part way through.
+    let mut paused = Harness::new(128);
+    record(&mut paused, pad, 0, 1);
+    let first = paused.run_to(from + BAR);
+    paused.command(Command::SetPaused(true));
+    paused.run_frames(4_096);
+    paused.command(Command::SetPaused(false));
+    let second = paused.run_to(from + 2 * BAR);
+
+    let mut rejoined = first;
+    rejoined.extend(second);
+    assert_eq!(
+        rejoined, reference,
+        "a freeze must not shift the loop's phase"
+    );
+    assert_eq!(end - start, BAR);
+}
+
+#[test]
+fn pausing_discards_a_take_in_progress() {
+    let mut harness = Harness::new(128);
+    let pad = addr(0, 0);
+
+    harness.command(Command::Press(pad));
+    harness.run_to(2 * BAR);
+    assert!(harness.engine.state(pad).is_recording());
+
+    harness.command(Command::SetPaused(true));
+    assert_eq!(
+        harness.engine.state(pad),
+        SlotState::Empty,
+        "a take spanning a freeze would splice two moments together"
+    );
+}
+
+#[test]
+fn pausing_leaves_playing_clips_ready_to_resume() {
+    let mut harness = Harness::new(128);
+    let pad = addr(0, 0);
+    record(&mut harness, pad, 0, 1);
+
+    harness.command(Command::SetPaused(true));
+    assert_eq!(
+        harness.engine.state(pad),
+        SlotState::Playing { clip: ClipId(0) }
+    );
+
+    harness.command(Command::SetPaused(false));
+    let out = harness.run_frames(256);
+    assert!(out.iter().any(|s| *s != 0.0), "playback resumes");
 }
 
 #[test]

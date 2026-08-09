@@ -2,14 +2,16 @@
 //!
 //! Device-neutral: a colour and a style, with each device deciding how to produce them.
 
-use free_loop_core::{SLOT_COUNT, SlotAddr, TRACK_COUNT, TrackId};
+use free_loop_core::{SLOT_COUNT, SlotAddr, TRACK_COUNT};
 
 /// Buttons in the top row.
 pub const CONTROL_COUNT: usize = 8;
-/// Top-row buttons given over to the beat indicator.
+/// Top-row buttons the beat indicator shares.
 pub const BEAT_LEDS: usize = 4;
 /// Index of the first beat indicator button.
-pub const FIRST_BEAT_LED: usize = 4;
+pub const FIRST_BEAT_LED: usize = 0;
+/// Buttons in the right-hand column.
+pub const SIDE_COUNT: usize = 8;
 
 /// Colours the looper uses.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -115,7 +117,7 @@ impl Led {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LedFrame {
     pads: [[Led; SLOT_COUNT]; TRACK_COUNT],
-    rows: [Led; TRACK_COUNT],
+    sides: [Led; SIDE_COUNT],
     controls: [Led; CONTROL_COUNT],
 }
 
@@ -124,7 +126,7 @@ impl LedFrame {
     pub fn new() -> Self {
         Self {
             pads: [[Led::OFF; SLOT_COUNT]; TRACK_COUNT],
-            rows: [Led::OFF; TRACK_COUNT],
+            sides: [Led::OFF; SIDE_COUNT],
             controls: [Led::OFF; CONTROL_COUNT],
         }
     }
@@ -139,14 +141,16 @@ impl LedFrame {
         self.pads[addr.track.index()][addr.slot.index()] = led;
     }
 
-    /// The right-hand column button for a track's row.
-    pub fn row(&self, track: TrackId) -> Led {
-        self.rows[track.index()]
+    /// A right-hand column button. Out-of-range indices read as unlit.
+    pub fn side(&self, index: usize) -> Led {
+        self.sides.get(index).copied().unwrap_or(Led::OFF)
     }
 
-    /// Sets the right-hand column button for a track's row.
-    pub fn set_row(&mut self, track: TrackId, led: Led) {
-        self.rows[track.index()] = led;
+    /// Sets a right-hand column button. Out-of-range indices are ignored.
+    pub fn set_side(&mut self, index: usize, led: Led) {
+        if let Some(slot) = self.sides.get_mut(index) {
+            *slot = led;
+        }
     }
 
     /// A button in the top row. Out-of-range indices read as unlit.
@@ -173,7 +177,7 @@ mod tests {
     #![allow(clippy::unwrap_used, reason = "tests should fail loudly")]
 
     use super::*;
-    use free_loop_core::SlotId;
+    use free_loop_core::{SlotId, TrackId};
 
     fn addr(track: u8, slot: u8) -> SlotAddr {
         SlotAddr::new(TrackId::new(track).unwrap(), SlotId::new(slot).unwrap())
@@ -183,7 +187,7 @@ mod tests {
     fn a_new_frame_is_dark() {
         let frame = LedFrame::new();
         assert!(SlotAddr::all().all(|a| !frame.pad(a).is_lit()));
-        assert!(TrackId::all().all(|t| !frame.row(t).is_lit()));
+        assert!((0..SIDE_COUNT).all(|i| !frame.side(i).is_lit()));
         assert!((0..CONTROL_COUNT).all(|i| !frame.control(i).is_lit()));
     }
 

@@ -99,6 +99,18 @@ impl SessionModel {
         }
     }
 
+    /// Discards any recording in progress, leaving everything else alone.
+    ///
+    /// Used when the transport freezes: a take that spans a pause would splice two
+    /// moments together, which is never what was played.
+    pub fn cancel_recordings(&mut self, ctx: &Ctx, sink: &mut impl FnMut(SlotAddr, Effect)) {
+        for addr in SlotAddr::all() {
+            if self.state(addr).is_recording() {
+                self.apply(addr, SlotInput::Stop, ctx, sink);
+            }
+        }
+    }
+
     /// Stops everything immediately. Recordings in progress are discarded.
     pub fn stop_all(&mut self, ctx: &Ctx, sink: &mut impl FnMut(SlotAddr, Effect)) {
         for addr in SlotAddr::all() {
@@ -338,6 +350,30 @@ mod tests {
             SlotState::Stopped { clip: ClipId(0) }
         );
         assert_eq!(model.state(addr(2, 0)), SlotState::Empty);
+    }
+
+    #[test]
+    fn cancelling_recordings_leaves_playing_clips_alone() {
+        let mut model = SessionModel::new();
+        record(&mut model, addr(0, 0), 1, 1, 0);
+        model.press(addr(1, 0), &ctx(3 * BAR, 1), &mut ignore);
+        model.advance(&ctx(3 * BAR, 1), &mut ignore);
+        assert!(model.state(addr(1, 0)).is_recording());
+
+        let mut cancelled = 0;
+        model.cancel_recordings(&ctx(3 * BAR + 500, 1), &mut |_, effect| {
+            if effect == Effect::CancelCapture {
+                cancelled += 1;
+            }
+        });
+
+        assert_eq!(cancelled, 1);
+        assert_eq!(model.state(addr(1, 0)), SlotState::Empty);
+        assert_eq!(
+            model.state(addr(0, 0)),
+            SlotState::Playing { clip: ClipId(0) },
+            "a playing clip must survive the freeze"
+        );
     }
 
     #[test]

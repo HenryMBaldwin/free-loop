@@ -12,7 +12,9 @@ use core::time::Duration;
 use free_loop_core::{
     Command, Event, MAX_BPM, MIN_BPM, SLOT_COUNT, SessionModel, SlotAddr, TRACK_COUNT, Tempo,
 };
-use free_loop_surface::{Chrome, Control, Led, LedColor, LedFrame, SurfaceEvent, paint};
+use free_loop_surface::{
+    Chrome, Control, Led, LedColor, LedFrame, PAUSE_SIDE, SurfaceEvent, paint,
+};
 
 /// Beats per minute one press of the tempo buttons moves.
 pub const TEMPO_STEP: f64 = 1.0;
@@ -57,6 +59,7 @@ impl Controller {
             beat: 0,
             beats_per_bar,
             click_enabled,
+            paused: false,
         };
         let session = SessionModel::new();
         Self {
@@ -87,6 +90,11 @@ impl Controller {
         self.chrome.click_enabled
     }
 
+    /// Whether the transport is believed to be frozen.
+    pub fn paused(&self) -> bool {
+        self.chrome.paused
+    }
+
     /// Handles something the performer did, at time `now` since the app started.
     pub fn on_surface(&mut self, event: SurfaceEvent, now: Duration) {
         match event {
@@ -113,11 +121,17 @@ impl Controller {
             SurfaceEvent::ControlPressed(Control::TempoDown) => self.nudge_tempo(-TEMPO_STEP),
             SurfaceEvent::ControlPressed(Control::TempoUp) => self.nudge_tempo(TEMPO_STEP),
             SurfaceEvent::ControlPressed(Control::StopAll) => self.commands.push(Command::StopAll),
+            SurfaceEvent::SidePressed { index } if usize::from(index) == PAUSE_SIDE => {
+                self.chrome.paused = !self.chrome.paused;
+                self.commands.push(Command::SetPaused(self.chrome.paused));
+                self.dirty = true;
+            }
 
-            // The right-hand column is reserved.
-            SurfaceEvent::ControlReleased(_)
-            | SurfaceEvent::RowPressed { .. }
-            | SurfaceEvent::RowReleased { .. } => {}
+            // Sessions are not wired up yet, and the other side buttons are unbound.
+            SurfaceEvent::ControlPressed(Control::LoadSession | Control::SaveSession)
+            | SurfaceEvent::ControlReleased(_)
+            | SurfaceEvent::SidePressed { .. }
+            | SurfaceEvent::SideReleased { .. } => {}
         }
     }
 
@@ -276,15 +290,54 @@ mod tests {
     }
 
     #[test]
-    fn the_right_hand_column_does_nothing_yet() {
+    fn the_unbound_side_buttons_do_nothing() {
         let mut controller = controller();
+        for index in 0..8 {
+            if usize::from(index) == PAUSE_SIDE {
+                continue;
+            }
+            controller.on_surface(SurfaceEvent::SidePressed { index }, T0);
+        }
+        controller.on_surface(SurfaceEvent::ControlReleased(Control::StopAll), T0);
+        assert!(commands(&mut controller).is_empty());
+    }
+
+    #[test]
+    fn the_transport_button_toggles_the_freeze() {
+        let mut controller = controller();
+        let button = u8::try_from(PAUSE_SIDE).unwrap();
+        assert!(!controller.paused());
+
+        controller.on_surface(SurfaceEvent::SidePressed { index: button }, T0);
+        assert!(controller.paused());
+        assert_eq!(commands(&mut controller), vec![Command::SetPaused(true)]);
+
+        controller.on_surface(SurfaceEvent::SidePressed { index: button }, T0);
+        assert!(!controller.paused());
+        assert_eq!(commands(&mut controller), vec![Command::SetPaused(false)]);
+    }
+
+    #[test]
+    fn the_transport_button_shows_the_freeze() {
+        let mut controller = controller();
+        controller.take_frame();
+        let running = controller.frame.side(PAUSE_SIDE);
+
         controller.on_surface(
-            SurfaceEvent::RowPressed {
-                track: TrackId::new(0).unwrap(),
+            SurfaceEvent::SidePressed {
+                index: u8::try_from(PAUSE_SIDE).unwrap(),
             },
             T0,
         );
-        controller.on_surface(SurfaceEvent::ControlReleased(Control::StopAll), T0);
+        let frozen = controller.take_frame().expect("the button changed");
+        assert_ne!(frozen.side(PAUSE_SIDE), running);
+    }
+
+    #[test]
+    fn the_session_buttons_are_not_wired_up_yet() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
         assert!(commands(&mut controller).is_empty());
     }
 
@@ -403,8 +456,13 @@ mod tests {
         controller.on_engine(Event::Beat { bar: 3, beat: 2 });
 
         let frame = controller.take_frame().unwrap();
-        assert!(frame.control(FIRST_BEAT_LED + 2).is_lit());
-        assert!(!frame.control(FIRST_BEAT_LED).is_lit());
+        assert_eq!(
+            frame.control(FIRST_BEAT_LED + 2),
+            Led::solid(LedColor::Blue),
+            "the current beat"
+        );
+        // Beat one shares the tempo up button, which keeps its own colour meanwhile.
+        assert_ne!(frame.control(FIRST_BEAT_LED), Led::solid(LedColor::White));
     }
 
     #[test]

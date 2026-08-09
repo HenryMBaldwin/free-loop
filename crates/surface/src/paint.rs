@@ -17,6 +17,8 @@ pub struct Chrome {
     pub beats_per_bar: u32,
     /// Whether the click is sounding.
     pub click_enabled: bool,
+    /// Whether the transport is frozen.
+    pub paused: bool,
 }
 
 impl Default for Chrome {
@@ -25,6 +27,7 @@ impl Default for Chrome {
             beat: 0,
             beats_per_bar: 4,
             click_enabled: true,
+            paused: false,
         }
     }
 }
@@ -57,26 +60,43 @@ pub fn control(control: Control, chrome: Chrome) -> Led {
         }
         Control::TempoDown | Control::TempoUp => Led::dim(LedColor::Blue),
         Control::StopAll => Led::dim(LedColor::Red),
+        Control::LoadSession | Control::SaveSession => Led::dim(LedColor::White),
     }
 }
 
-/// Paints the beat indicator into `frame`.
+/// The right-hand column button that runs the transport.
+pub const PAUSE_SIDE: usize = 4;
+
+/// How the transport button looks.
+pub fn pause_button(chrome: Chrome) -> Led {
+    if chrome.paused {
+        Led::flash(LedColor::Amber)
+    } else {
+        Led::dim(LedColor::Green)
+    }
+}
+
+/// Paints the beat indicator over whatever the shared buttons already show.
 ///
 /// One button lit at a time, beat one in white so the bar line is unmistakable at a
-/// glance. Meters wider than the indicator show only the beats that fit.
+/// glance. Only the current beat is overwritten, so the buttons it shares keep their own
+/// colour the rest of the time. Meters wider than the indicator show only the beats that
+/// fit.
 pub fn beat_indicator(frame: &mut LedFrame, chrome: Chrome) {
     let shown = usize::try_from(chrome.beats_per_bar)
         .unwrap_or(BEAT_LEDS)
         .min(BEAT_LEDS);
-    for offset in 0..shown {
-        let lit = u32::try_from(offset).unwrap_or(u32::MAX) == chrome.beat;
-        let led = match (lit, offset) {
-            (false, _) => Led::OFF,
-            (true, 0) => Led::solid(LedColor::White),
-            (true, _) => Led::solid(LedColor::Blue),
-        };
-        frame.set_control(FIRST_BEAT_LED + offset, led);
+    let beat = usize::try_from(chrome.beat).unwrap_or(usize::MAX);
+    if beat >= shown {
+        return;
     }
+
+    let led = if beat == 0 {
+        Led::solid(LedColor::White)
+    } else {
+        Led::solid(LedColor::Blue)
+    };
+    frame.set_control(FIRST_BEAT_LED + beat, led);
 }
 
 /// Paints the whole surface.
@@ -90,9 +110,10 @@ pub fn frame(session: &SessionModel, chrome: Chrome) -> LedFrame {
         frame.set_control(button.index(), control(button, chrome));
     }
     beat_indicator(&mut frame, chrome);
+    frame.set_side(PAUSE_SIDE, pause_button(chrome));
 
-    // Rows are tracks, so the right-hand column lines up with tracks. Nothing is bound
-    // to it yet, so it stays dark rather than implying it works.
+    // The other side buttons are unbound, so they stay dark rather than implying they
+    // work.
     frame
 }
 
@@ -186,6 +207,55 @@ mod tests {
     }
 
     #[test]
+    fn the_buttons_the_indicator_shares_keep_their_own_colour() {
+        let painted = frame(&SessionModel::new(), Chrome::default());
+
+        // Beat one is on the tempo up button, so that one is white.
+        assert_eq!(
+            painted.control(Control::TempoUp.index()).color,
+            LedColor::White
+        );
+        // Tempo down is not the current beat, so it still shows its own state.
+        assert_eq!(
+            painted.control(Control::TempoDown.index()),
+            control(Control::TempoDown, Chrome::default())
+        );
+    }
+
+    #[test]
+    fn every_control_keeps_its_colour_when_no_beat_is_on_it() {
+        let chrome = Chrome {
+            beat: 3,
+            ..Chrome::default()
+        };
+        let painted = frame(&SessionModel::new(), chrome);
+
+        for button in Control::all().filter(|c| c.index() != 3) {
+            assert_eq!(
+                painted.control(button.index()),
+                control(button, chrome),
+                "{button:?} was overwritten"
+            );
+        }
+    }
+
+    #[test]
+    fn the_transport_button_shows_whether_it_is_frozen() {
+        let running = frame(&SessionModel::new(), Chrome::default());
+        let frozen = frame(
+            &SessionModel::new(),
+            Chrome {
+                paused: true,
+                ..Chrome::default()
+            },
+        );
+
+        assert_ne!(running.side(PAUSE_SIDE), frozen.side(PAUSE_SIDE));
+        assert!(running.side(PAUSE_SIDE).is_lit());
+        assert!(frozen.side(PAUSE_SIDE).is_lit());
+    }
+
+    #[test]
     fn beat_one_is_a_different_colour() {
         let mut frame = LedFrame::new();
         beat_indicator(&mut frame, Chrome::default());
@@ -255,8 +325,14 @@ mod tests {
     }
 
     #[test]
-    fn the_row_column_stays_dark_while_it_does_nothing() {
+    fn the_unbound_side_buttons_stay_dark() {
+        use crate::led::SIDE_COUNT;
+
         let painted = frame(&SessionModel::new(), Chrome::default());
-        assert!(TrackId::all().all(|track| !painted.row(track).is_lit()));
+        assert!(
+            (0..SIDE_COUNT)
+                .filter(|i| *i != PAUSE_SIDE)
+                .all(|i| !painted.side(i).is_lit())
+        );
     }
 }

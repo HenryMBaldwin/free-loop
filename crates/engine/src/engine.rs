@@ -209,6 +209,7 @@ pub struct Engine {
     click: Click,
     channels: usize,
     max_bars: u32,
+    paused: bool,
     capture_offset: Frames,
     sample_rate: SampleRate,
     time_signature: TimeSignature,
@@ -263,6 +264,7 @@ impl Engine {
             click: Click::new(config.click, config.sample_rate),
             channels: config.channels,
             max_bars: config.max_bars,
+            paused: false,
             capture_offset: config.capture_offset,
             sample_rate: config.sample_rate,
             time_signature: config.time_signature,
@@ -287,6 +289,11 @@ impl Engine {
     /// Segments still available for recording.
     pub fn segments_available(&self) -> usize {
         self.audio.segments.available()
+    }
+
+    /// Whether the transport is frozen.
+    pub fn is_paused(&self) -> bool {
+        self.paused
     }
 
     /// The round-trip latency being compensated for.
@@ -339,6 +346,7 @@ impl Engine {
             Command::StopAll => self.with_session(|session, audio| {
                 session.stop_all(&ctx, &mut |a, e| audio.apply(a, e, sink));
             }),
+            Command::SetPaused(paused) => self.set_paused(paused, sink),
             Command::SetClickEnabled(enabled) => self.click.set_enabled(enabled),
             Command::SetClickLevel(level) => self.click.set_level(level),
             Command::SetTempo(tempo) => self.set_tempo(tempo, sink),
@@ -350,6 +358,20 @@ impl Engine {
     fn with_session(&mut self, apply: impl FnOnce(&mut SessionModel, &mut Audio)) {
         let Self { session, audio, .. } = self;
         apply(session, audio);
+    }
+
+    fn set_paused(&mut self, paused: bool, sink: &mut impl EventSink) {
+        if paused == self.paused {
+            return;
+        }
+        self.paused = paused;
+
+        if paused {
+            let ctx = self.ctx();
+            self.with_session(|session, audio| {
+                session.cancel_recordings(&ctx, &mut |a, e| audio.apply(a, e, sink));
+            });
+        }
     }
 
     fn set_tempo(&mut self, tempo: Tempo, sink: &mut impl EventSink) {
@@ -370,6 +392,13 @@ impl Engine {
     /// an [`Event::Xrun`] is reported.
     pub fn process(&mut self, input: &[f32], output: &mut [f32], sink: &mut impl EventSink) {
         output.fill(0.0);
+
+        // A frozen transport holds its position, so nothing sounds, nothing is captured
+        // and no bar line arrives. Input is dropped rather than buffered: it belongs to a
+        // moment the transport is not at.
+        if self.paused {
+            return;
+        }
 
         let frames = output.len() / self.channels;
         let input_frames = input.len() / self.channels;

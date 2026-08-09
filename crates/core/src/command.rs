@@ -14,6 +14,11 @@ pub enum Command {
     StopTrack(TrackId),
     /// Stop everything, immediately. Recordings in progress are discarded.
     StopAll,
+    /// Freeze or resume the transport.
+    ///
+    /// A frozen transport holds its position, so loops keep their phase and pick up
+    /// exactly where they stopped.
+    SetPaused(bool),
     /// Turn the click on or off.
     SetClickEnabled(bool),
     /// Set the click level, `0.0..=1.0`.
