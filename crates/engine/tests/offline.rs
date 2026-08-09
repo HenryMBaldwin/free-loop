@@ -1,0 +1,391 @@
+//! Drives the engine with no audio device.
+//!
+//! The input signal is a function of absolute transport position, so a recorded clip can
+//! be checked against the exact frames that were fed in while it was capturing.
+
+#![allow(
+    clippy::unwrap_used,
+    clippy::float_cmp,
+    clippy::cast_precision_loss,
+    reason = "tests should fail loudly, and compare exact sample values"
+)]
+
+use free_loop_core::{ClipId, Command, Event, Frames, SlotAddr, SlotId, SlotState, TrackId};
+use free_loop_engine::{ClickConfig, Engine, EngineConfig};
+
+const CHANNELS: usize = 2;
+const BAR: u64 = 96_000; // 120 bpm, 4/4, 48 kHz
+const BEAT: u64 = BAR / 4;
+
+/// A distinct value per frame and channel. The 977 modulus is coprime with the bar
+/// length, so a phase error cannot coincidentally produce matching samples.
+fn signal(frame: u64, channel: usize) -> f32 {
+    (frame % 977) as f32 + channel as f32 * 0.25
+}
+
+struct Harness {
+    engine: Engine,
+    events: Vec<Event>,
+    block: usize,
+}
+
+impl Harness {
+    fn new(block: usize) -> Self {
+        let mut config = EngineConfig::stereo_48k().unwrap();
+        config.segment_pool = 12;
+        config.click = ClickConfig {
+            enabled: false,
+            level: 0.0,
+        };
+        Self {
+            engine: Engine::new(config).unwrap(),
+            events: Vec::new(),
+            block,
+        }
+    }
+
+    fn with_click(block: usize) -> Self {
+        let mut harness = Self::new(block);
+        harness.command(Command::SetClickEnabled(true));
+        harness.command(Command::SetClickLevel(0.5));
+        harness
+    }
+
+    fn position(&self) -> u64 {
+        self.engine.position().0
+    }
+
+    fn command(&mut self, command: Command) {
+        self.engine.handle(command, &mut self.events);
+    }
+
+    /// Runs until the transport reaches `target`, returning the rendered output.
+    fn run_to(&mut self, target: u64) -> Vec<f32> {
+        let mut out = Vec::new();
+        while self.position() < target {
+            let start = self.position();
+            let frames = usize::try_from(target - start).unwrap().min(self.block);
+
+            let input: Vec<f32> = (0..frames * CHANNELS)
+                .map(|i| signal(start + (i / CHANNELS) as u64, i % CHANNELS))
+                .collect();
+            let mut block = vec![0.0; frames * CHANNELS];
+
+            self.engine.process(&input, &mut block, &mut self.events);
+            out.extend_from_slice(&block);
+        }
+        out
+    }
+
+    fn drain_events(&mut self) -> Vec<Event> {
+        core::mem::take(&mut self.events)
+    }
+}
+
+fn addr(track: u8, slot: u8) -> SlotAddr {
+    SlotAddr::new(TrackId::new(track).unwrap(), SlotId::new(slot).unwrap())
+}
+
+/// Records `bars` bars into `pad`, starting on the bar boundary after `arm_at`.
+/// Leaves the transport at the boundary the clip starts playing on.
+fn record(harness: &mut Harness, pad: SlotAddr, arm_at: u64, bars: u64) -> (u64, u64) {
+    harness.run_to(arm_at);
+    harness.command(Command::Press(pad));
+
+    let start = arm_at.div_ceil(BAR) * BAR;
+    let end = start + bars * BAR;
+
+    harness.run_to(end);
+    harness.command(Command::Press(pad));
+    // The capture is sealed when the transport reaches the boundary, which happens at
+    // the top of the next block.
+    harness.run_to(end + 1);
+    (start, end)
+}
+
+#[test]
+fn the_transport_reports_bars_and_beats_on_the_grid() {
+    let mut harness = Harness::new(128);
+    harness.run_to(2 * BAR);
+
+    let events = harness.drain_events();
+    let bars: Vec<u64> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Bar { bar } => Some(*bar),
+            _ => None,
+        })
+        .collect();
+    let beats: Vec<(u64, u32)> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Beat { bar, beat } => Some((*bar, *beat)),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(bars, vec![0, 1]);
+    assert_eq!(
+        beats,
+        vec![
+            (0, 0),
+            (0, 1),
+            (0, 2),
+            (0, 3),
+            (1, 0),
+            (1, 1),
+            (1, 2),
+            (1, 3)
+        ]
+    );
+}
+
+#[test]
+fn a_recorded_loop_plays_back_what_was_captured() {
+    let mut harness = Harness::new(128);
+    let pad = addr(0, 0);
+    let (start, end) = record(&mut harness, pad, 1_000, 2);
+
+    assert_eq!(start, BAR);
+    assert_eq!(end, 3 * BAR);
+    assert_eq!(
+        harness.engine.state(pad),
+        SlotState::Playing { clip: ClipId(0) }
+    );
+
+    let len = end - start;
+    let from = harness.position();
+    let out = harness.run_to(from + len);
+
+    for (i, sample) in out.iter().enumerate() {
+        let frame = from + (i / CHANNELS) as u64;
+        let channel = i % CHANNELS;
+        let phase = (frame - start) % len;
+        assert_eq!(
+            *sample,
+            signal(start + phase, channel),
+            "frame {frame} channel {channel}"
+        );
+    }
+}
+
+#[test]
+fn a_loop_repeats_at_its_length() {
+    let mut harness = Harness::new(256);
+    let pad = addr(0, 0);
+    let (start, end) = record(&mut harness, pad, 0, 1);
+    let len = end - start;
+
+    let from = harness.position();
+    let first = harness.run_to(from + len);
+    let second = harness.run_to(from + 2 * len);
+    assert_eq!(first, second);
+}
+
+#[test]
+fn the_recorded_length_is_a_whole_number_of_bars() {
+    let mut harness = Harness::new(128);
+    let pad = addr(0, 0);
+
+    harness.run_to(BAR / 3);
+    harness.command(Command::Press(pad));
+    harness.run_to(BAR);
+    // Stop pressed most of the way through bar 3, so bar 3 completes.
+    harness.run_to(3 * BAR + 3 * BEAT);
+    harness.command(Command::Press(pad));
+    harness.run_to(4 * BAR + 1);
+
+    let recorded: Vec<Frames> = harness
+        .drain_events()
+        .iter()
+        .filter_map(|e| match e {
+            Event::ClipRecorded { len, .. } => Some(*len),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(recorded, vec![Frames(3 * BAR)]);
+}
+
+#[test]
+fn loops_of_different_lengths_stay_phase_locked() {
+    let mut harness = Harness::new(128);
+    let short = addr(0, 0);
+    let long = addr(1, 0);
+
+    let (short_start, _) = record(&mut harness, short, 0, 1);
+    let after_short = harness.position();
+    let (long_start, long_end) = record(&mut harness, long, after_short, 2);
+
+    let from = harness.position();
+    let out = harness.run_to(from + 4 * BAR);
+
+    let short_len = BAR;
+    let long_len = long_end - long_start;
+
+    for (i, sample) in out.iter().enumerate() {
+        let frame = from + (i / CHANNELS) as u64;
+        let channel = i % CHANNELS;
+        let a = signal(short_start + (frame - short_start) % short_len, channel);
+        let b = signal(long_start + (frame - long_start) % long_len, channel);
+        assert_eq!(*sample, a + b, "frame {frame}");
+    }
+}
+
+#[test]
+fn launching_a_sibling_swaps_on_the_bar_line() {
+    let mut harness = Harness::new(64);
+    let first = addr(0, 0);
+    let second = addr(0, 1);
+
+    let (first_start, _) = record(&mut harness, first, 0, 1);
+    let after_first = harness.position();
+    let (second_start, second_end) = record(&mut harness, second, after_first, 1);
+
+    // The first pad handed over as the second armed.
+    assert_eq!(
+        harness.engine.state(first),
+        SlotState::Stopped { clip: ClipId(0) }
+    );
+
+    // Relaunch the first part way through a bar; the swap happens on the next line.
+    let mid = second_end + BAR + BEAT;
+    harness.run_to(mid);
+    harness.command(Command::Press(first));
+
+    let boundary = second_end + 2 * BAR;
+    let before = harness.run_to(boundary);
+    let after = harness.run_to(boundary + 64);
+
+    let second_len = second_end - second_start;
+    let frame_before = boundary - 1;
+    assert_eq!(
+        before[before.len() - CHANNELS],
+        signal(second_start + (frame_before - second_start) % second_len, 0),
+        "the second pad still owns the frame before the line"
+    );
+    assert_eq!(
+        after[0],
+        signal(first_start + (boundary - first_start) % BAR, 0),
+        "the first pad owns the line itself"
+    );
+}
+
+#[test]
+fn rendering_is_identical_across_block_sizes() {
+    fn render(block: usize) -> Vec<f32> {
+        let mut harness = Harness::with_click(block);
+        let pad = addr(2, 3);
+        record(&mut harness, pad, BEAT, 1);
+        let from = harness.position();
+        harness.run_to(from + 2 * BAR)
+    }
+
+    let reference = render(64);
+    for block in [1, 17, 128, 512, 4_096] {
+        assert_eq!(render(block), reference, "block size {block} diverged");
+    }
+}
+
+#[test]
+fn the_click_sounds_on_every_beat() {
+    let mut harness = Harness::with_click(128);
+    let out = harness.run_to(BAR);
+
+    // Each beat should start a blip and each blip should die out before the next beat.
+    for beat in 0..4u64 {
+        let at = usize::try_from(beat * BEAT).unwrap() * CHANNELS;
+        let onset = &out[at..at + 200 * CHANNELS];
+        assert!(
+            onset.iter().any(|s| s.abs() > 0.0),
+            "beat {beat} produced no click"
+        );
+
+        let gap_start = at + usize::try_from(BEAT).unwrap() * CHANNELS - 400 * CHANNELS;
+        let gap = &out[gap_start..gap_start + 200 * CHANNELS];
+        assert!(
+            gap.iter().all(|s| *s == 0.0),
+            "the blip on beat {beat} did not decay before the next"
+        );
+    }
+}
+
+#[test]
+fn a_cleared_pad_returns_its_segments_to_the_pool() {
+    let mut harness = Harness::new(128);
+    let pad = addr(0, 0);
+
+    let available = harness.engine.segments_available();
+    record(&mut harness, pad, 0, 1);
+    assert!(harness.engine.segments_available() < available);
+
+    harness.command(Command::Clear(pad));
+    assert_eq!(harness.engine.segments_available(), available);
+    assert_eq!(harness.engine.state(pad), SlotState::Empty);
+
+    let out = harness.run_to(harness.position() + BAR);
+    assert!(
+        out.iter().all(|s| *s == 0.0),
+        "a cleared pad must be silent"
+    );
+}
+
+#[test]
+fn a_cancelled_recording_leaves_nothing_behind() {
+    let mut harness = Harness::new(128);
+    let pad = addr(0, 0);
+
+    let available = harness.engine.segments_available();
+    harness.command(Command::Press(pad));
+    harness.run_to(2 * BAR);
+    assert!(harness.engine.segments_available() < available);
+
+    harness.command(Command::StopAll);
+    assert_eq!(harness.engine.state(pad), SlotState::Empty);
+    assert_eq!(harness.engine.segments_available(), available);
+}
+
+#[test]
+fn short_input_is_reported_and_recorded_as_silence() {
+    let mut harness = Harness::new(128);
+    let pad = addr(0, 0);
+
+    harness.command(Command::Press(pad));
+    harness.run_to(BAR);
+
+    // One block with nothing from the device.
+    let mut out = vec![0.0; 128 * CHANNELS];
+    harness.engine.process(&[], &mut out, &mut harness.events);
+
+    let xruns: Vec<u64> = harness
+        .drain_events()
+        .iter()
+        .filter_map(|e| match e {
+            Event::Xrun { frames } => Some(*frames),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(xruns, vec![128]);
+}
+
+#[test]
+fn the_tempo_locks_once_a_clip_exists() {
+    use free_loop_core::Tempo;
+
+    let mut harness = Harness::new(128);
+    harness.command(Command::SetTempo(Tempo::new(140.0).unwrap()));
+    assert_eq!(harness.engine.grid().tempo().bpm(), 140.0);
+    assert!(harness.drain_events().is_empty());
+
+    let pad = addr(0, 0);
+    let bar = harness.engine.grid().frames_per_bar().0;
+    harness.run_to(bar / 2);
+    harness.command(Command::Press(pad));
+    harness.run_to(3 * bar);
+    harness.command(Command::Press(pad));
+    harness.run_to(3 * bar + 1);
+    harness.drain_events();
+
+    harness.command(Command::SetTempo(Tempo::new(90.0).unwrap()));
+    assert!(harness.drain_events().contains(&Event::TempoRejected));
+    assert_eq!(harness.engine.grid().tempo().bpm(), 140.0);
+}

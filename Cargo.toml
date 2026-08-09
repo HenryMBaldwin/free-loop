@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core"]
+members = ["crates/core", "crates/engine"]
 resolver = "3"
 
 [workspace.package]
@@ -11,6 +11,7 @@ keywords = ["looper", "launchpad", "audio", "midi", "dawless"]
 categories = ["multimedia::audio"]
 
 [workspace.dependencies]
+free-loop-core = { path = "crates/core", version = "0.1.0" }
 thiserror = "2"
 
 [workspace.lints.rust]

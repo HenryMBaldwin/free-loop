@@ -1,0 +1,17 @@
+[package]
+name = "free-loop-engine"
+version = "0.1.0"
+description = "Realtime engine for Free Loop: transport, mixer, capture and click"
+edition.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+free-loop-core.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
