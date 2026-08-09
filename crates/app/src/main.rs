@@ -98,6 +98,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut events: Vec<SurfaceEvent> = Vec::new();
     let started = Instant::now();
+    // Only known once the driver has run a callback and said how much it buffers.
+    let mut reported_latency = false;
 
     while running.load(Ordering::Relaxed) {
         let now = started.elapsed();
@@ -127,6 +129,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             && let Err(error) = surface.render(frame)
         {
             eprintln!("surface: {error}");
+        }
+
+        if !reported_latency {
+            let frames = io.capture_offset_frames();
+            if frames > 0 {
+                reported_latency = true;
+                let millis = f64::from(frames) / f64::from(negotiated.sample_rate) * 1000.0;
+                println!("round trip: {frames} frames ({millis:.1} ms), compensated");
+            }
         }
 
         std::thread::sleep(TICK);

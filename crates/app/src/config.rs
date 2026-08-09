@@ -59,6 +59,10 @@ pub struct Audio {
     pub input_channel: Option<usize>,
     /// Blocks of capture buffered before the output starts consuming.
     pub cushion_blocks: u32,
+    /// Round-trip latency to compensate for, in frames.
+    ///
+    /// Empty measures it from the driver, which is right for almost every rig.
+    pub capture_offset_frames: Option<u32>,
 }
 
 impl Default for Audio {
@@ -71,6 +75,7 @@ impl Default for Audio {
             channels: None,
             input_channel: None,
             cushion_blocks: 2,
+            capture_offset_frames: None,
         }
     }
 }
@@ -201,6 +206,7 @@ impl Config {
                 None => InputSource::Direct,
             },
             cushion_blocks: self.audio.cushion_blocks,
+            capture_offset: self.audio.capture_offset_frames,
         }
     }
 
@@ -229,6 +235,8 @@ impl Config {
             channels,
             max_bars: self.transport.max_bars,
             segment_pool: self.engine.segment_pool,
+            // Replaced by what the driver reports once the streams are running.
+            capture_offset: free_loop_core::Frames::ZERO,
             click: ClickConfig {
                 enabled: self.click.enabled,
                 level: self.click.level,
@@ -256,6 +264,10 @@ pub const EXAMPLE: &str = r#"# Free Loop configuration. Every setting shown at i
 
 # Blocks of capture buffered before playback starts consuming. More is safer, later.
 cushion_blocks = 2
+
+# Round-trip latency to compensate for, in frames. Omit to measure it from the driver,
+# which is right for almost every rig. Set it only if a driver reports badly.
+# capture_offset_frames = 512
 
 [transport]
 tempo = 120.0
