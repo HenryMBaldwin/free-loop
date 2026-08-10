@@ -436,8 +436,11 @@ mod tests {
 
     /// A clip whose samples say which frame they came from.
     fn clip(frames: usize, recorded_at: u64) -> Clip {
-        let mut pool = SegmentPool::new(4, usize::from(CH));
-        let mut buffer = AudioBuffer::new(4, usize::from(CH));
+        // Sized from the frame count. A fixed pool silently truncates the fixture, which
+        // then looks like a round trip losing data.
+        let segments = frames.div_ceil(SEGMENT_FRAMES).max(1);
+        let mut pool = SegmentPool::new(segments, usize::from(CH));
+        let mut buffer = AudioBuffer::new(segments, usize::from(CH));
         let audio: Vec<f32> = (0..frames * usize::from(CH))
             .map(|i| i as f32 / 1000.0)
             .collect();
@@ -718,6 +721,43 @@ mod tests {
             .map(|i| i as f32 / 1000.0)
             .collect();
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn every_frame_of_a_multi_segment_clip_survives_the_round_trip() {
+        let dir = TempDir::new("everyframe");
+        let store = SessionStore::new(&dir.0);
+        // Several segments plus a partial one, like a real four bar take.
+        let frames = SEGMENT_FRAMES * 5 + 4_321;
+        let audio = clip(frames, 0);
+
+        store
+            .save(
+                addr(0, 0),
+                &data(vec![SavedClip {
+                    addr: addr(0, 0),
+                    playing: false,
+                    clip: &audio,
+                }]),
+            )
+            .unwrap();
+
+        let loaded = store.load(addr(0, 0), 48_000, CH).unwrap();
+        let read = &loaded.clips[0].clip;
+        assert_eq!(read.len(), Frames(frames as u64));
+
+        let mut out = vec![0.0_f32; frames * usize::from(CH)];
+        read.mix_into(read.recorded_at(), &mut out);
+
+        let expected: Vec<f32> = (0..frames * usize::from(CH))
+            .map(|i| i as f32 / 1000.0)
+            .collect();
+
+        let wrong = out
+            .iter()
+            .zip(&expected)
+            .position(|(got, want)| got != want);
+        assert_eq!(wrong, None, "first sample that differs");
     }
 
     #[test]
