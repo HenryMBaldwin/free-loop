@@ -472,6 +472,7 @@ impl Engine {
                 self.muted = muted;
                 self.soloed = soloed;
             }
+            Command::ClearAll => self.clear_all(sink),
             Command::Rewind => self.rewind(sink),
             Command::Snapshot => self.publish_snapshot(sink),
             Command::SetPaused(paused) => self.set_paused(paused, sink),
@@ -486,6 +487,15 @@ impl Engine {
     fn with_session(&mut self, apply: impl FnOnce(&mut SessionModel, &mut Audio)) {
         let Self { session, audio, .. } = self;
         apply(session, audio);
+    }
+
+    /// Empties every pad and starts the transport over.
+    fn clear_all(&mut self, sink: &mut impl EventSink) {
+        let ctx = self.ctx();
+        self.with_session(|session, audio| {
+            session.clear_all(&ctx, &mut |a, e| audio.apply(a, e, sink));
+        });
+        self.rewind(sink);
     }
 
     /// Sends the transport back to the start, with the longest loop at its beginning.

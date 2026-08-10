@@ -164,6 +164,12 @@ pub const MUTE_SIDE: usize = 5;
 /// The right-hand column button that opens the soloed pads.
 pub const SOLO_SIDE: usize = 6;
 
+/// The right-hand column button that starts a session from nothing.
+///
+/// Only offered from the load picker, since emptying the grid is not something to have
+/// within reach while playing.
+pub const NEW_SIDE: usize = 7;
+
 /// How the transport button looks.
 pub fn pause_button(chrome: Chrome) -> Led {
     if chrome.paused {
@@ -264,6 +270,9 @@ pub fn picker(
     }
     frame.set_control(active.index(), Led::flash(SELECTED));
     side_buttons(&mut frame, chrome);
+    if active == Control::LoadSession {
+        frame.set_side(NEW_SIDE, Led::dim(LedColor::White));
+    }
 
     frame
 }

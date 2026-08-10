@@ -14,6 +14,8 @@ pub enum Command {
     StopTrack(TrackId),
     /// Stop everything, immediately. Recordings in progress are discarded.
     StopAll,
+    /// Empty every pad, leaving nothing loaded.
+    ClearAll,
     /// Publish a reference to every pad that holds a clip.
     Snapshot,
     /// Set which pads are silenced and which are soloed.
