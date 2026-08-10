@@ -204,8 +204,6 @@ fn run(s: Session<'_>) {
         for request in requests {
             match request {
                 Request::SaveSession(addr) => {
-                    // The audio lives in the engine, so ask for it and save once it
-                    // arrives.
                     pending_save = Some(addr);
                     snapshots.clear();
                     if io.send(Command::Snapshot).is_err() {
@@ -214,16 +212,13 @@ fn run(s: Session<'_>) {
                     }
                 }
                 Request::LoadSession(addr) => {
-                    match load(store, addr, &mut housekeeping.loader, &negotiated) {
-                        Ok(()) => {
-                            println!("loaded session {}{}", addr.track.index(), addr.slot.index());
-                            controller.session_loaded(addr, true);
-                        }
-                        Err(error) => {
-                            eprintln!("load failed: {error}");
-                            controller.cancel_picker();
-                        }
-                    }
+                    load_session(
+                        store,
+                        addr,
+                        &mut housekeeping.loader,
+                        &negotiated,
+                        controller,
+                    );
                 }
             }
         }
@@ -260,7 +255,14 @@ fn run(s: Session<'_>) {
             .drain(|snapshot| snapshots.push(snapshot));
 
         if snapshot_ready && let Some(addr) = pending_save.take() {
-            match save(store, addr, config, &negotiated, &snapshots) {
+            match save(
+                store,
+                addr,
+                config,
+                &negotiated,
+                &snapshots,
+                controller.gains(),
+            ) {
                 Ok(()) => {
                     println!("saved session {}{}", addr.track.index(), addr.slot.index());
                     controller.session_saved(addr);
@@ -272,16 +274,46 @@ fn run(s: Session<'_>) {
 
         repaint(surface, controller);
 
-        if !reported_latency {
-            let frames = io.capture_offset_frames();
-            if frames > 0 {
-                reported_latency = true;
-                let millis = f64::from(frames) / f64::from(negotiated.sample_rate) * 1000.0;
-                println!("round trip: {frames} frames ({millis:.1} ms), compensated");
-            }
-        }
+        reported_latency |= report_latency(io, &negotiated, reported_latency);
 
         std::thread::sleep(TICK);
+    }
+}
+
+/// Prints the measured round trip once the driver has reported it.
+///
+/// Returns whether it has now been printed.
+fn report_latency(io: &AudioIo, negotiated: &Negotiated, already: bool) -> bool {
+    if already {
+        return true;
+    }
+    let frames = io.capture_offset_frames();
+    if frames == 0 {
+        return false;
+    }
+    let millis = f64::from(frames) / f64::from(negotiated.sample_rate) * 1000.0;
+    println!("round trip: {frames} frames ({millis:.1} ms), compensated");
+    true
+}
+
+/// Reads a session in and tells the controller what came with it.
+fn load_session(
+    store: &SessionStore,
+    addr: free_loop_core::SlotAddr,
+    loader: &mut Loader,
+    negotiated: &Negotiated,
+    controller: &mut Controller,
+) {
+    match load(store, addr, loader, negotiated) {
+        Ok(gains) => {
+            println!("loaded session {}{}", addr.track.index(), addr.slot.index());
+            controller.set_gains(gains);
+            controller.session_loaded(addr, true);
+        }
+        Err(error) => {
+            eprintln!("load failed: {error}");
+            controller.cancel_picker();
+        }
     }
 }
 
@@ -292,11 +324,13 @@ fn save(
     config: &Config,
     negotiated: &free_loop_audio::Negotiated,
     snapshots: &[Snapshot],
+    gains: [u8; free_loop_core::TRACK_COUNT],
 ) -> Result<(), free_loop_session::SessionError> {
     let clips = snapshots
         .iter()
         .map(|snapshot| SavedClip {
             addr: snapshot.addr,
+            gain_step: gains[snapshot.addr.track.index()],
             playing: matches!(
                 snapshot.state,
                 free_loop_core::SlotState::Playing { .. }
@@ -347,10 +381,11 @@ fn load(
     addr: free_loop_core::SlotAddr,
     loader: &mut Loader,
     negotiated: &Negotiated,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<[u8; free_loop_core::TRACK_COUNT], Box<dyn Error>> {
     let channels = u16::try_from(negotiated.channels).unwrap_or(2);
     let session = store.load(addr, negotiated.sample_rate, channels)?;
     let tempo = free_loop_core::Tempo::new(session.manifest.tempo)?;
+    let gains = session.gains();
 
     if !loader.ready() {
         return Err("the audio thread has not drained the load queue".into());
@@ -364,7 +399,7 @@ fn load(
         })?;
     }
     loader.send(LoadMessage::End)?;
-    Ok(())
+    Ok(gains)
 }
 
 /// Connects a Launchpad, falling back to a surface with no hardware behind it.
