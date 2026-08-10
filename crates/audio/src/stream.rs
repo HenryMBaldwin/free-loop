@@ -1,7 +1,7 @@
 //! Opening devices and running the engine from the output callback.
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{
@@ -212,20 +212,24 @@ impl Opened {
         let input_latency = Arc::new(AtomicU32::new(0));
         let capture_offset = Arc::new(AtomicU32::new(0));
 
+        let shared = Arc::new(Mutex::new(Shared {
+            engine,
+            commands: command_rx,
+            events: event_tx,
+            reader: Some(reader),
+            captured: vec![0.0; MAX_BLOCK_FRAMES * negotiated.channels],
+            rendered: vec![0.0; MAX_BLOCK_FRAMES * negotiated.channels],
+            channels: negotiated.channels,
+            dropped_events: 0,
+        }));
+
         let callback = Render {
+            shared,
             input_latency: Arc::clone(&input_latency),
             capture_offset: Arc::clone(&capture_offset),
             cushion: u32::try_from(negotiated.cushion_frames).unwrap_or(u32::MAX),
             offset_override: negotiated.capture_offset,
             sample_rate: negotiated.sample_rate,
-            engine,
-            reader,
-            commands: command_rx,
-            events: event_tx,
-            captured: vec![0.0; MAX_BLOCK_FRAMES * negotiated.channels],
-            rendered: vec![0.0; MAX_BLOCK_FRAMES * negotiated.channels],
-            channels: negotiated.channels,
-            dropped_events: 0,
         };
 
         let input = build_input(
@@ -357,8 +361,25 @@ impl EventSink for RingSink<'_> {
     }
 }
 
+/// Everything the output callback works on.
+///
+/// Behind a lock rather than owned by the callback, so it outlives the stream that was
+/// running it. The callback never waits for the lock.
+struct Shared {
+    engine: Engine,
+    commands: Consumer<Command>,
+    events: Producer<Event>,
+    /// Set when a stream starts. Without one there is no capture, so input reads silent.
+    reader: Option<CaptureReader>,
+    captured: Vec<f32>,
+    rendered: Vec<f32>,
+    channels: usize,
+    dropped_events: u64,
+}
+
 /// The output callback's state.
 struct Render {
+    shared: Arc<Mutex<Shared>>,
     input_latency: Arc<AtomicU32>,
     capture_offset: Arc<AtomicU32>,
     /// Frames of capture buffered before this callback started consuming.
@@ -366,14 +387,6 @@ struct Render {
     /// A latency the caller pinned, used instead of measuring.
     offset_override: Option<u32>,
     sample_rate: u32,
-    engine: Engine,
-    reader: CaptureReader,
-    commands: Consumer<Command>,
-    events: Producer<Event>,
-    captured: Vec<f32>,
-    rendered: Vec<f32>,
-    channels: usize,
-    dropped_events: u64,
 }
 
 impl Render {
@@ -390,9 +403,23 @@ impl Render {
         });
 
         self.capture_offset.store(total, Ordering::Relaxed);
-        self.engine.set_capture_offset(Frames(u64::from(total)));
+        if let Ok(mut shared) = self.shared.try_lock() {
+            shared.engine.set_capture_offset(Frames(u64::from(total)));
+        }
     }
 
+    /// Renders one block, or silence if the state is being handed over.
+    fn fill<T: SizedSample + FromSample<f32>>(&mut self, out: &mut [T]) {
+        match self.shared.try_lock() {
+            Ok(mut shared) => shared.fill(out),
+            // Held only while the streams are stopped, so this is a block either side of
+            // a device going away.
+            Err(_) => out.fill(T::EQUILIBRIUM),
+        }
+    }
+}
+
+impl Shared {
     fn fill<T: FromSample<f32> + Copy>(&mut self, out: &mut [T]) {
         let Self {
             engine,
@@ -422,7 +449,9 @@ impl Render {
             let run = (frames - done).min(MAX_BLOCK_FRAMES);
             let samples = run * *channels;
 
-            let filled = reader.read(&mut captured[..samples]);
+            let filled = reader
+                .as_mut()
+                .map_or(0, |reader| reader.read(&mut captured[..samples]));
             engine.process(&captured[..filled], &mut rendered[..samples], &mut sink);
 
             let target = &mut out[done * *channels..][..samples];
