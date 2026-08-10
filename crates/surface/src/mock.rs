@@ -14,6 +14,7 @@ use crate::surface::{ControlSurface, SurfaceError};
 pub struct MockSurface {
     pending: VecDeque<SurfaceEvent>,
     frames: Vec<LedFrame>,
+    texts: Vec<Option<String>>,
     fail_next_render: bool,
 }
 
@@ -38,6 +39,11 @@ impl MockSurface {
         self.frames.last()
     }
 
+    /// Every text shown or stopped, oldest first. `None` is a stop.
+    pub fn texts(&self) -> &[Option<String>] {
+        &self.texts
+    }
+
     /// Makes the next render fail, to exercise the caller's error path.
     pub fn fail_next_render(&mut self) {
         self.fail_next_render = true;
@@ -59,6 +65,16 @@ impl ControlSurface for MockSurface {
 
     fn clear(&mut self) -> Result<(), SurfaceError> {
         self.frames.push(LedFrame::new());
+        Ok(())
+    }
+
+    fn show_text(&mut self, text: &str) -> Result<(), SurfaceError> {
+        self.texts.push(Some(text.to_owned()));
+        Ok(())
+    }
+
+    fn stop_text(&mut self) -> Result<(), SurfaceError> {
+        self.texts.push(None);
         Ok(())
     }
 }
@@ -123,6 +139,15 @@ mod tests {
             surface.last_frame().unwrap().pad(addr(2, 2)),
             Led::solid(LedColor::Red)
         );
+    }
+
+    #[test]
+    fn text_is_recorded_in_order() {
+        let mut surface = MockSurface::new();
+        surface.show_text("120").unwrap();
+        surface.stop_text().unwrap();
+
+        assert_eq!(surface.texts(), [Some("120".to_owned()), None]);
     }
 
     #[test]
