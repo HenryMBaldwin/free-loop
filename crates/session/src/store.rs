@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use free_loop_core::{Frames, SLOT_COUNT, SlotAddr, TRACK_COUNT};
+use free_loop_core::{Frames, SLOT_COUNT, SlotAddr, TRACK_COUNT, UNITY_STEP};
 use free_loop_engine::buffer::{AudioBuffer, Clip, SEGMENT_FRAMES, SegmentPool};
 
 use crate::manifest::{ClipEntry, MANIFEST, Manifest};
@@ -63,6 +63,8 @@ pub struct SavedClip<'a> {
     pub addr: SlotAddr,
     /// Whether the pad was sounding.
     pub playing: bool,
+    /// The step on the gain ladder its track was playing at.
+    pub gain_step: u8,
     /// The audio.
     pub clip: &'a Clip,
 }
@@ -91,6 +93,8 @@ pub struct LoadedClip {
     pub addr: SlotAddr,
     /// Whether the pad was sounding.
     pub playing: bool,
+    /// The step on the gain ladder its track should play at.
+    pub gain_step: u8,
     /// The audio, with storage owned by the caller.
     pub clip: Clip,
 }
@@ -102,6 +106,17 @@ pub struct LoadedSession {
     pub manifest: Manifest,
     /// The pads that hold something.
     pub clips: Vec<LoadedClip>,
+}
+
+impl LoadedSession {
+    /// The level each track should play at, taken from the clips it holds.
+    pub fn gains(&self) -> [u8; TRACK_COUNT] {
+        let mut gains = [UNITY_STEP; TRACK_COUNT];
+        for loaded in &self.clips {
+            gains[loaded.addr.track.index()] = loaded.gain_step;
+        }
+        gains
+    }
 }
 
 /// A directory holding up to one session per pad.
@@ -180,6 +195,7 @@ impl SessionStore {
                 phase_frames: phase_of(saved.clip),
                 playing: saved.playing,
                 capture_offset_frames: saved.clip.capture_offset().0,
+                gain_step: saved.gain_step,
             });
         }
 
@@ -238,6 +254,7 @@ impl SessionStore {
             clips.push(LoadedClip {
                 addr: entry.addr()?,
                 playing: entry.playing,
+                gain_step: entry.gain_step,
                 clip: read_wav(&dir.join(&entry.file), entry, channels)?,
             });
         }
@@ -486,6 +503,7 @@ mod tests {
                 &data(vec![SavedClip {
                     addr: addr(1, 0),
                     playing: true,
+                    gain_step: 2,
                     clip: &audio,
                 }]),
             )
@@ -523,6 +541,7 @@ mod tests {
                 &data(vec![SavedClip {
                     addr: addr(0, 0),
                     playing: false,
+                    gain_step: UNITY_STEP,
                     clip: &audio,
                 }]),
             )
@@ -553,6 +572,7 @@ mod tests {
                 &data(vec![SavedClip {
                     addr: addr(0, 0),
                     playing: false,
+                    gain_step: UNITY_STEP,
                     clip: &audio,
                 }]),
             )
@@ -577,11 +597,13 @@ mod tests {
                     SavedClip {
                         addr: addr(0, 0),
                         playing: false,
+                        gain_step: UNITY_STEP,
                         clip: &audio,
                     },
                     SavedClip {
                         addr: addr(1, 1),
                         playing: false,
+                        gain_step: UNITY_STEP,
                         clip: &audio,
                     },
                 ]),
@@ -595,6 +617,7 @@ mod tests {
                 &data(vec![SavedClip {
                     addr: addr(0, 0),
                     playing: false,
+                    gain_step: UNITY_STEP,
                     clip: &audio,
                 }]),
             )
@@ -630,6 +653,7 @@ mod tests {
                     &data(vec![SavedClip {
                         addr: addr(0, 0),
                         playing: false,
+                        gain_step: UNITY_STEP,
                         clip: &audio,
                     }]),
                 )
@@ -665,6 +689,7 @@ mod tests {
                 &data(vec![SavedClip {
                     addr: addr(4, 5),
                     playing: true,
+                    gain_step: UNITY_STEP,
                     clip: &audio,
                 }]),
             )
@@ -702,6 +727,7 @@ mod tests {
                 &data(vec![SavedClip {
                     addr: addr(0, 0),
                     playing: false,
+                    gain_step: UNITY_STEP,
                     clip: &audio,
                 }]),
             )
@@ -736,6 +762,7 @@ mod tests {
                 &data(vec![SavedClip {
                     addr: addr(0, 0),
                     playing: false,
+                    gain_step: UNITY_STEP,
                     clip: &audio,
                 }]),
             )
@@ -757,6 +784,43 @@ mod tests {
             .zip(&expected)
             .position(|(got, want)| got != want);
         assert_eq!(wrong, None, "first sample that differs");
+    }
+
+    #[test]
+    fn a_level_travels_with_the_clip_it_was_set_on() {
+        let dir = TempDir::new("levels");
+        let store = SessionStore::new(&dir.0);
+        let audio = clip(64, 0);
+
+        store
+            .save(
+                addr(0, 0),
+                &data(vec![
+                    SavedClip {
+                        addr: addr(1, 0),
+                        playing: false,
+                        gain_step: 2,
+                        clip: &audio,
+                    },
+                    SavedClip {
+                        addr: addr(3, 0),
+                        playing: false,
+                        gain_step: 6,
+                        clip: &audio,
+                    },
+                ]),
+            )
+            .unwrap();
+
+        let loaded = store.load(addr(0, 0), 48_000, CH).unwrap();
+        let gains = loaded.gains();
+
+        assert_eq!(gains[1], 2);
+        assert_eq!(gains[3], 6);
+        assert_eq!(
+            gains[7], UNITY_STEP,
+            "a track with nothing on it is untouched"
+        );
     }
 
     #[test]

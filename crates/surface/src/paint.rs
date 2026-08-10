@@ -3,8 +3,11 @@
 //! The one place the looper's colour scheme is decided. Pure, so the whole scheme is
 //! testable without a device.
 
+use core::cmp::Ordering;
+
 use free_loop_core::{
-    MAX_BPM, MIN_BPM, PadMask, SLOT_COUNT, SessionModel, SlotAddr, SlotState, TRACK_COUNT, pad_bit,
+    MAX_BPM, MIN_BPM, PadMask, SLOT_COUNT, SessionModel, SlotAddr, SlotState, TRACK_COUNT,
+    UNITY_STEP, pad_bit,
 };
 
 use crate::event::Control;
@@ -151,6 +154,9 @@ pub const MUTED: LedColor = LedColor::Red;
 /// Colour a soloed group takes, matching its side button.
 pub const SOLOED: LedColor = LedColor::Blue;
 
+/// The right-hand column button that opens the track levels.
+pub const VOLUME_SIDE: usize = 0;
+
 /// The right-hand column button that runs the transport.
 pub const PAUSE_SIDE: usize = 4;
 
@@ -219,6 +225,35 @@ pub fn tempo_gauge(tempo: f64, chrome: Chrome) -> LedFrame {
             Led::dim(LedColor::Blue)
         } else {
             Led::OFF
+        };
+        frame.set_pad(addr, led);
+    }
+
+    for button in Control::all() {
+        frame.set_control(button.index(), control(button, chrome));
+    }
+    beat_indicator(&mut frame, chrome);
+    side_buttons(&mut frame, chrome);
+
+    frame
+}
+
+/// Paints each row as a level, one row per track.
+///
+/// Pads up to the level are lit and the level itself is solid. The step a take plays at
+/// the level it was recorded is marked separately when it is not the current one.
+pub fn volumes(gains: [u8; TRACK_COUNT], chrome: Chrome) -> LedFrame {
+    let mut frame = LedFrame::new();
+
+    for addr in SlotAddr::all() {
+        let level = usize::from(gains[addr.track.index()]);
+        let step = addr.slot.index();
+
+        let led = match (step.cmp(&level), step == usize::from(UNITY_STEP)) {
+            (Ordering::Equal, _) => Led::solid(LedColor::Green),
+            (Ordering::Less, _) => Led::dim(LedColor::Green),
+            (Ordering::Greater, true) => Led::dim(LedColor::White),
+            (Ordering::Greater, false) => Led::OFF,
         };
         frame.set_pad(addr, led);
     }
