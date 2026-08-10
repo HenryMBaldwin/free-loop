@@ -731,8 +731,13 @@ mod tests {
         let frame = controller.take_frame().unwrap();
         assert_eq!(
             frame.pad(addr(0, 0)),
-            Led::pulse(LedColor::Red),
+            Led::pulse(free_loop_surface::MUTED),
             "still playing, still silenced, and both are visible"
+        );
+        assert_eq!(
+            frame.pad(addr(0, 7)),
+            Led::dim(free_loop_surface::MUTED),
+            "and the rest of the row is lit so the group reads as one"
         );
     }
 

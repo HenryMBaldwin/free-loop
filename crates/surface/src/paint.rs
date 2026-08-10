@@ -8,7 +8,7 @@ use free_loop_core::{
 };
 
 use crate::event::Control;
-use crate::led::{BEAT_LEDS, FIRST_BEAT_LED, Led, LedColor, LedFrame};
+use crate::led::{BEAT_LEDS, FIRST_BEAT_LED, Led, LedColor, LedFrame, LedStyle};
 
 /// Surface state that does not come from the session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,13 +59,20 @@ impl Axis {
 }
 
 impl Chrome {
-    /// Whether a pad would be heard if it were playing.
+    /// The colour a pad's whole group has been marked with, if any.
     ///
-    /// A solo anywhere silences everything outside it, matching what the engine does, so
-    /// the grid and the sound never disagree.
-    pub fn is_audible(&self, addr: SlotAddr) -> bool {
+    /// Each colour matches the side button that sets it, so the grid says which of the
+    /// two is in play without a legend. Silence outranks solo, matching the engine, so a
+    /// group that is both reads as silenced rather than as heard.
+    pub fn mark(&self, addr: SlotAddr) -> Option<LedColor> {
         let bit = pad_bit(addr);
-        self.muted & bit == 0 && (self.soloed == 0 || self.soloed & bit != 0)
+        if self.muted & bit != 0 {
+            return Some(MUTED);
+        }
+        if self.soloed & bit != 0 {
+            return Some(SOLOED);
+        }
+        None
     }
 }
 
@@ -87,8 +94,8 @@ impl Default for Chrome {
 ///
 /// Flashing means waiting on a bar line, so every queued state flashes and every settled
 /// state does not.
-pub fn pad(state: SlotState, audible: bool) -> Led {
-    let led = match state {
+pub fn pad(state: SlotState) -> Led {
+    match state {
         SlotState::Empty => Led::OFF,
         SlotState::QueuedRecord { .. } => Led::flash(LedColor::Red),
         SlotState::Recording { .. } => Led::solid(LedColor::Red),
@@ -96,18 +103,25 @@ pub fn pad(state: SlotState, audible: bool) -> Led {
         SlotState::QueuedPlay { .. } => Led::flash(LedColor::Green),
         SlotState::Playing { .. } => Led::pulse(LedColor::Green),
         SlotState::QueuedStop { .. } => Led::flash(LedColor::Amber),
-    };
-
-    // A silenced pad keeps the style its state gives it and only changes colour, so what
-    // the loop is doing stays readable while it is not being heard.
-    if audible || state.clip().is_none() {
-        led
-    } else {
-        Led {
-            color: LedColor::Red,
-            style: led.style,
-        }
     }
+}
+
+/// How a pad looks when its whole group has been marked.
+///
+/// The group lights end to end, empty pads included, so the row or column reads as one
+/// thing. Within it the colour is fixed and the state is carried by brightness and
+/// movement: an empty pad sits dim, a clip waiting is steady, one playing pulses, and one
+/// waiting on a bar line flashes. What the pad is doing survives the shift.
+pub fn marked_pad(state: SlotState, color: LedColor) -> Led {
+    let style = match state {
+        SlotState::Empty => LedStyle::Dim,
+        SlotState::Stopped { .. } | SlotState::Recording { .. } => LedStyle::Solid,
+        SlotState::Playing { .. } => LedStyle::Pulse,
+        SlotState::QueuedRecord { .. }
+        | SlotState::QueuedPlay { .. }
+        | SlotState::QueuedStop { .. } => LedStyle::Flash,
+    };
+    Led { color, style }
 }
 
 /// How a top-row control looks.
@@ -128,6 +142,12 @@ pub fn control(control: Control, chrome: Chrome) -> Led {
         Control::LoadSession | Control::SaveSession => Led::dim(LedColor::White),
     }
 }
+
+/// Colour a silenced group takes, matching its side button.
+pub const MUTED: LedColor = LedColor::Red;
+
+/// Colour a soloed group takes, matching its side button.
+pub const SOLOED: LedColor = LedColor::Blue;
 
 /// The right-hand column button that runs the transport.
 pub const PAUSE_SIDE: usize = 4;
@@ -247,7 +267,11 @@ pub fn frame(session: &SessionModel, chrome: Chrome) -> LedFrame {
     let mut frame = LedFrame::new();
 
     for addr in SlotAddr::all() {
-        frame.set_pad(addr, pad(session.state(addr), chrome.is_audible(addr)));
+        let state = session.state(addr);
+        let led = chrome
+            .mark(addr)
+            .map_or_else(|| pad(state), |color| marked_pad(state, color));
+        frame.set_pad(addr, led);
     }
     for button in Control::all() {
         frame.set_control(button.index(), control(button, chrome));
@@ -284,7 +308,7 @@ mod tests {
     #![allow(clippy::unwrap_used, reason = "tests should fail loudly")]
 
     use super::*;
-    use free_loop_core::{ClipId, Frames, SlotId, TrackId};
+    use free_loop_core::{ClipId, Frames, SlotId, TrackId, row_mask};
 
     use crate::led::LedStyle;
 
@@ -318,7 +342,7 @@ mod tests {
     #[test]
     fn queued_states_flash_and_settled_states_do_not() {
         for state in EVERY_STATE {
-            let flashing = pad(state, true).style == LedStyle::Flash;
+            let flashing = pad(state).style == LedStyle::Flash;
             assert_eq!(
                 flashing,
                 state.is_pending(),
@@ -332,7 +356,7 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for state in EVERY_STATE {
             assert!(
-                seen.insert(pad(state, true)),
+                seen.insert(pad(state)),
                 "{state:?} duplicates another state"
             );
         }
@@ -340,17 +364,17 @@ mod tests {
 
     #[test]
     fn an_empty_pad_is_dark_and_everything_else_is_lit() {
-        assert!(!pad(SlotState::Empty, true).is_lit());
+        assert!(!pad(SlotState::Empty).is_lit());
         for state in EVERY_STATE.into_iter().filter(|s| *s != SlotState::Empty) {
-            assert!(pad(state, true).is_lit(), "{state:?} should be visible");
+            assert!(pad(state).is_lit(), "{state:?} should be visible");
         }
     }
 
     #[test]
     fn recording_is_red_and_playing_is_green() {
-        assert_eq!(pad(EVERY_STATE[2], true).color, LedColor::Red);
-        assert_eq!(pad(EVERY_STATE[5], true).color, LedColor::Green);
-        assert_eq!(pad(EVERY_STATE[5], true).style, LedStyle::Pulse);
+        assert_eq!(pad(EVERY_STATE[2]).color, LedColor::Red);
+        assert_eq!(pad(EVERY_STATE[5]).color, LedColor::Green);
+        assert_eq!(pad(EVERY_STATE[5]).style, LedStyle::Pulse);
     }
 
     #[test]
@@ -551,51 +575,81 @@ mod tests {
     }
 
     #[test]
-    fn a_silenced_pad_keeps_its_style_and_changes_colour() {
-        for state in EVERY_STATE.into_iter().filter(|s| s.clip().is_some()) {
-            let heard = pad(state, true);
-            let silenced = pad(state, false);
-
-            assert_eq!(
-                silenced.style, heard.style,
-                "{state:?} should keep what it is doing"
+    fn a_marked_group_lights_end_to_end() {
+        for state in EVERY_STATE {
+            let led = marked_pad(state, MUTED);
+            assert!(
+                led.is_lit(),
+                "{state:?} should light so the group reads as one thing"
             );
-            assert_eq!(silenced.color, LedColor::Red);
-            assert_ne!(silenced, heard);
+            assert_eq!(led.color, MUTED);
         }
     }
 
     #[test]
-    fn a_pad_with_no_clip_is_unchanged_by_silence() {
-        for state in EVERY_STATE.into_iter().filter(|s| s.clip().is_none()) {
-            assert_eq!(pad(state, false), pad(state, true), "{state:?}");
-        }
-    }
-
-    #[test]
-    fn the_grid_shows_silence_without_being_asked() {
-        let mut session = SessionModel::new();
-        session.mirror(addr(0, 0), SlotState::Playing { clip: ClipId(0) });
-        session.mirror(addr(1, 0), SlotState::Playing { clip: ClipId(1) });
-
-        let painted = frame(
-            &session,
-            Chrome {
-                muted: bit(addr(0, 0)),
-                ..Chrome::default()
-            },
-        );
-
-        assert_eq!(painted.pad(addr(0, 0)), Led::pulse(LedColor::Red));
+    fn a_marked_pad_still_says_what_it_is_doing() {
+        // An empty pad sits dim, a clip waiting is steady, one playing pulses.
+        assert_eq!(marked_pad(SlotState::Empty, MUTED).style, LedStyle::Dim);
         assert_eq!(
-            painted.pad(addr(1, 0)),
-            Led::pulse(LedColor::Green),
-            "the rest carry on looking like themselves"
+            marked_pad(SlotState::Stopped { clip: ClipId(0) }, MUTED).style,
+            LedStyle::Solid
+        );
+        assert_eq!(
+            marked_pad(SlotState::Playing { clip: ClipId(0) }, MUTED).style,
+            LedStyle::Pulse
+        );
+        assert_eq!(
+            marked_pad(
+                SlotState::QueuedPlay {
+                    clip: ClipId(0),
+                    at: Frames(0)
+                },
+                MUTED
+            )
+            .style,
+            LedStyle::Flash
         );
     }
 
     #[test]
-    fn a_solo_silences_the_look_of_everything_outside_it() {
+    fn a_marked_pad_keeps_the_movement_it_had() {
+        let playing = SlotState::Playing { clip: ClipId(0) };
+        let stopped = SlotState::Stopped { clip: ClipId(0) };
+
+        assert_eq!(marked_pad(playing, MUTED).style, pad(playing).style);
+        assert_ne!(
+            marked_pad(playing, MUTED).style,
+            marked_pad(stopped, MUTED).style,
+            "a pulsing loop must not look like a parked one"
+        );
+    }
+
+    #[test]
+    fn a_silenced_row_reads_as_a_row() {
+        let mut session = SessionModel::new();
+        session.mirror(addr(0, 0), SlotState::Playing { clip: ClipId(0) });
+        session.mirror(addr(0, 1), SlotState::Stopped { clip: ClipId(1) });
+
+        let painted = frame(
+            &session,
+            Chrome {
+                muted: row_mask(TrackId::new(0).unwrap()),
+                ..Chrome::default()
+            },
+        );
+
+        assert_eq!(painted.pad(addr(0, 0)), Led::pulse(MUTED));
+        assert_eq!(painted.pad(addr(0, 1)), Led::solid(MUTED));
+        assert_eq!(
+            painted.pad(addr(0, 7)),
+            Led::dim(MUTED),
+            "the empty end of the row lights too"
+        );
+        assert_eq!(painted.pad(addr(1, 0)), Led::OFF, "and stops at the row");
+    }
+
+    #[test]
+    fn mute_and_solo_are_told_apart_by_colour() {
         let mut session = SessionModel::new();
         session.mirror(addr(0, 0), SlotState::Playing { clip: ClipId(0) });
         session.mirror(addr(1, 0), SlotState::Playing { clip: ClipId(1) });
@@ -603,13 +657,32 @@ mod tests {
         let painted = frame(
             &session,
             Chrome {
-                soloed: bit(addr(0, 0)),
+                muted: row_mask(TrackId::new(0).unwrap()),
+                soloed: row_mask(TrackId::new(1).unwrap()),
                 ..Chrome::default()
             },
         );
 
-        assert_eq!(painted.pad(addr(0, 0)), Led::pulse(LedColor::Green));
-        assert_eq!(painted.pad(addr(1, 0)), Led::pulse(LedColor::Red));
+        assert_eq!(painted.pad(addr(0, 0)).color, MUTED);
+        assert_eq!(painted.pad(addr(1, 0)).color, SOLOED);
+        assert_ne!(MUTED, SOLOED);
+    }
+
+    #[test]
+    fn silence_outranks_solo_on_the_same_group() {
+        let mut session = SessionModel::new();
+        session.mirror(addr(0, 0), SlotState::Playing { clip: ClipId(0) });
+        let row = row_mask(TrackId::new(0).unwrap());
+
+        let painted = frame(
+            &session,
+            Chrome {
+                muted: row,
+                soloed: row,
+                ..Chrome::default()
+            },
+        );
+        assert_eq!(painted.pad(addr(0, 0)).color, MUTED);
     }
 
     #[test]
