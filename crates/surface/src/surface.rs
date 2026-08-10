@@ -16,6 +16,16 @@ pub enum SurfaceError {
 
 /// A grid controller.
 pub trait ControlSurface {
+    /// Lets time pass. Call every pass of the control loop.
+    ///
+    /// Devices that need no upkeep ignore it.
+    fn tick(&mut self, _now: core::time::Duration) {}
+
+    /// Whether a device is attached. Surfaces that cannot lose one are always attached.
+    fn is_connected(&self) -> bool {
+        true
+    }
+
     /// Appends everything the performer has done since the last call.
     ///
     /// Never blocks.
