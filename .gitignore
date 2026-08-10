@@ -3,3 +3,7 @@
 .env
 .env.local
 .DS_Store
+
+# Per-rig configuration and recorded sessions
+free-loop.toml
+sessions/
