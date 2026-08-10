@@ -203,9 +203,8 @@ impl SessionStore {
 
     /// Reads a session back.
     ///
-    /// The audio comes back in freshly allocated storage, which the caller owns. Frame
-    /// counts only mean the same thing at the rate they were written at, so a session
-    /// recorded for a different setup is refused rather than played wrong.
+    /// The audio comes back in freshly allocated storage, which the caller owns. Lengths
+    /// and phases are frame counts, so a session recorded at another rate is refused.
     ///
     /// # Errors
     ///
