@@ -148,6 +148,10 @@ impl Audio {
         self.clips[addr.track.index()][addr.slot.index()].take()
     }
 
+    fn stop_recording(&mut self, addr: SlotAddr) {
+        self.recordings[addr.track.index()][addr.slot.index()] = None;
+    }
+
     fn put_clip(&mut self, addr: SlotAddr, clip: Arc<Clip>) {
         self.clips[addr.track.index()][addr.slot.index()] = Some(clip);
     }
@@ -466,6 +470,9 @@ impl Engine {
             LoadMessage::Begin { tempo: wanted } => {
                 tempo = Some(wanted);
                 for addr in SlotAddr::all() {
+                    // A take left running would write live input into whatever the load
+                    // puts on that pad.
+                    audio.stop_recording(addr);
                     if let Some(held) = audio.take_clip(addr) {
                         audio.retire(held);
                     }

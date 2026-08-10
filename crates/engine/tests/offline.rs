@@ -914,3 +914,42 @@ fn recording_onto_a_loaded_session_captures_audio() {
         "the take recorded onto a loaded session should sound"
     );
 }
+
+#[test]
+fn a_session_loaded_at_the_start_of_a_run_plays_cleanly() {
+    let mut harness = Harness::new(128);
+    let pad = addr(0, 0);
+    let len = 4_096;
+
+    // A phase near the end of the loop, against a transport that has barely started.
+    let phase = len - 64;
+    harness
+        .housekeeping
+        .loader
+        .send(LoadMessage::Begin {
+            tempo: Tempo::new(120.0).unwrap(),
+        })
+        .unwrap();
+    harness
+        .housekeeping
+        .loader
+        .send(LoadMessage::Clip {
+            addr: pad,
+            clip: lent_clip(len, phase),
+            playing: true,
+        })
+        .unwrap();
+    harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+    harness.run_frames(128);
+
+    harness.command(Command::SetPaused(false));
+    let from = harness.position();
+    let out = harness.run_to(from + 2 * len);
+
+    for (i, sample) in out.iter().enumerate() {
+        let frame = from + (i / CHANNELS) as u64;
+        let channel = i % CHANNELS;
+        let want = signal((frame + len - phase) % len, channel);
+        assert_eq!(*sample, want, "frame {frame} replayed the wrong phase");
+    }
+}

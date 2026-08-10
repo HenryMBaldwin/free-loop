@@ -265,7 +265,10 @@ impl Clip {
         }
 
         let total = dst.len() / self.channels;
-        let mut phase = position.0.saturating_sub(self.recorded_at.0) % len;
+        // Modular rather than saturating: a clip loaded from a session can sit ahead of
+        // the transport, and clamping to zero would replay the same fragment every block
+        // until the transport caught up.
+        let mut phase = (position.0 % len + len - self.recorded_at.0 % len) % len;
         let mut done = 0;
 
         while done < total {
@@ -374,6 +377,39 @@ mod tests {
         let mut out = vec![0.0; 2 * CH];
         clip.mix_into(Frames(106), &mut out);
         assert_eq!(out, vec![4.0, 5.0, 6.0, 7.0]);
+    }
+
+    #[test]
+    fn a_clip_ahead_of_the_transport_still_plays_its_phase() {
+        let mut pool = SegmentPool::new(2, CH);
+        let mut buffer = AudioBuffer::new(2, CH);
+        buffer.write(0, &ramp(4, 0), &mut pool);
+
+        // Saved with a phase near the end of the loop, then played from a transport that
+        // has only just started.
+        let clip = Clip::new(buffer, Frames(4), Frames(3), CH);
+
+        let mut out = vec![0.0; 2 * CH];
+        clip.mix_into(Frames(0), &mut out);
+        assert_eq!(out, vec![2.0, 3.0, 4.0, 5.0], "phase 1, not phase 0");
+
+        let mut later = vec![0.0; 2 * CH];
+        clip.mix_into(Frames(1), &mut later);
+        assert_eq!(later, vec![4.0, 5.0, 6.0, 7.0], "and it advances");
+    }
+
+    #[test]
+    fn phase_is_the_same_a_whole_number_of_loops_apart() {
+        let mut pool = SegmentPool::new(2, CH);
+        let mut buffer = AudioBuffer::new(2, CH);
+        buffer.write(0, &ramp(4, 0), &mut pool);
+        let clip = Clip::new(buffer, Frames(4), Frames(3), CH);
+
+        let mut early = vec![0.0; 4 * CH];
+        let mut late = vec![0.0; 4 * CH];
+        clip.mix_into(Frames(1), &mut early);
+        clip.mix_into(Frames(1 + 4 * 1_000), &mut late);
+        assert_eq!(early, late);
     }
 
     #[test]
