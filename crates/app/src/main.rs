@@ -22,7 +22,7 @@ use free_loop_audio::{AudioIo, Negotiated, open};
 use free_loop_core::{Command, Event};
 use free_loop_engine::{Engine, Housekeeping, LoadMessage, Loader, Snapshot};
 use free_loop_session::{SavedClip, SessionData, SessionStore};
-use free_loop_surface::{ControlSurface, LaunchpadX, MockSurface, SurfaceError, SurfaceEvent};
+use free_loop_surface::{ControlSurface, LaunchpadX, Reconnecting, SurfaceEvent};
 
 /// How often the control loop runs.
 const TICK: Duration = Duration::from_millis(2);
@@ -181,9 +181,12 @@ fn run(s: Session<'_>) {
     let started = Instant::now();
     // Only known once the driver has run a callback and said how much it buffers.
     let mut reported_latency = false;
+    let mut connected = surface.is_connected();
 
     while running.load(Ordering::Relaxed) {
         let now = started.elapsed();
+
+        connected = watch_surface(surface, now, connected);
 
         events.clear();
         surface.poll(&mut events);
@@ -256,20 +259,7 @@ fn run(s: Session<'_>) {
             .drain(|snapshot| snapshots.push(snapshot));
 
         if snapshot_ready && let Some(addr) = pending_save.take() {
-            match save(
-                store,
-                addr,
-                config,
-                &negotiated,
-                &snapshots,
-                controller.gains(),
-            ) {
-                Ok(()) => {
-                    println!("saved session {}{}", addr.track.index(), addr.slot.index());
-                    controller.session_saved(addr);
-                }
-                Err(error) => eprintln!("save failed: {error}"),
-            }
+            write_session(store, addr, config, &negotiated, &snapshots, controller);
             snapshots.clear();
         }
 
@@ -429,24 +419,59 @@ fn load(
     Ok(gains)
 }
 
-/// Connects a Launchpad, falling back to a surface with no hardware behind it.
+/// Writes a snapshot to a pad and tells the controller it landed.
+fn write_session(
+    store: &SessionStore,
+    addr: free_loop_core::SlotAddr,
+    config: &Config,
+    negotiated: &Negotiated,
+    snapshots: &[Snapshot],
+    controller: &mut Controller,
+) {
+    match save(
+        store,
+        addr,
+        config,
+        negotiated,
+        snapshots,
+        controller.gains(),
+    ) {
+        Ok(()) => {
+            println!("saved session {}{}", addr.track.index(), addr.slot.index());
+            controller.session_saved(addr);
+        }
+        Err(error) => eprintln!("save failed: {error}"),
+    }
+}
+
+/// Lets the surface look for its device, reporting when it comes or goes.
+///
+/// Returns whether one is attached now.
+fn watch_surface(surface: &mut dyn ControlSurface, now: Duration, connected: bool) -> bool {
+    surface.tick(now);
+
+    let attached = surface.is_connected();
+    if attached != connected {
+        if attached {
+            println!("surface: Launchpad X back");
+        } else {
+            eprintln!("surface: gone, still looking");
+        }
+    }
+    attached
+}
+
+/// Connects a Launchpad, and keeps looking for one as long as the process runs.
 ///
 /// A missing pad is not fatal: the click and the audio path still work.
 fn connect_surface() -> Box<dyn ControlSurface> {
-    match LaunchpadX::connect() {
-        Ok(launchpad) => {
-            println!("surface: Launchpad X");
-            Box::new(launchpad)
-        }
-        Err(SurfaceError::NotFound) => {
-            println!("surface: none found, running headless");
-            Box::new(MockSurface::new())
-        }
-        Err(error) => {
-            eprintln!("surface: {error}; running headless");
-            Box::new(MockSurface::new())
-        }
+    let surface = Reconnecting::new(LaunchpadX::connect);
+    if surface.is_connected() {
+        println!("surface: Launchpad X");
+    } else {
+        println!("surface: none found, still looking");
     }
+    Box::new(surface)
 }
 
 /// Prints what is worth knowing. Bars, beats and slot changes are on the grid already.
