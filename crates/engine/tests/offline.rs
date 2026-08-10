@@ -1291,6 +1291,71 @@ fn a_quiet_mix_is_left_alone() {
     assert!(!clipped);
 }
 
+mod starvation {
+    use super::*;
+
+    /// Renders `frames` with the device delivering nothing at all.
+    fn render_starved(harness: &mut Harness, frames: usize) -> Vec<f32> {
+        let mut out = vec![0.0; frames * CHANNELS];
+        harness.engine.process(&[], &mut out, &mut harness.events);
+        out
+    }
+
+    #[test]
+    fn a_device_that_delivers_nothing_is_survivable() {
+        let mut harness = Harness::new(512);
+        // Part way into a beat, so the block the device fails on is split at the boundary.
+        harness.run_to(BEAT - 256);
+
+        let out = render_starved(&mut harness, 512);
+        assert!(
+            out.iter().all(|s| *s == 0.0),
+            "nothing to play and nothing in"
+        );
+        assert_eq!(harness.position(), BEAT + 256, "the transport carried on");
+    }
+
+    #[test]
+    fn a_starved_block_is_reported_as_an_xrun() {
+        let mut harness = Harness::new(512);
+        render_starved(&mut harness, 512);
+
+        let xruns: Vec<u64> = harness
+            .drain_events()
+            .iter()
+            .filter_map(|event| match event {
+                Event::Xrun { frames } => Some(*frames),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(xruns, vec![512]);
+    }
+
+    #[test]
+    fn a_take_across_a_starved_block_keeps_its_length() {
+        let mut harness = Harness::new(512);
+        let pad = addr(0, 0);
+        harness.command(Command::Press(pad));
+        harness.run_to(BAR + BEAT - 256);
+
+        // The device drops out mid take.
+        render_starved(&mut harness, 512);
+        harness.run_to(2 * BAR);
+        harness.command(Command::Press(pad));
+        harness.run_to(2 * BAR + 1);
+
+        let recorded = harness.drain_events().iter().find_map(|event| match event {
+            Event::ClipRecorded { len, .. } => Some(*len),
+            _ => None,
+        });
+        assert_eq!(
+            recorded,
+            Some(Frames(2 * BAR)),
+            "silence for part of it, but the full length"
+        );
+    }
+}
+
 mod declick {
     use super::*;
     use free_loop_core::row_mask;
