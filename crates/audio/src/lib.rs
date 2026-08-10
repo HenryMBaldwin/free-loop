@@ -18,4 +18,4 @@ pub mod stream;
 pub use config::{AudioConfig, Negotiated};
 pub use error::AudioError;
 pub use ring::{CaptureReader, CaptureWriter, ChannelMap, InputSource, MAX_BLOCK_FRAMES};
-pub use stream::{AudioIo, DeviceList, Opened, list_devices, open};
+pub use stream::{AudioIo, DeviceChange, DeviceList, Opened, RETRY_INTERVAL, list_devices, open};
