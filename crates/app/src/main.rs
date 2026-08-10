@@ -180,6 +180,7 @@ fn run(s: Session<'_>) {
     let mut events: Vec<SurfaceEvent> = Vec::new();
     let mut snapshots: Vec<Snapshot> = Vec::new();
     let mut pending_save: Option<free_loop_core::SlotAddr> = None;
+    let mut clipping = ClipReport::default();
     let started = Instant::now();
     // Only known once the driver has run a callback and said how much it buffers.
     let mut reported_latency = false;
@@ -234,15 +235,18 @@ fn run(s: Session<'_>) {
 
         let mut snapshot_ready = false;
         let mut clock_ticks = 0;
+        let mut clipped = 0_u32;
         io.drain_events(|event| {
             match event {
                 Event::SnapshotComplete { .. } => snapshot_ready = true,
                 Event::Clock { ticks } => clock_ticks += ticks,
+                Event::Clipped { samples } => clipped += samples,
                 _ => {}
             }
             report(event);
             controller.on_engine(event);
         });
+        clipping.note(clipped, now);
 
         // Keeps the device's flash and pulse animations on the transport's tempo.
         if clock_ticks > 0
@@ -277,6 +281,32 @@ fn run(s: Session<'_>) {
         reported_latency |= report_latency(io, &negotiated, reported_latency);
 
         std::thread::sleep(TICK);
+    }
+}
+
+/// How long to gather clipping before saying anything.
+const CLIP_REPORT_EVERY: Duration = Duration::from_secs(2);
+
+/// Counts clipped samples and mentions them now and then.
+#[derive(Default)]
+struct ClipReport {
+    samples: u64,
+    last: Duration,
+}
+
+impl ClipReport {
+    fn note(&mut self, samples: u32, now: Duration) {
+        self.samples += u64::from(samples);
+        if self.samples == 0 || now.saturating_sub(self.last) < CLIP_REPORT_EVERY {
+            return;
+        }
+
+        eprintln!(
+            "output is clipping ({} samples held); turn tracks down with the volume button",
+            self.samples
+        );
+        self.samples = 0;
+        self.last = now;
     }
 }
 
@@ -443,7 +473,9 @@ fn report(event: Event) {
             );
         }
         Event::TempoRejected => eprintln!("tempo is locked while clips exist"),
-        Event::SnapshotComplete { .. }
+        // Clipping reports per block, too often to print. `ClipReport` throttles it.
+        Event::Clipped { .. }
+        | Event::SnapshotComplete { .. }
         | Event::Clock { .. }
         | Event::Bar { .. }
         | Event::Beat { .. }
