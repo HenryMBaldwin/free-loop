@@ -434,13 +434,11 @@ impl Engine {
 
     /// Sets the round-trip latency to compensate for.
     ///
-    /// Captured audio arrives this many frames after it was played, so a clip's frames
-    /// describe a moment that has already passed. Rather than shifting the audio, the
-    /// clip is stamped as having started that much earlier, which puts every frame back
-    /// on the grid position it was played at.
+    /// Captured audio arrives this many frames after it was played. The clip is stamped
+    /// as having started that much earlier, which puts every frame back on the grid
+    /// position it was played at.
     ///
-    /// Takes effect on the next recording sealed; a take already in progress keeps the
-    /// value it started with.
+    /// Takes effect on the next recording sealed.
     pub fn set_capture_offset(&mut self, offset: Frames) {
         self.capture_offset = offset;
         self.audio.capture_offset = offset;

@@ -54,9 +54,8 @@ impl Loader {
     ///
     /// # Errors
     ///
-    /// [`LoadFull`] with the message back if the engine has not drained the queue. A
-    /// load is a handful of messages against a queue the engine empties every block, so
-    /// this means the audio thread has stalled.
+    /// [`LoadFull`] with the message back if the engine has not drained the queue, which
+    /// means the audio thread has stalled.
     pub fn send(&mut self, message: LoadMessage) -> Result<(), LoadFull> {
         self.out
             .push(message)
