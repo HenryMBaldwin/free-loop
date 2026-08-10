@@ -482,7 +482,16 @@ fn connect_surface() -> Box<dyn ControlSurface> {
     if surface.is_connected() {
         println!("surface: Launchpad X");
     } else {
-        println!("surface: none found, still looking");
+        println!(
+            "surface: no port containing \"{}\", still looking",
+            LaunchpadX::PORT_KEYWORD
+        );
+        let ports = free_loop_surface::output_ports();
+        if ports.is_empty() {
+            println!("surface: the host lists no midi outputs at all");
+        } else {
+            println!("surface: midi outputs seen: {}", ports.join(", "));
+        }
     }
     Box::new(surface)
 }

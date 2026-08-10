@@ -26,6 +26,15 @@ pub trait ControlSurface {
         true
     }
 
+    /// Whether the device is still there, checked without writing to it.
+    ///
+    /// A write that fails is not the only way a device goes away: sends to a port that
+    /// has vanished can report success, and nothing is written at all while the transport
+    /// is stopped and the grid unchanged.
+    fn is_present(&self) -> bool {
+        true
+    }
+
     /// Appends everything the performer has done since the last call.
     ///
     /// Never blocks.
