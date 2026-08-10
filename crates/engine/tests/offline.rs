@@ -916,29 +916,30 @@ fn recording_onto_a_loaded_session_captures_audio() {
 }
 
 #[test]
-fn rewinding_starts_every_loop_at_its_beginning() {
+fn rewinding_keeps_loops_where_they_were_against_each_other() {
     let mut harness = Harness::new(128);
-    let short = addr(0, 0);
-    let long = addr(1, 0);
+    let two_bar = addr(0, 0);
+    let four_bar = addr(1, 0);
 
-    // Different tracks, so both play at once.
-    record(&mut harness, short, 0, 1);
-    let after = harness.position();
-    record(&mut harness, long, after, 2);
+    // Two bars from the top, then four bars starting on an odd bar, so the two bar loop
+    // is halfway through when the four bar one begins. That relationship is the music.
+    record(&mut harness, two_bar, 0, 2);
+    harness.run_to(3 * BAR);
+    record(&mut harness, four_bar, 3 * BAR, 4);
 
     harness.command(Command::Rewind);
     assert_eq!(harness.engine.position(), Frames::ZERO);
 
     let out = harness.run_frames(64);
-    let expected: Vec<f32> = (0..64 * CHANNELS)
-        .map(|i| {
-            let frame = (i / CHANNELS) as u64;
-            let channel = i % CHANNELS;
-            // Each loop begins together, contributing its own first frames.
-            signal(frame, channel) + signal(2 * BAR + frame, channel)
-        })
-        .collect();
-    assert_eq!(out, expected);
+    for (i, sample) in out.iter().enumerate() {
+        let frame = (i / CHANNELS) as u64;
+        let channel = i % CHANNELS;
+
+        // The longest loop is at its beginning, and the shorter one is still halfway.
+        let four = signal(3 * BAR + frame, channel);
+        let two = signal(BAR + frame, channel);
+        assert_eq!(*sample, two + four, "frame {frame}");
+    }
 }
 
 #[test]
@@ -993,4 +994,72 @@ fn rewinding_works_while_playing() {
         let channel = i % CHANNELS;
         assert_eq!(*sample, signal(frame, channel));
     }
+}
+
+#[test]
+fn rewinding_does_not_strand_a_queued_launch() {
+    let mut harness = Harness::new(128);
+    let playing = addr(0, 0);
+    let waiting = addr(1, 0);
+
+    record(&mut harness, playing, 0, 1);
+    let after = harness.position();
+    record(&mut harness, waiting, after, 1);
+    harness.command(Command::Press(waiting));
+    harness.run_to(harness.position() + BAR + 1);
+    assert_eq!(
+        harness.engine.state(waiting),
+        SlotState::Stopped { clip: ClipId(1) }
+    );
+
+    // Queue it, then rewind before the bar line it was waiting for.
+    harness.run_to(harness.position() + BAR / 3);
+    harness.command(Command::Press(waiting));
+    assert!(matches!(
+        harness.engine.state(waiting),
+        SlotState::QueuedPlay { .. }
+    ));
+
+    harness.command(Command::Rewind);
+    harness.run_frames(128);
+
+    assert!(
+        matches!(harness.engine.state(waiting), SlotState::Playing { .. }),
+        "a queued launch must fire at the start, not wait for the old bar line"
+    );
+}
+
+#[test]
+fn rewinding_does_not_strand_a_queued_stop() {
+    let mut harness = Harness::new(128);
+    let pad = addr(0, 0);
+    record(&mut harness, pad, 0, 1);
+
+    harness.run_to(harness.position() + BAR / 3);
+    harness.command(Command::Press(pad));
+    assert!(matches!(
+        harness.engine.state(pad),
+        SlotState::QueuedStop { .. }
+    ));
+
+    harness.command(Command::Rewind);
+    harness.run_frames(128);
+
+    assert!(matches!(
+        harness.engine.state(pad),
+        SlotState::Stopped { .. }
+    ));
+}
+
+#[test]
+fn rewinding_discards_a_take_in_progress() {
+    let mut harness = Harness::new(128);
+    let pad = addr(0, 0);
+
+    harness.command(Command::Press(pad));
+    harness.run_to(2 * BAR);
+    assert!(harness.engine.state(pad).is_recording());
+
+    harness.command(Command::Rewind);
+    assert_eq!(harness.engine.state(pad), SlotState::Empty);
 }
