@@ -161,6 +161,7 @@ pub struct Clip {
     len: Frames,
     recorded_at: Frames,
     channels: usize,
+    capture_offset: Frames,
 }
 
 impl Clip {
@@ -172,6 +173,7 @@ impl Clip {
             len,
             recorded_at,
             channels,
+            capture_offset: Frames::ZERO,
         }
     }
 
@@ -183,6 +185,20 @@ impl Clip {
     /// The transport position capture began at. Fixes the loop's phase against the grid.
     pub fn recorded_at(&self) -> Frames {
         self.recorded_at
+    }
+
+    /// The round trip that was compensated for when this was sealed.
+    ///
+    /// Already folded into [`Clip::recorded_at`] and not read back when playing. Kept so
+    /// a recording describes how it was aligned, which a bad latency reading would
+    /// otherwise leave permanently baked in and invisible.
+    pub fn capture_offset(&self) -> Frames {
+        self.capture_offset
+    }
+
+    /// Records the round trip compensated for.
+    pub fn set_capture_offset(&mut self, offset: Frames) {
+        self.capture_offset = offset;
     }
 
     /// An empty clip sized for `max_segments`, ready to be recorded into.
@@ -199,6 +215,7 @@ impl Clip {
     pub fn reset(&mut self) {
         self.len = Frames::ZERO;
         self.recorded_at = Frames::ZERO;
+        self.capture_offset = Frames::ZERO;
     }
 
     /// Sets the loop length.

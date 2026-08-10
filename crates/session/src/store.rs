@@ -146,6 +146,7 @@ impl SessionStore {
                 len_frames: len.0,
                 phase_frames: phase_of(saved.clip),
                 playing: saved.playing,
+                capture_offset_frames: saved.clip.capture_offset().0,
             });
         }
 
@@ -326,12 +327,14 @@ mod tests {
             .map(|i| i as f32 / 1000.0)
             .collect();
         buffer.write(0, &audio, &mut pool);
-        Clip::new(
+        let mut clip = Clip::new(
             buffer,
             Frames(frames as u64),
             Frames(recorded_at),
             usize::from(CH),
-        )
+        );
+        clip.set_capture_offset(Frames(64));
+        clip
     }
 
     fn data<'a>(clips: Vec<SavedClip<'a>>) -> SessionData<'a> {
@@ -382,6 +385,10 @@ mod tests {
         assert_eq!(entry.addr().unwrap(), addr(1, 0));
         assert_eq!(entry.len_frames, 128);
         assert_eq!(entry.phase_frames, 300 % 128, "phase survives a restart");
+        assert_eq!(
+            entry.capture_offset_frames, 64,
+            "the alignment stays visible"
+        );
         assert!(entry.playing);
         assert!(dir.0.join("25").join(&entry.file).is_file());
     }

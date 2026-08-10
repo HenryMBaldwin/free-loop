@@ -217,6 +217,26 @@ fn compensation_puts_playback_back_on_the_grid() {
 }
 
 #[test]
+fn a_clip_records_the_offset_it_was_sealed_with() {
+    const LATENCY: u64 = 2_048;
+
+    let mut harness = Harness::with_offset(128, Frames(LATENCY));
+    let pad = addr(0, 0);
+    record(&mut harness, pad, 1_000, 1);
+    harness.command(Command::Snapshot);
+
+    let mut seen = Vec::new();
+    harness.housekeeping.snapshots.drain(|s| seen.push(s));
+
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        seen[0].clip.capture_offset(),
+        Frames(LATENCY),
+        "the alignment must stay visible after the fact"
+    );
+}
+
+#[test]
 fn without_compensation_playback_sits_late_by_the_round_trip() {
     const LATENCY: u64 = 2_048;
 

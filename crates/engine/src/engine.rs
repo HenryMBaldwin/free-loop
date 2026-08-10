@@ -211,6 +211,7 @@ impl Audio {
                 // so that is the grid position it belongs to.
                 inner.set_len(len);
                 inner.set_recorded_at(started_at.saturating_sub(self.capture_offset));
+                inner.set_capture_offset(self.capture_offset);
 
                 self.next_clip_id = clip.next();
                 sink.event(Event::ClipRecorded { addr, clip, len });
