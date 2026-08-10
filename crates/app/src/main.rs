@@ -78,10 +78,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
 
     let config = Config::load(&path)?;
-    println!("config: {}", path.display());
+    // A missing config falls back to the default devices, which sounds like broken
+    // recording rather than like a missing file unless it says so here.
+    if path.exists() {
+        println!("config: {}", path.display());
+    } else {
+        println!("config: {} not found, using defaults", path.display());
+    }
 
     let opened = open(&config.audio())?;
     let negotiated = opened.negotiated();
+    println!("input:  {}", opened.input_name());
+    println!("output: {}", opened.output_name());
     println!(
         "audio: {} Hz, {} channels in / {} out, {} frames of cushion",
         negotiated.sample_rate,
@@ -89,6 +97,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         negotiated.channels,
         negotiated.cushion_frames
     );
+    match config.audio.input_channel {
+        Some(channel) => println!("capturing device input channel {channel} onto every side"),
+        None => println!("capturing device input channels in order"),
+    }
 
     let (engine, mut housekeeping) =
         Engine::new(config.engine(negotiated.sample_rate, negotiated.channels)?)?;
