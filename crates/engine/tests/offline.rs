@@ -23,8 +23,11 @@ const BEAT: u64 = BAR / 4;
 
 /// A distinct value per frame and channel. The 977 modulus is coprime with the bar
 /// length, so a phase error cannot coincidentally produce matching samples.
+///
+/// Scaled to a fraction of full scale, and by a power of two so every value is exact in
+/// `f32`. Several tracks can sum without reaching the limit the engine holds them at.
 fn signal(frame: u64, channel: usize) -> f32 {
-    (frame % 977) as f32 + channel as f32 * 0.25
+    ((frame % 977) as f32 + channel as f32 * 0.25) / 4_096.0
 }
 
 struct Harness {
@@ -1224,4 +1227,37 @@ fn gain_is_per_track_not_per_grid() {
         let second = signal(2 * BAR + (frame - 2 * BAR) % BAR, channel);
         assert_eq!(*sample, first + second, "frame {frame}");
     }
+}
+
+#[test]
+fn nothing_leaves_the_engine_past_full_scale() {
+    let mut harness = Harness::new(128);
+    let first = addr(0, 0);
+    let second = addr(1, 0);
+    record(&mut harness, first, 0, 1);
+    let after = harness.position();
+    record(&mut harness, second, after, 1);
+
+    // Both tracks at the top of the ladder, which sums past full scale.
+    let top = u8::try_from(free_loop_core::GAIN_STEPS - 1).unwrap();
+    harness.command(Command::SetGains([top; free_loop_core::TRACK_COUNT]));
+
+    let out = harness.run_to(harness.position() + BAR);
+    assert!(out.iter().all(|s| (-1.0..=1.0).contains(s)));
+}
+
+#[test]
+fn a_quiet_mix_is_left_alone() {
+    let mut harness = Harness::new(128);
+    let pad = addr(0, 0);
+    record(&mut harness, pad, 0, 1);
+
+    harness.drain_events();
+
+    harness.run_frames(512);
+    let clipped = harness
+        .drain_events()
+        .iter()
+        .any(|e| matches!(e, Event::Clipped { .. }));
+    assert!(!clipped);
 }
