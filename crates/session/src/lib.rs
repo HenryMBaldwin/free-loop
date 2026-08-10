@@ -10,4 +10,4 @@ pub mod manifest;
 pub mod store;
 
 pub use manifest::{ClipEntry, Manifest};
-pub use store::{SavedClip, SessionData, SessionError, SessionStore};
+pub use store::{LoadedClip, LoadedSession, SavedClip, SessionData, SessionError, SessionStore};

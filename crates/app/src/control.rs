@@ -37,6 +37,19 @@ pub enum Mode {
     Perform,
     /// Sessions, waiting for one to be chosen to save over.
     SavePicker,
+    /// Sessions, waiting for one to be chosen to load.
+    LoadPicker,
+}
+
+impl Mode {
+    /// The button that opens a picker, if this mode is one.
+    fn button(self) -> Option<Control> {
+        match self {
+            Self::Perform => None,
+            Self::SavePicker => Some(Control::SaveSession),
+            Self::LoadPicker => Some(Control::LoadSession),
+        }
+    }
 }
 
 /// Work for the caller to do, which the controller cannot because it owns no I/O.
@@ -44,6 +57,8 @@ pub enum Mode {
 pub enum Request {
     /// Write the session under this pad.
     SaveSession(SlotAddr),
+    /// Read the session under this pad.
+    LoadSession(SlotAddr),
 }
 
 /// Turns gestures into commands and reports into a frame.
@@ -137,6 +152,30 @@ impl Controller {
         self.dirty = true;
     }
 
+    /// Opens a picker, or closes it if it was already open.
+    fn set_mode(&mut self, wanted: Mode) {
+        self.mode = if self.mode == wanted {
+            Mode::Perform
+        } else {
+            wanted
+        };
+        self.dirty = true;
+    }
+
+    /// Records that a session was loaded, and leaves the picker.
+    pub fn session_loaded(&mut self, addr: SlotAddr, paused: bool) {
+        self.current = Some(addr);
+        self.chrome.paused = paused;
+        self.mode = Mode::Perform;
+        self.dirty = true;
+    }
+
+    /// Leaves the picker without doing anything, after a request failed.
+    pub fn cancel_picker(&mut self) {
+        self.mode = Mode::Perform;
+        self.dirty = true;
+    }
+
     /// Records which session is in use, and leaves the picker.
     pub fn session_saved(&mut self, addr: SlotAddr) {
         self.sessions |= bit(addr);
@@ -155,6 +194,12 @@ impl Controller {
         match event {
             SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::SavePicker => {
                 self.requests.push(Request::SaveSession(addr));
+            }
+            SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::LoadPicker => {
+                // Nothing to load from a pad that holds nothing.
+                if self.sessions & bit(addr) != 0 {
+                    self.requests.push(Request::LoadSession(addr));
+                }
             }
             SurfaceEvent::PadPressed { addr, .. } => {
                 // Nothing yet: which gesture this is depends on how long it lasts.
@@ -180,11 +225,10 @@ impl Controller {
             SurfaceEvent::ControlPressed(Control::TempoUp) => self.nudge_tempo(TEMPO_STEP),
             SurfaceEvent::ControlPressed(Control::StopAll) => self.commands.push(Command::StopAll),
             SurfaceEvent::ControlPressed(Control::SaveSession) => {
-                self.mode = match self.mode {
-                    Mode::SavePicker => Mode::Perform,
-                    Mode::Perform => Mode::SavePicker,
-                };
-                self.dirty = true;
+                self.set_mode(Mode::SavePicker);
+            }
+            SurfaceEvent::ControlPressed(Control::LoadSession) => {
+                self.set_mode(Mode::LoadPicker);
             }
             SurfaceEvent::SidePressed { index } if usize::from(index) == PAUSE_SIDE => {
                 self.chrome.paused = !self.chrome.paused;
@@ -192,9 +236,8 @@ impl Controller {
                 self.dirty = true;
             }
 
-            // Loading is not wired up yet, and the other side buttons are unbound.
-            SurfaceEvent::ControlPressed(Control::LoadSession)
-            | SurfaceEvent::ControlReleased(_)
+            // The other side buttons are unbound.
+            SurfaceEvent::ControlReleased(_)
             | SurfaceEvent::SidePressed { .. }
             | SurfaceEvent::SideReleased { .. } => {}
         }
@@ -283,13 +326,8 @@ impl Controller {
             return None;
         }
 
-        if self.mode == Mode::SavePicker {
-            self.frame = paint::picker(
-                self.sessions,
-                self.current,
-                self.chrome,
-                Control::SaveSession,
-            );
+        if let Some(button) = self.mode.button() {
+            self.frame = paint::picker(self.sessions, self.current, self.chrome, button);
             self.dirty = false;
             return Some(&self.frame);
         }
@@ -410,13 +448,6 @@ mod tests {
         assert_ne!(frozen.side(PAUSE_SIDE), running);
     }
 
-    #[test]
-    fn loading_is_not_wired_up_yet() {
-        let mut controller = controller();
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
-        assert!(commands(&mut controller).is_empty());
-    }
-
     fn requests(controller: &mut Controller) -> Vec<Request> {
         controller.drain_requests().collect()
     }
@@ -461,6 +492,63 @@ mod tests {
             commands(&mut controller).is_empty(),
             "choosing where to save must not empty a pad"
         );
+    }
+
+    #[test]
+    fn the_load_button_opens_its_own_picker() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        assert_eq!(controller.mode(), Mode::LoadPicker);
+
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        assert_eq!(controller.mode(), Mode::Perform);
+    }
+
+    #[test]
+    fn one_picker_replaces_the_other() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        assert_eq!(controller.mode(), Mode::LoadPicker);
+    }
+
+    #[test]
+    fn loading_an_empty_pad_asks_for_nothing() {
+        let mut controller = controller();
+        controller.set_sessions([addr(1, 1)]);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+
+        press(&mut controller, addr(0, 0), T0);
+        assert!(
+            requests(&mut controller).is_empty(),
+            "nothing is saved there"
+        );
+
+        press(&mut controller, addr(1, 1), T0);
+        assert_eq!(
+            requests(&mut controller),
+            vec![Request::LoadSession(addr(1, 1))]
+        );
+    }
+
+    #[test]
+    fn a_completed_load_leaves_the_picker_frozen() {
+        let mut controller = controller();
+        controller.set_sessions([addr(2, 2)]);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        controller.session_loaded(addr(2, 2), true);
+
+        assert_eq!(controller.mode(), Mode::Perform);
+        assert_eq!(controller.current_session(), Some(addr(2, 2)));
+        assert!(controller.paused(), "a loaded session waits to be started");
+    }
+
+    #[test]
+    fn a_failed_request_still_leaves_the_picker() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        controller.cancel_picker();
+        assert_eq!(controller.mode(), Mode::Perform);
     }
 
     #[test]

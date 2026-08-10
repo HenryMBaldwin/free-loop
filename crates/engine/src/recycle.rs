@@ -62,6 +62,8 @@ pub struct Recycler {
     waiting: Vec<Arc<Clip>>,
     /// Swapped with `waiting` each pass so the retry list never reallocates.
     scratch: Vec<Arc<Clip>>,
+    /// Storage the caller lent the engine, which the caller keeps.
+    borrowed: Vec<Arc<Clip>>,
 }
 
 impl Recycler {
@@ -82,7 +84,16 @@ impl Recycler {
             // nothing is mutated through it.
             let alone = Arc::get_mut(&mut candidate).is_some();
 
-            if !alone || self.returned.is_full() {
+            if !alone {
+                self.scratch.push(candidate);
+                continue;
+            }
+            // Storage the caller lent goes back to the caller, not into engine pools.
+            if candidate.is_borrowed() {
+                self.borrowed.push(candidate);
+                continue;
+            }
+            if self.returned.is_full() {
                 self.scratch.push(candidate);
                 continue;
             }
@@ -98,6 +109,11 @@ impl Recycler {
     /// Clips retired but still being read elsewhere.
     pub fn waiting(&self) -> usize {
         self.waiting.len()
+    }
+
+    /// Takes back storage the caller lent the engine, ready to be filled again.
+    pub fn take_borrowed(&mut self) -> std::vec::Drain<'_, Arc<Clip>> {
+        self.borrowed.drain(..)
     }
 }
 
@@ -117,6 +133,7 @@ pub fn channel() -> (Retirement, Recycler) {
             returned: returned_tx,
             waiting: Vec::with_capacity(SLOTS),
             scratch: Vec::with_capacity(SLOTS),
+            borrowed: Vec::with_capacity(SLOTS),
         },
     )
 }
@@ -205,6 +222,23 @@ mod tests {
         recycler.run();
         engine.reclaim(|_| taken += 1);
         assert_eq!(taken, SLOTS + 1, "every clip came home");
+    }
+
+    #[test]
+    fn borrowed_storage_goes_back_to_the_caller() {
+        let (mut engine, mut recycler) = channel();
+        let mut lent = clip();
+        Arc::get_mut(&mut lent).unwrap().set_borrowed(true);
+
+        engine.retire(lent);
+        engine.retire(clip());
+
+        assert_eq!(recycler.run(), 1, "only the engine's own goes back to it");
+
+        let taken: Vec<_> = recycler.take_borrowed().collect();
+        assert_eq!(taken.len(), 1);
+        assert!(taken[0].is_borrowed());
+        assert_eq!(recycler.take_borrowed().count(), 0, "taken once");
     }
 
     #[test]

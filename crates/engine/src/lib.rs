@@ -6,6 +6,7 @@
 //!
 //! - [`buffer`]: pooled audio storage for recorded clips.
 //! - [`click`]: the metronome.
+//! - [`load`]: putting a saved session back in.
 //! - [`recycle`]: returning retired clips to the pools without dropping them on the
 //!   audio thread.
 //! - [`snapshot`]: handing clips out to be read off the audio thread.
@@ -13,11 +14,13 @@
 pub mod buffer;
 pub mod click;
 mod engine;
+pub mod load;
 pub mod recycle;
 pub mod snapshot;
 
 pub use buffer::{AudioBuffer, Clip, SEGMENT_FRAMES, Segment, SegmentPool};
 pub use click::{Click, ClickConfig};
 pub use engine::{Engine, EngineConfig, EngineError, EventSink, Housekeeping};
+pub use load::{LoadMessage, Loader};
 pub use recycle::{Recycler, Retirement};
 pub use snapshot::{Snapshot, SnapshotReader};
