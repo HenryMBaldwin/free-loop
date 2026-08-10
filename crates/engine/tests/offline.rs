@@ -50,6 +50,8 @@ impl Harness {
             enabled: false,
             level: 0.0,
         };
+        // Ramps are asserted on their own. Everything else compares exact frames.
+        config.declick = Frames::ZERO;
         let (engine, housekeeping) = Engine::new(config).unwrap();
         Self {
             engine,
@@ -57,6 +59,23 @@ impl Harness {
             events: Vec::new(),
             block,
         }
+    }
+
+    fn with_declick(block: usize, declick: Frames) -> Self {
+        let mut harness = Self::new(block);
+        harness.engine = {
+            let mut config = EngineConfig::stereo_48k().unwrap();
+            config.segment_pool = 12;
+            config.click = ClickConfig {
+                enabled: false,
+                level: 0.0,
+            };
+            config.declick = declick;
+            let (engine, housekeeping) = Engine::new(config).unwrap();
+            harness.housekeeping = housekeeping;
+            engine
+        };
+        harness
     }
 
     fn with_click(block: usize) -> Self {
@@ -100,6 +119,16 @@ impl Harness {
             .collect();
         let mut out = vec![0.0; frames * CHANNELS];
         self.engine.process(&input, &mut out, &mut self.events);
+        out
+    }
+
+    /// Runs `count` blocks of the harness's block size.
+    fn run_blocks(&mut self, count: usize) -> Vec<f32> {
+        let mut out = Vec::new();
+        for _ in 0..count {
+            let block = self.run_frames(self.block);
+            out.extend_from_slice(&block);
+        }
         out
     }
 
@@ -1260,4 +1289,164 @@ fn a_quiet_mix_is_left_alone() {
         .iter()
         .any(|e| matches!(e, Event::Clipped { .. }));
     assert!(!clipped);
+}
+
+mod declick {
+    use super::*;
+    use free_loop_core::row_mask;
+
+    /// Frames a level takes to travel the full range in these tests. Two blocks of 128.
+    const RAMP: u64 = 256;
+
+    /// Blocks for a fade, plus the one that carries out what was waiting on it.
+    const BLOCKS: usize = 3;
+
+    fn is_silent(out: &[f32]) -> bool {
+        out.iter().all(|s| *s == 0.0)
+    }
+
+    fn playing(block: usize) -> (Harness, SlotAddr, u64) {
+        let mut harness = Harness::with_declick(block, Frames(RAMP));
+        let pad = addr(0, 0);
+        let (start, end) = record(&mut harness, pad, 0, 1);
+        (harness, pad, end - start)
+    }
+
+    fn mute(harness: &mut Harness, pad: SlotAddr) {
+        harness.command(Command::SetMutes {
+            muted: row_mask(pad.track),
+            soloed: 0,
+        });
+    }
+
+    fn unmute(harness: &mut Harness) {
+        harness.command(Command::SetMutes {
+            muted: 0,
+            soloed: 0,
+        });
+    }
+
+    #[test]
+    fn muting_fades_out_rather_than_cutting() {
+        let (mut harness, pad, _) = playing(128);
+        mute(&mut harness, pad);
+
+        let fading = harness.run_blocks(BLOCKS);
+        assert!(!is_silent(&fading), "the audio is on its way down");
+        assert!(
+            is_silent(&harness.run_blocks(2)),
+            "and reaches silence rather than stopping part way"
+        );
+    }
+
+    #[test]
+    fn unmuting_fades_in_rather_than_stepping() {
+        let (mut harness, pad, len) = playing(128);
+        mute(&mut harness, pad);
+        harness.run_blocks(BLOCKS);
+
+        unmute(&mut harness);
+        let from = harness.position();
+        let faded = harness.run_to(from + len);
+        // A loop length later the same audio comes round at full level.
+        let reference = harness.run_to(from + 2 * len);
+
+        assert_eq!(faded[0], 0.0, "the first frame back is silent");
+        assert_ne!(faded, reference, "and the ones after it are quieter");
+        for (faded, reference) in faded.iter().zip(&reference) {
+            assert!(
+                faded.abs() <= reference.abs(),
+                "a fade in never passes the level it is heading for"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fade_is_over_within_its_ramp() {
+        let (mut harness, pad, len) = playing(128);
+        mute(&mut harness, pad);
+        harness.run_blocks(BLOCKS);
+        unmute(&mut harness);
+        harness.run_blocks(BLOCKS);
+
+        let from = harness.position();
+        let after = harness.run_to(from + len);
+        let reference = harness.run_to(from + 2 * len);
+        assert_eq!(after, reference, "the ramp is transient, not a gain change");
+    }
+
+    #[test]
+    fn a_rewind_waits_for_the_mix_to_fade() {
+        let (mut harness, _, _) = playing(128);
+        let before = harness.position();
+
+        harness.command(Command::Rewind);
+        assert!(
+            !is_silent(&harness.run_blocks(1)),
+            "the first block after the press is still sounding"
+        );
+        assert!(harness.position() > before, "and the move has not happened");
+
+        harness.run_blocks(BLOCKS);
+        assert!(harness.position() < before, "the transport went back");
+    }
+
+    #[test]
+    fn a_transport_move_lands_on_silence() {
+        let (mut harness, _, _) = playing(128);
+        harness.command(Command::Rewind);
+
+        let mut previous = harness.position();
+        let mut moved = false;
+        for _ in 0..8 {
+            let out = harness.run_blocks(1);
+            let now = harness.position();
+            if now < previous {
+                assert_eq!(out[0], 0.0, "the jump happens at silence");
+                moved = true;
+                break;
+            }
+            previous = now;
+        }
+        assert!(moved, "the rewind never happened");
+    }
+
+    #[test]
+    fn pausing_fades_before_it_freezes() {
+        let (mut harness, _, _) = playing(128);
+        harness.command(Command::SetPaused(true));
+        assert!(!harness.engine.is_paused(), "the freeze waits for the fade");
+
+        harness.run_blocks(BLOCKS);
+        assert!(harness.engine.is_paused());
+        assert!(is_silent(&harness.run_blocks(1)));
+    }
+
+    #[test]
+    fn playing_again_cancels_a_pause_that_has_not_landed() {
+        let (mut harness, _, _) = playing(128);
+        harness.command(Command::SetPaused(true));
+        harness.command(Command::SetPaused(false));
+
+        harness.run_blocks(BLOCKS);
+        assert!(!harness.engine.is_paused());
+        assert!(!is_silent(&harness.run_blocks(1)), "and it kept playing");
+    }
+
+    #[test]
+    fn a_launch_fades_in() {
+        let (mut harness, pad, _) = playing(128);
+        // A press on a sounding pad stops it at the next bar line, not at once.
+        harness.command(Command::Press(pad));
+        let stops_at = (harness.position() / BAR + 1) * BAR;
+        harness.run_to(stops_at + RAMP + 128);
+        assert!(is_silent(&harness.run_blocks(1)), "stopped and faded out");
+
+        harness.command(Command::Press(pad));
+        // The launch is queued to the next bar line, so the fade in starts there.
+        let next_bar = (harness.position() / BAR + 1) * BAR;
+        let out = harness.run_to(next_bar + RAMP);
+        assert_eq!(out[0], 0.0, "nothing sounds before the bar line");
+        assert!(!is_silent(&out), "and it comes back after it");
+    }
 }
