@@ -20,7 +20,7 @@ pub mod snapshot;
 
 pub use buffer::{AudioBuffer, Clip, Ramp, SEGMENT_FRAMES, Segment, SegmentPool};
 pub use click::{Click, ClickConfig};
-pub use engine::{Engine, EngineConfig, EngineError, EventSink, Housekeeping};
+pub use engine::{DEFAULT_DECLICK, Engine, EngineConfig, EngineError, EventSink, Housekeeping};
 pub use load::{LoadMessage, Loader};
 pub use recycle::{Recycler, Retirement};
 pub use snapshot::{Snapshot, SnapshotReader};

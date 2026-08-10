@@ -72,6 +72,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         segment_pool: 64,
         capture_offset: Frames::ZERO,
         click: ClickConfig::default(),
+        declick: free_loop_engine::DEFAULT_DECLICK,
     })?;
     let frames_per_bar = engine.grid().frames_per_bar().0;
 
