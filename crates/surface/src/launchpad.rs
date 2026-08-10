@@ -119,6 +119,9 @@ pub struct LaunchpadX {
     input: launchy::InputDeviceHandlerPolling<x::Message>,
     /// What the device is currently showing, so renders can send only what changed.
     shown: LedFrame,
+    /// Set when something other than a render has touched the device, so the next one
+    /// sends every button rather than trusting `shown`.
+    stale: bool,
     changes: Vec<(x::Button, x::ButtonStyle)>,
 }
 
@@ -148,30 +151,44 @@ impl LaunchpadX {
             output,
             input,
             shown: LedFrame::new(),
+            stale: false,
             changes: Vec::with_capacity(MAX_BUTTONS),
         })
     }
 
     fn collect_changes(&mut self, frame: &LedFrame) {
-        self.changes.clear();
+        diff(&self.shown, frame, self.stale, &mut self.changes);
+    }
+}
 
-        for addr in SlotAddr::all() {
-            let led = frame.pad(addr);
-            if led != self.shown.pad(addr) {
-                self.changes.push((pad_button(addr), style(led)));
-            }
+/// Collects the buttons that need sending.
+///
+/// `stale` sends every button, which is what darkens anything left behind by something
+/// that wrote to the device outside a render.
+fn diff(
+    shown: &LedFrame,
+    frame: &LedFrame,
+    stale: bool,
+    out: &mut Vec<(x::Button, x::ButtonStyle)>,
+) {
+    out.clear();
+
+    for addr in SlotAddr::all() {
+        let led = frame.pad(addr);
+        if stale || led != shown.pad(addr) {
+            out.push((pad_button(addr), style(led)));
         }
-        for index in 0..SIDE_COUNT {
-            let led = frame.side(index);
-            if led != self.shown.side(index) {
-                self.changes.push((side_button(index), style(led)));
-            }
+    }
+    for index in 0..SIDE_COUNT {
+        let led = frame.side(index);
+        if stale || led != shown.side(index) {
+            out.push((side_button(index), style(led)));
         }
-        for index in 0..CONTROL_COUNT {
-            let led = frame.control(index);
-            if led != self.shown.control(index) {
-                self.changes.push((control_button(index), style(led)));
-            }
+    }
+    for index in 0..CONTROL_COUNT {
+        let led = frame.control(index);
+        if stale || led != shown.control(index) {
+            out.push((control_button(index), style(led)));
         }
     }
 }
@@ -208,26 +225,28 @@ impl ControlSurface for LaunchpadX {
 
         self.output.set_buttons(&self.changes).map_err(convert)?;
         self.shown = *frame;
+        self.stale = false;
         Ok(())
     }
 
     fn clear(&mut self) -> Result<(), SurfaceError> {
         self.output.clear().map_err(convert)?;
         self.shown = LedFrame::new();
+        self.stale = false;
         Ok(())
     }
 
     fn show_text(&mut self, text: &str) -> Result<(), SurfaceError> {
+        // Text takes the grid over, so nothing `shown` says about it holds any more.
+        self.stale = true;
         self.output
             .scroll_text(text.as_bytes(), palette(LedColor::White), TEXT_SPEED, false)
             .map_err(convert)
     }
 
     fn stop_text(&mut self) -> Result<(), SurfaceError> {
-        self.output.stop_scroll().map_err(convert)?;
-        // The device blanks the grid while text runs, so everything has to be sent again.
-        self.shown = LedFrame::new();
-        Ok(())
+        self.stale = true;
+        self.output.stop_scroll().map_err(convert)
     }
 }
 
@@ -285,6 +304,36 @@ mod tests {
         for index in [2, 3] {
             assert!(target(control_button(index)).is_none());
         }
+    }
+
+    #[test]
+    fn a_diff_sends_only_what_moved() {
+        let shown = LedFrame::new();
+        let mut frame = LedFrame::new();
+        frame.set_pad(addr(2, 2), Led::solid(LedColor::Red));
+
+        let mut out = Vec::new();
+        diff(&shown, &frame, false, &mut out);
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn an_unchanged_frame_sends_nothing() {
+        let frame = LedFrame::new();
+        let mut out = Vec::new();
+        diff(&frame, &frame, false, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_stale_device_is_sent_every_button() {
+        let frame = LedFrame::new();
+        let mut out = Vec::new();
+
+        // Identical frames, so without the flag nothing would be sent and whatever the
+        // device is actually showing would stay there.
+        diff(&frame, &frame, true, &mut out);
+        assert_eq!(out.len(), MAX_BUTTONS);
     }
 
     #[test]
