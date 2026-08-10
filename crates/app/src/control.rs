@@ -2,7 +2,7 @@
 //!
 //! Sits between the surface and the engine: gestures in, commands out, reports in, a
 //! frame out. Owns no I/O and takes the time as an argument rather than reading a clock,
-//! so the whole mapping — hold timing included — is testable without a device.
+//! so the mapping and the hold timing are both testable without a device.
 //!
 //! The session model here is a mirror. The engine owns the real one, because only it
 //! knows where the transport is; this copy exists to paint the grid.
@@ -34,8 +34,8 @@ fn bit(addr: SlotAddr) -> u64 {
 ///
 /// A pad's action lands on release rather than on press, because a press cannot be told
 /// from the start of a hold. That costs the length of the tap in latency, which only
-/// matters if the tap straddles the bar line it was aimed at — acting on press instead
-/// would mean a hold arms and starts recording before the clear kills it.
+/// matters if the tap straddles the bar line it was aimed at. Acting on press instead
+/// would let a hold arm and start recording before the clear killed it.
 #[derive(Debug)]
 pub struct Controller {
     session: SessionModel,

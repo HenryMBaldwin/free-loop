@@ -1,13 +1,13 @@
 //! Pure domain model for Free Loop.
 //!
-//! No I/O, no threads, no allocation — only value types and pure functions, so timing
+//! No I/O, no threads, no allocation. Only value types and pure functions, so timing
 //! behaviour is testable with a fake clock and no hardware.
 //!
-//! - [`time`] — the bar grid and the quantisation rules.
-//! - [`ids`] — the fixed 8×8 grid of pads, and clip identity.
-//! - [`slot`] — the per-pad state machine.
-//! - [`session`] — the whole grid, and the rules that span more than one pad.
-//! - [`command`] / [`event`] — the vocabulary crossing the realtime boundary.
+//! - [`time`]: the bar grid and the quantisation rules.
+//! - [`ids`]: the fixed 8×8 grid of pads, and clip identity.
+//! - [`slot`]: the per-pad state machine.
+//! - [`session`]: the whole grid, and the rules that span more than one pad.
+//! - [`command`] / [`event`]: the vocabulary crossing the realtime boundary.
 
 pub mod command;
 pub mod event;

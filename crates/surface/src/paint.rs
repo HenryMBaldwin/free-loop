@@ -112,8 +112,7 @@ pub fn frame(session: &SessionModel, chrome: Chrome) -> LedFrame {
     beat_indicator(&mut frame, chrome);
     frame.set_side(PAUSE_SIDE, pause_button(chrome));
 
-    // The other side buttons are unbound, so they stay dark rather than implying they
-    // work.
+    // The other side buttons are unbound, so they stay dark.
     frame
 }
 

@@ -5,11 +5,11 @@
 //! row carries the transport and session controls, with the beat indicator sharing its
 //! first four buttons.
 //!
-//! - [`led`] — what to show, in device-neutral terms.
-//! - [`paint`] — turning session state into a frame. All the colour policy lives here.
-//! - [`event`] — what the performer did.
-//! - [`mock`] — a surface with no hardware, for tests and headless runs.
-//! - [`launchpad`] — the Launchpad X.
+//! - [`led`]: what to show, in device-neutral terms.
+//! - [`paint`]: turning session state into a frame. All the colour policy lives here.
+//! - [`event`]: what the performer did.
+//! - [`mock`]: a surface with no hardware, for tests and headless runs.
+//! - [`launchpad`]: the Launchpad X.
 
 pub mod event;
 pub mod launchpad;

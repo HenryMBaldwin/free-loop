@@ -9,8 +9,8 @@
 //!
 //! Naming an input channel spreads that one device channel across both sides. An
 //! interface reports every input whether or not anything is plugged in, so a single
-//! instrument needs to say which channel it is on — a Scarlett Solo's instrument jack
-//! is channel 1.
+//! instrument needs to say which channel it is on. A Scarlett Solo's instrument jack is
+//! channel 1.
 
 use std::error::Error;
 use std::time::{Duration, Instant};
@@ -113,7 +113,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             Event::SlotChanged { state, .. } => match state {
                 SlotState::Recording { .. } => {
                     recording = true;
-                    println!("=== RECORDING {RECORD_BARS} BARS — PLAY ===");
+                    println!("=== RECORDING {RECORD_BARS} BARS, PLAY ===");
                 }
                 SlotState::Playing { .. } => {
                     recording = false;

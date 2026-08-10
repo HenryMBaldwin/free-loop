@@ -5,8 +5,8 @@
 //! pools rather than being dropped.
 //!
 //! Blocks are split at beat boundaries. When a boundary falls inside the block the run
-//! is cut there, the transition is applied, and rendering resumes — so a launch lands on
-//! the exact frame it was scheduled for rather than at the next block edge.
+//! is cut there, the transition is applied, and rendering resumes. A launch lands on the
+//! exact frame it was scheduled for rather than at the next block edge.
 
 use free_loop_core::{
     BarGrid, ClipId, Command, Ctx, Effect, Event, Frames, MIN_BPM, SLOT_COUNT, SampleRate,
