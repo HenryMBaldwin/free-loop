@@ -1064,8 +1064,8 @@ mod tests {
         let frame = controller.take_frame().unwrap();
         assert_eq!(
             frame.control(FIRST_BEAT_LED + 2),
-            Led::dim(LedColor::Blue),
-            "the current beat, off the backbeat"
+            Led::solid(LedColor::Blue),
+            "the current beat"
         );
         // Beat one shares the tempo up button, which keeps its own colour meanwhile.
         assert_ne!(frame.control(FIRST_BEAT_LED), Led::solid(LedColor::White));
