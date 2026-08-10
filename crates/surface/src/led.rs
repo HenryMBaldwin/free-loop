@@ -31,6 +31,8 @@ pub enum LedColor {
     Blue,
     /// Row grouping.
     Purple,
+    /// Something is selected and waiting for the next press.
+    Pink,
 }
 
 impl LedColor {
@@ -44,6 +46,7 @@ impl LedColor {
             Self::Green => (0, 255, 0),
             Self::Blue => (0, 80, 255),
             Self::Purple => (160, 0, 255),
+            Self::Pink => (255, 90, 170),
         }
     }
 }
