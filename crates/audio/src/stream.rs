@@ -237,6 +237,7 @@ impl Opened {
             capture_offset,
             input_latency,
             retry_at: None,
+            check_at: RETRY_INTERVAL,
             refusal: None,
         };
         io.spawn(&self)?;
@@ -274,6 +275,8 @@ pub struct AudioIo {
     input_latency: Arc<AtomicU32>,
     /// Time of the next attempt, or `None` while the devices are running.
     retry_at: Option<Duration>,
+    /// Time of the next check that the named devices are still there.
+    check_at: Duration,
     /// The last reason a reopen was refused, so it is reported once.
     refusal: Option<String>,
 }
@@ -324,6 +327,16 @@ impl AudioIo {
             let starved = self.health.starved.load(Ordering::Relaxed);
             if starved_out(starved, self.negotiated.sample_rate) {
                 self.health.lost.store(true, Ordering::Relaxed);
+            }
+
+            if now >= self.check_at {
+                self.check_at = now + RETRY_INTERVAL;
+                let host = cpal::default_host();
+                if !named_present(&host, self.config.input_device.as_deref(), false)
+                    || !named_present(&host, self.config.output_device.as_deref(), true)
+                {
+                    self.health.lost.store(true, Ordering::Relaxed);
+                }
             }
 
             if !self.health.lost.swap(false, Ordering::Relaxed) {
@@ -692,6 +705,18 @@ where
     Ok(stream)
 }
 
+/// Whether a device the configuration names by name is still there.
+///
+/// A device that is unplugged can be replaced by the host rather than reported as an
+/// error, which leaves the streams running against something else entirely. A name that
+/// no longer matches anything is the only sign of that.
+fn named_present(host: &Host, wanted: Option<&str>, output: bool) -> bool {
+    let Some(wanted) = wanted else {
+        return true;
+    };
+    find_device(host, Some(wanted), output).is_ok()
+}
+
 /// Whether the capture has delivered nothing for long enough to count as gone.
 fn starved_out(frames: u32, sample_rate: u32) -> bool {
     frames >= sample_rate.saturating_mul(STARVED_SECONDS)
@@ -845,6 +870,19 @@ mod tests {
             compatible(negotiated(48_000, 2), found).is_ok(),
             "only the rate and the engine's channel count are fixed"
         );
+    }
+
+    #[test]
+    fn a_configuration_naming_no_device_is_always_satisfied() {
+        let host = cpal::default_host();
+        assert!(named_present(&host, None, true));
+        assert!(named_present(&host, None, false));
+    }
+
+    #[test]
+    fn a_name_matching_nothing_is_a_loss() {
+        let host = cpal::default_host();
+        assert!(!named_present(&host, Some("no such device anywhere"), true));
     }
 
     #[test]

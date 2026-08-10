@@ -198,6 +198,16 @@ impl Controller {
         self.chrome.paused
     }
 
+    /// Freezes the transport without a press, for something the performer did not ask for.
+    pub fn pause(&mut self) {
+        if self.chrome.paused {
+            return;
+        }
+        self.chrome.paused = true;
+        self.commands.push(Command::SetPaused(true));
+        self.dirty = true;
+    }
+
     /// What the grid is showing.
     pub fn mode(&self) -> Mode {
         self.mode
@@ -1389,6 +1399,29 @@ mod tests {
             controller.tick(millis(at));
         }
         assert_eq!(controller.tempo(), 121.0, "just the tap");
+    }
+
+    #[test]
+    fn a_device_loss_freezes_the_transport() {
+        let mut controller = controller();
+        assert!(!controller.paused());
+
+        controller.pause();
+        assert!(controller.paused(), "and the grid says so");
+        assert!(commands(&mut controller).contains(&Command::SetPaused(true)));
+    }
+
+    #[test]
+    fn a_device_loss_while_already_paused_changes_nothing() {
+        let mut controller = controller();
+        controller.pause();
+        let _ = commands(&mut controller);
+
+        controller.pause();
+        assert!(
+            commands(&mut controller).is_empty(),
+            "no second pause to send"
+        );
     }
 
     #[test]
