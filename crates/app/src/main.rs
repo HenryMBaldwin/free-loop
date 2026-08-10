@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use free_loop::config::{self, Config};
-use free_loop::control::{Controller, Request};
+use free_loop::control::{Controller, Request, TextUpdate};
 use free_loop_audio::{AudioIo, Negotiated, open};
 use free_loop_core::{Command, Event};
 use free_loop_engine::{Engine, Housekeeping, LoadMessage, Loader, Snapshot};
@@ -260,11 +260,7 @@ fn run(s: Session<'_>) {
             snapshots.clear();
         }
 
-        if let Some(frame) = controller.take_frame()
-            && let Err(error) = surface.render(frame)
-        {
-            eprintln!("surface: {error}");
-        }
+        repaint(surface, controller);
 
         if !reported_latency {
             let frames = io.capture_offset_frames();
@@ -311,6 +307,28 @@ fn save(
             clips,
         },
     )
+}
+
+/// Shows any text, then any frame.
+///
+/// Text takes the grid over while it runs, so it goes first and the frame that follows
+/// puts the grid back.
+fn repaint(surface: &mut dyn ControlSurface, controller: &mut Controller) {
+    if let Some(update) = controller.take_text() {
+        let shown = match update {
+            TextUpdate::Show(text) => surface.show_text(&text),
+            TextUpdate::Stop => surface.stop_text(),
+        };
+        if let Err(error) = shown {
+            eprintln!("surface: {error}");
+        }
+    }
+
+    if let Some(frame) = controller.take_frame()
+        && let Err(error) = surface.render(frame)
+    {
+        eprintln!("surface: {error}");
+    }
 }
 
 /// Reads a session off disk and hands it to the engine.

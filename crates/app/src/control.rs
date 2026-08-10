@@ -25,6 +25,15 @@ pub const CLEAR_HOLD: Duration = Duration::from_secs(1);
 /// How long into a hold the pad starts warning that it is about to empty.
 pub const CLEAR_WARNING: Duration = Duration::from_millis(400);
 
+/// Beats per minute a tempo button moves once it starts repeating.
+pub const TEMPO_HOLD_STEP: f64 = 5.0;
+
+/// How long a tempo button must be held before it starts repeating.
+pub const TEMPO_HOLD_DELAY: Duration = Duration::from_millis(400);
+
+/// How often a held tempo button repeats.
+pub const TEMPO_HOLD_INTERVAL: Duration = Duration::from_millis(120);
+
 /// Bit for a pad in the grid masks.
 fn bit(addr: SlotAddr) -> u64 {
     1 << (addr.track.index() * SLOT_COUNT + addr.slot.index())
@@ -50,6 +59,26 @@ impl Mode {
             Self::LoadPicker => Some(Control::LoadSession),
         }
     }
+}
+
+/// A tempo button being held down.
+#[derive(Debug, Clone, Copy)]
+struct TempoHold {
+    /// Which way it moves.
+    delta: f64,
+    /// When it went down.
+    since: Duration,
+    /// When it last moved.
+    last: Duration,
+}
+
+/// Something for the surface to display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextUpdate {
+    /// Show this.
+    Show(String),
+    /// Stop showing anything.
+    Stop,
 }
 
 /// Work for the caller to do, which the controller cannot because it owns no I/O.
@@ -80,6 +109,10 @@ pub struct Controller {
     warning: u64,
     commands: Vec<Command>,
     requests: Vec<Request>,
+    /// A tempo button being held down.
+    tempo_hold: Option<TempoHold>,
+    /// A display change the caller has not picked up yet.
+    text: Option<TextUpdate>,
     mode: Mode,
     /// A bit per pad that holds a session.
     sessions: u64,
@@ -109,6 +142,8 @@ impl Controller {
             warning: 0,
             commands: Vec::new(),
             requests: Vec::new(),
+            tempo_hold: None,
+            text: None,
             mode: Mode::Perform,
             sessions: 0,
             current: None,
@@ -184,6 +219,11 @@ impl Controller {
         self.dirty = true;
     }
 
+    /// Takes a display change, if there is one.
+    pub fn take_text(&mut self) -> Option<TextUpdate> {
+        self.text.take()
+    }
+
     /// Takes everything the caller needs to act on.
     pub fn drain_requests(&mut self) -> std::vec::Drain<'_, Request> {
         self.requests.drain(..)
@@ -221,8 +261,11 @@ impl Controller {
                     .push(Command::SetClickEnabled(self.chrome.click_enabled));
                 self.dirty = true;
             }
-            SurfaceEvent::ControlPressed(Control::TempoDown) => self.nudge_tempo(-TEMPO_STEP),
-            SurfaceEvent::ControlPressed(Control::TempoUp) => self.nudge_tempo(TEMPO_STEP),
+            SurfaceEvent::ControlPressed(Control::TempoDown) => self.press_tempo(-1.0, now),
+            SurfaceEvent::ControlPressed(Control::TempoUp) => self.press_tempo(1.0, now),
+            SurfaceEvent::ControlReleased(Control::TempoDown | Control::TempoUp) => {
+                self.release_tempo();
+            }
             SurfaceEvent::ControlPressed(Control::StopAll) => self.commands.push(Command::StopAll),
             SurfaceEvent::ControlPressed(Control::SaveSession) => {
                 self.set_mode(Mode::SavePicker);
@@ -248,6 +291,8 @@ impl Controller {
     /// Call every pass of the control loop, or a hold will only complete when something
     /// else happens to arrive.
     pub fn tick(&mut self, now: Duration) {
+        self.repeat_tempo(now);
+
         let mut warning = 0;
 
         for addr in SlotAddr::all() {
@@ -270,6 +315,52 @@ impl Controller {
             self.warning = warning;
             self.dirty = true;
         }
+    }
+
+    /// Nudges once and arms the repeat.
+    fn press_tempo(&mut self, direction: f64, now: Duration) {
+        self.nudge_tempo(direction * TEMPO_STEP);
+        self.tempo_hold = Some(TempoHold {
+            delta: direction * TEMPO_HOLD_STEP,
+            since: now,
+            last: now,
+        });
+    }
+
+    /// Stops the repeat and puts the grid back.
+    fn release_tempo(&mut self) {
+        // Only take the display back if the hold actually got as far as showing it.
+        if self
+            .tempo_hold
+            .take()
+            .is_some_and(|hold| hold.last > hold.since)
+        {
+            self.text = Some(TextUpdate::Stop);
+            self.dirty = true;
+        }
+    }
+
+    /// Moves the tempo again while a button stays down.
+    ///
+    /// The number is invisible on the grid, so a repeat that moves five at a time shows
+    /// it. A single tap does not, since the text takes the grid over to say it.
+    fn repeat_tempo(&mut self, now: Duration) {
+        let Some(hold) = self.tempo_hold else {
+            return;
+        };
+        if now.saturating_sub(hold.since) < TEMPO_HOLD_DELAY
+            || now.saturating_sub(hold.last) < TEMPO_HOLD_INTERVAL
+        {
+            return;
+        }
+
+        self.nudge_tempo(hold.delta);
+        self.tempo_hold = Some(TempoHold { last: now, ..hold });
+
+        let bpm = self.tempo.round();
+        #[expect(clippy::cast_possible_truncation, reason = "tempo is under 300")]
+        let shown = bpm as i32;
+        self.text = Some(TextUpdate::Show(shown.to_string()));
     }
 
     fn nudge_tempo(&mut self, delta: f64) {
@@ -628,6 +719,98 @@ mod tests {
         controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoDown), T0);
         assert_eq!(controller.tempo(), 119.0);
         assert_eq!(commands(&mut controller).len(), 3);
+    }
+
+    #[test]
+    fn a_tap_moves_one_beat_and_says_nothing() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
+        controller.on_surface(SurfaceEvent::ControlReleased(Control::TempoUp), millis(80));
+
+        assert_eq!(controller.tempo(), 121.0);
+        assert_eq!(
+            controller.take_text(),
+            None,
+            "text would take the grid over to say one beat"
+        );
+    }
+
+    #[test]
+    fn a_short_hold_does_not_start_repeating() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
+        for at in (0..400).step_by(20) {
+            controller.tick(millis(at));
+        }
+        assert_eq!(controller.tempo(), 121.0, "just the tap");
+    }
+
+    #[test]
+    fn a_held_button_repeats_in_fives() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
+
+        controller.tick(millis(400));
+        assert_eq!(controller.tempo(), 126.0, "the tap plus one repeat");
+
+        controller.tick(millis(520));
+        assert_eq!(controller.tempo(), 131.0);
+    }
+
+    #[test]
+    fn a_held_button_repeats_downwards_too() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoDown), T0);
+        controller.tick(millis(400));
+        assert_eq!(controller.tempo(), 114.0);
+    }
+
+    #[test]
+    fn a_repeat_shows_the_bpm_and_gives_the_grid_back() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
+        controller.tick(millis(400));
+
+        assert_eq!(
+            controller.take_text(),
+            Some(TextUpdate::Show("126".to_owned()))
+        );
+
+        controller.on_surface(SurfaceEvent::ControlReleased(Control::TempoUp), millis(500));
+        assert_eq!(controller.take_text(), Some(TextUpdate::Stop));
+    }
+
+    #[test]
+    fn a_tap_leaves_no_text_to_stop() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoDown), T0);
+        controller.on_surface(
+            SurfaceEvent::ControlReleased(Control::TempoDown),
+            millis(50),
+        );
+        assert_eq!(controller.take_text(), None);
+    }
+
+    #[test]
+    fn releasing_stops_the_repeat() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
+        controller.tick(millis(400));
+        controller.on_surface(SurfaceEvent::ControlReleased(Control::TempoUp), millis(450));
+
+        let settled = controller.tempo();
+        controller.tick(millis(2_000));
+        assert_eq!(controller.tempo(), settled);
+    }
+
+    #[test]
+    fn a_repeat_stops_at_the_supported_range() {
+        let mut controller = Controller::new(MAX_BPM - 2.0, 4, true);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
+        for at in (0..2_000).step_by(20) {
+            controller.tick(millis(at));
+        }
+        assert_eq!(controller.tempo(), MAX_BPM);
     }
 
     #[test]
