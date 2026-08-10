@@ -10,8 +10,12 @@
     reason = "tests should fail loudly, and compare exact sample values"
 )]
 
-use free_loop_core::{ClipId, Command, Event, Frames, SlotAddr, SlotId, SlotState, TrackId};
-use free_loop_engine::{ClickConfig, Engine, EngineConfig, Housekeeping, Snapshot};
+use free_loop_core::{ClipId, Command, Event, Frames, SlotAddr, SlotId, SlotState, Tempo, TrackId};
+use free_loop_engine::{
+    ClickConfig, Engine, EngineConfig, Housekeeping, LoadMessage, Snapshot,
+    buffer::{AudioBuffer, Clip, SegmentPool},
+};
+use std::sync::Arc;
 
 const CHANNELS: usize = 2;
 const BAR: u64 = 96_000; // 120 bpm, 4/4, 48 kHz
@@ -542,6 +546,174 @@ fn a_held_snapshot_delays_reclaiming_the_pad() {
     harness.housekeeping.recycler.run();
     harness.run_frames(64);
     assert_eq!(harness.engine.segments_available(), available);
+}
+
+/// A clip whose samples say which frame they came from, allocated outside the engine.
+fn lent_clip(frames: u64, phase: u64) -> Arc<Clip> {
+    let mut pool = SegmentPool::new(64, CHANNELS);
+    let mut buffer = AudioBuffer::new(64, CHANNELS);
+    let channels = CHANNELS as u64;
+    let audio: Vec<f32> = (0..frames * channels)
+        .map(|i| signal(i / channels, usize::try_from(i % channels).unwrap_or(0)))
+        .collect();
+    buffer.write(0, &audio, &mut pool);
+
+    let mut clip = Clip::new(buffer, Frames(frames), Frames(phase), CHANNELS);
+    clip.set_borrowed(true);
+    Arc::new(clip)
+}
+
+#[test]
+fn a_loaded_session_lands_on_the_grid_frozen() {
+    let mut harness = Harness::new(128);
+    let pad = addr(2, 3);
+    harness.run_to(BAR);
+
+    harness
+        .housekeeping
+        .loader
+        .send(LoadMessage::Begin {
+            tempo: Tempo::new(90.0).unwrap(),
+        })
+        .unwrap();
+    harness
+        .housekeeping
+        .loader
+        .send(LoadMessage::Clip {
+            addr: pad,
+            clip: lent_clip(1_000, 0),
+            playing: true,
+        })
+        .unwrap();
+    harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+
+    harness.run_frames(128);
+
+    assert!(
+        harness.engine.is_paused(),
+        "a loaded session waits to be started"
+    );
+    assert!(matches!(
+        harness.engine.state(pad),
+        SlotState::Playing { .. }
+    ));
+    assert!(
+        (harness.engine.grid().tempo().bpm() - 90.0).abs() < 1e-9,
+        "the session's tempo came with it"
+    );
+}
+
+#[test]
+fn loading_replaces_what_was_on_the_grid() {
+    let mut harness = Harness::new(128);
+    let recorded = addr(0, 0);
+    record(&mut harness, recorded, 0, 1);
+
+    let loaded = addr(5, 5);
+    harness
+        .housekeeping
+        .loader
+        .send(LoadMessage::Begin {
+            tempo: Tempo::new(120.0).unwrap(),
+        })
+        .unwrap();
+    harness
+        .housekeeping
+        .loader
+        .send(LoadMessage::Clip {
+            addr: loaded,
+            clip: lent_clip(500, 0),
+            playing: false,
+        })
+        .unwrap();
+    harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+    harness.run_frames(128);
+
+    assert_eq!(harness.engine.state(recorded), SlotState::Empty);
+    assert!(matches!(
+        harness.engine.state(loaded),
+        SlotState::Stopped { .. }
+    ));
+}
+
+#[test]
+fn lent_storage_comes_back_rather_than_joining_the_pool() {
+    let mut harness = Harness::new(128);
+    let pad = addr(1, 1);
+    let available = harness.engine.segments_available();
+
+    harness
+        .housekeeping
+        .loader
+        .send(LoadMessage::Begin {
+            tempo: Tempo::new(120.0).unwrap(),
+        })
+        .unwrap();
+    harness
+        .housekeeping
+        .loader
+        .send(LoadMessage::Clip {
+            addr: pad,
+            clip: lent_clip(1_000, 0),
+            playing: false,
+        })
+        .unwrap();
+    harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+    harness.run_frames(128);
+
+    assert_eq!(
+        harness.engine.segments_available(),
+        available,
+        "lent segments must not enter the engine's pool"
+    );
+
+    harness.command(Command::Clear(pad));
+    harness.run_frames(128);
+    harness.housekeeping.recycler.run();
+
+    let returned: Vec<_> = harness.housekeeping.recycler.take_borrowed().collect();
+    assert_eq!(returned.len(), 1, "the loader gets its storage back");
+    assert_eq!(
+        harness.engine.segments_available(),
+        available,
+        "and the engine's pool is the size it started at"
+    );
+}
+
+#[test]
+fn a_loaded_loop_plays_what_was_saved() {
+    let mut harness = Harness::new(128);
+    let pad = addr(0, 0);
+    let len = 4_096;
+
+    harness
+        .housekeeping
+        .loader
+        .send(LoadMessage::Begin {
+            tempo: Tempo::new(120.0).unwrap(),
+        })
+        .unwrap();
+    harness
+        .housekeeping
+        .loader
+        .send(LoadMessage::Clip {
+            addr: pad,
+            clip: lent_clip(len, 0),
+            playing: true,
+        })
+        .unwrap();
+    harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+    harness.run_frames(128);
+
+    harness.command(Command::SetPaused(false));
+    let from = harness.position();
+    let out = harness.run_to(from + len);
+
+    for (i, sample) in out.iter().enumerate() {
+        let frame = from + (i / CHANNELS) as u64;
+        let channel = i % CHANNELS;
+        assert_eq!(*sample, signal(frame % len, channel), "frame {frame}");
+    }
 }
 
 #[test]

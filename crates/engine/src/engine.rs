@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use crate::buffer::{Clip, SEGMENT_FRAMES, SegmentPool};
 use crate::click::{Click, ClickConfig};
+use crate::load::{LoadInbox, LoadMessage, Loader};
 use crate::recycle::{Recycler, Retirement, channel};
 use crate::snapshot::{Snapshot, SnapshotReader, SnapshotWriter};
 
@@ -143,9 +144,21 @@ impl Audio {
         self.clips[addr.track.index()][addr.slot.index()].as_ref()
     }
 
-    /// Takes a clip back into the pool, or hands it over if something else is reading it.
+    fn take_clip(&mut self, addr: SlotAddr) -> Option<Arc<Clip>> {
+        self.clips[addr.track.index()][addr.slot.index()].take()
+    }
+
+    fn put_clip(&mut self, addr: SlotAddr, clip: Arc<Clip>) {
+        self.clips[addr.track.index()][addr.slot.index()] = Some(clip);
+    }
+
+    /// Takes a clip back into the pool, or hands it over.
+    ///
+    /// Borrowed storage always goes back to whoever supplied it, so repeated loads cannot
+    /// grow the engine's pools.
     fn retire(&mut self, mut clip: Arc<Clip>) {
-        match Arc::get_mut(&mut clip) {
+        let mine = !clip.is_borrowed() && self.shells.len() < TRACK_COUNT * SLOT_COUNT;
+        match Arc::get_mut(&mut clip).filter(|_| mine) {
             Some(inner) => {
                 inner.release_segments(&mut self.segments);
                 inner.reset();
@@ -165,7 +178,7 @@ impl Audio {
         } = self;
 
         retirement.reclaim(|mut clip| {
-            if let Some(inner) = Arc::get_mut(&mut clip) {
+            if let Some(inner) = Arc::get_mut(&mut clip).filter(|c| !c.is_borrowed()) {
                 inner.release_segments(segments);
                 inner.reset();
                 shells.push(clip);
@@ -245,6 +258,8 @@ pub struct Housekeeping {
     pub recycler: Recycler,
     /// Receives clips the engine publishes on [`Command::Snapshot`].
     pub snapshots: SnapshotReader,
+    /// Puts a saved session back into the engine.
+    pub loader: Loader,
 }
 
 /// The realtime engine.
@@ -255,6 +270,7 @@ pub struct Engine {
     session: SessionModel,
     audio: Audio,
     click: Click,
+    loads: LoadInbox,
     channels: usize,
     max_bars: u32,
     paused: bool,
@@ -298,6 +314,7 @@ impl Engine {
 
         let (retirement, recycler) = channel();
         let (snapshots, snapshot_reader) = crate::snapshot::channel();
+        let (loader, loads) = crate::load::channel();
         let shells = (0..TRACK_COUNT * SLOT_COUNT)
             .map(|_| Arc::new(Clip::empty(max_segments, config.channels)))
             .collect();
@@ -317,6 +334,7 @@ impl Engine {
                 capture_offset: config.capture_offset,
             },
             click: Click::new(config.click, config.sample_rate),
+            loads,
             channels: config.channels,
             max_bars: config.max_bars,
             paused: false,
@@ -330,6 +348,7 @@ impl Engine {
             Housekeeping {
                 recycler,
                 snapshots: snapshot_reader,
+                loader,
             },
         ))
     }
@@ -424,6 +443,72 @@ impl Engine {
         apply(session, audio);
     }
 
+    /// Installs anything the loader has queued.
+    fn apply_loads(&mut self, sink: &mut impl EventSink) {
+        let before = self.session;
+        let mut pause = false;
+        let mut tempo = None;
+
+        let Self {
+            session,
+            audio,
+            loads,
+            ..
+        } = self;
+
+        loads.drain(|message| match message {
+            LoadMessage::Begin { tempo: wanted } => {
+                tempo = Some(wanted);
+                for addr in SlotAddr::all() {
+                    if let Some(held) = audio.take_clip(addr) {
+                        audio.retire(held);
+                    }
+                    session.mirror(addr, SlotState::Empty);
+                }
+            }
+            LoadMessage::Clip {
+                addr,
+                mut clip,
+                playing,
+            } => {
+                // The loader keeps the storage, so mark it before the engine sees it as
+                // one of its own.
+                if let Some(inner) = Arc::get_mut(&mut clip) {
+                    inner.set_borrowed(true);
+                }
+                let id = audio.next_clip_id;
+                audio.next_clip_id = id.next();
+                audio.put_clip(addr, clip);
+
+                let state = if playing {
+                    SlotState::Playing { clip: id }
+                } else {
+                    SlotState::Stopped { clip: id }
+                };
+                session.mirror(addr, state);
+            }
+            LoadMessage::End => pause = true,
+        });
+
+        if let Some(tempo) = tempo {
+            self.set_tempo_unchecked(tempo);
+        }
+        if pause {
+            self.paused = true;
+        }
+        self.emit_changes(&before, sink);
+    }
+
+    /// Sets the tempo without the guard that protects existing clips.
+    ///
+    /// A load replaces the grid wholesale, so there is nothing left to fall out of sync.
+    fn set_tempo_unchecked(&mut self, tempo: Tempo) {
+        if let Ok(grid) = BarGrid::new(self.sample_rate, tempo, self.time_signature) {
+            self.position = self.grid.rebase_onto(self.position, grid);
+            self.grid = grid;
+        }
+    }
+
     /// Publishes a reference to every pad that holds a clip.
     fn publish_snapshot(&mut self, sink: &mut impl EventSink) {
         let mut published = 0;
@@ -485,6 +570,7 @@ impl Engine {
     pub fn process(&mut self, input: &[f32], output: &mut [f32], sink: &mut impl EventSink) {
         output.fill(0.0);
         self.audio.reclaim();
+        self.apply_loads(sink);
 
         // A frozen transport holds its position, so nothing sounds, nothing is captured
         // and no bar line arrives. Input is dropped rather than buffered: it belongs to a
