@@ -25,6 +25,21 @@ pub enum AudioError {
     /// The device wants a sample format this crate does not convert.
     #[error("sample format {0:?} is not supported")]
     UnsupportedFormat(SampleFormat),
+    /// A device came back offering something the engine was not built for.
+    #[error(
+        "device returned at {found_rate} Hz with {found_channels} channels, but the \
+         session is {wanted_rate} Hz with {wanted_channels}"
+    )]
+    ConfigurationChanged {
+        /// Rate the engine was built for.
+        wanted_rate: u32,
+        /// Rate the device now offers.
+        found_rate: u32,
+        /// Channels the engine was built for.
+        wanted_channels: usize,
+        /// Channels the device now offers.
+        found_channels: usize,
+    },
     /// The device or host reported a failure.
     #[error(transparent)]
     Cpal(#[from] cpal::Error),

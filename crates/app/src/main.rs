@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use free_loop::config::{self, Config};
 use free_loop::control::{Controller, Request, TextUpdate};
-use free_loop_audio::{AudioIo, Negotiated, open};
+use free_loop_audio::{AudioIo, DeviceChange, Negotiated, open};
 use free_loop_core::{Command, Event};
 use free_loop_engine::{Engine, Housekeeping, LoadMessage, Loader, Snapshot};
 use free_loop_session::{SavedClip, SessionData, SessionStore};
@@ -187,6 +187,7 @@ fn run(s: Session<'_>) {
         let now = started.elapsed();
 
         connected = watch_surface(surface, now, connected);
+        watch_devices(io, now);
 
         events.clear();
         surface.poll(&mut events);
@@ -441,6 +442,18 @@ fn write_session(
             controller.session_saved(addr);
         }
         Err(error) => eprintln!("save failed: {error}"),
+    }
+}
+
+/// Lets the audio devices come back after being unplugged, reporting what changed.
+fn watch_devices(io: &mut AudioIo, now: Duration) {
+    match io.tick(now) {
+        Some(DeviceChange::Lost) => {
+            eprintln!("audio: device gone. the set is held where it stopped");
+        }
+        Some(DeviceChange::Back) => println!("audio: device back"),
+        Some(DeviceChange::Refused(error)) => eprintln!("audio: {error}"),
+        None => {}
     }
 }
 

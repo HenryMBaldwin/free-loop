@@ -1,6 +1,7 @@
 //! Opening devices and running the engine from the output callback.
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::time::Duration;
 use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -22,6 +23,9 @@ use crate::ring::{CaptureReader, CaptureWriter, ChannelMap, MAX_BLOCK_FRAMES, ca
 const COMMAND_SLOTS: usize = 256;
 /// Reports the audio thread can queue before the control thread drains them.
 const EVENT_SLOTS: usize = 4_096;
+
+/// How long to wait between attempts to reopen a device that went away.
+pub const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Devices the host can see.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -100,6 +104,8 @@ pub struct Opened {
     input_config: StreamConfig,
     output_config: StreamConfig,
     negotiated: Negotiated,
+    /// What was asked for, kept so the same request can be made again.
+    config: AudioConfig,
 }
 
 impl core::fmt::Debug for Opened {
@@ -165,6 +171,7 @@ pub fn open(config: &AudioConfig) -> Result<Opened, AudioError> {
         negotiated,
         input,
         output,
+        config: config.clone(),
     })
 }
 
@@ -191,24 +198,13 @@ impl Opened {
     /// [`AudioError`] if either stream cannot be built or started.
     pub fn start(self, engine: Engine) -> Result<AudioIo, AudioError> {
         let negotiated = self.negotiated;
-        let map = ChannelMap::new(
-            negotiated.input_channels,
-            negotiated.channels,
-            negotiated.input_source,
-        );
-
-        let block = usize::try_from(negotiated.buffer_frames.unwrap_or(ASSUMED_BLOCK_FRAMES))
-            .unwrap_or(usize::from(u16::MAX));
-        let (writer, reader) = capture_ring(
-            negotiated.cushion_frames + 4 * block,
-            negotiated.cushion_frames,
-            map,
-        );
-
         let (commands, command_rx) = RingBuffer::new(COMMAND_SLOTS);
         let (event_tx, events) = RingBuffer::new(EVENT_SLOTS);
 
-        let errors = Arc::new(AtomicU64::new(0));
+        let health = Health {
+            errors: Arc::new(AtomicU64::new(0)),
+            lost: Arc::new(AtomicBool::new(false)),
+        };
         let input_latency = Arc::new(AtomicU32::new(0));
         let capture_offset = Arc::new(AtomicU32::new(0));
 
@@ -216,52 +212,40 @@ impl Opened {
             engine,
             commands: command_rx,
             events: event_tx,
-            reader: Some(reader),
+            reader: None,
             captured: vec![0.0; MAX_BLOCK_FRAMES * negotiated.channels],
             rendered: vec![0.0; MAX_BLOCK_FRAMES * negotiated.channels],
             channels: negotiated.channels,
             dropped_events: 0,
         }));
 
-        let callback = Render {
+        let mut io = AudioIo {
+            streams: None,
             shared,
-            input_latency: Arc::clone(&input_latency),
-            capture_offset: Arc::clone(&capture_offset),
-            cushion: u32::try_from(negotiated.cushion_frames).unwrap_or(u32::MAX),
-            offset_override: negotiated.capture_offset,
-            sample_rate: negotiated.sample_rate,
-        };
-
-        let input = build_input(
-            &self.input,
-            self.input_config,
-            negotiated.input_format,
-            writer,
-            Arc::clone(&errors),
-            Arc::clone(&input_latency),
-            negotiated.sample_rate,
-        )?;
-        let output = build_output(
-            &self.output,
-            self.output_config,
-            negotiated.output_format,
-            callback,
-            Arc::clone(&errors),
-        )?;
-
-        input.play()?;
-        output.play()?;
-
-        Ok(AudioIo {
-            input,
-            output,
             commands,
             events,
             negotiated,
-            errors,
+            config: self.config.clone(),
+            health,
             capture_offset,
-        })
+            input_latency,
+            retry_at: None,
+            refusal: None,
+        };
+        io.spawn(&self)?;
+        Ok(io)
     }
+}
+
+/// What happened to the devices on one pass of the control loop.
+#[derive(Debug)]
+pub enum DeviceChange {
+    /// A device went away. Nothing sounds and the transport is frozen where it was.
+    Lost,
+    /// The devices are running again.
+    Back,
+    /// A device was there but could not be used. Reported once per reason.
+    Refused(AudioError),
 }
 
 /// Running streams.
@@ -269,13 +253,28 @@ impl Opened {
 /// `cpal::Stream` is not `Send` on every platform, so keep this on the thread that
 /// started it. Dropping it stops both streams.
 pub struct AudioIo {
-    input: Stream,
-    output: Stream,
+    /// The running streams, absent while no device is attached.
+    streams: Option<Streams>,
+    /// The engine and its buffers, which outlive any one pair of streams.
+    shared: Arc<Mutex<Shared>>,
     commands: Producer<Command>,
     events: Consumer<Event>,
     negotiated: Negotiated,
-    errors: Arc<AtomicU64>,
+    /// What was asked for, so the same request can be made again.
+    config: AudioConfig,
+    health: Health,
     capture_offset: Arc<AtomicU32>,
+    input_latency: Arc<AtomicU32>,
+    /// Time of the next attempt, or `None` while the devices are running.
+    retry_at: Option<Duration>,
+    /// The last reason a reopen was refused, so it is reported once.
+    refusal: Option<String>,
+}
+
+/// A running pair. Dropping it stops both.
+struct Streams {
+    input: Stream,
+    output: Stream,
 }
 
 impl core::fmt::Debug for AudioIo {
@@ -292,6 +291,125 @@ impl AudioIo {
     /// What the two devices agreed on.
     pub fn negotiated(&self) -> Negotiated {
         self.negotiated
+    }
+
+    /// Whether the devices are running.
+    pub fn is_running(&self) -> bool {
+        self.streams.is_some()
+    }
+
+    /// The shared state.
+    ///
+    /// Only call this with the streams stopped: the audio callback holds the same lock.
+    fn locked(&self) -> std::sync::MutexGuard<'_, Shared> {
+        self.shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Notices a device going away and puts it back when it returns.
+    ///
+    /// Call every pass of the control loop. Returns what changed, if anything.
+    pub fn tick(&mut self, now: Duration) -> Option<DeviceChange> {
+        if self.streams.is_some() {
+            if !self.health.lost.swap(false, Ordering::Relaxed) {
+                return None;
+            }
+            // Dropping stops both, which also hands the device back to the system.
+            self.streams = None;
+            self.retry_at = Some(now + RETRY_INTERVAL);
+            return Some(DeviceChange::Lost);
+        }
+
+        // Nothing is draining the command ring, so it would otherwise fill and start
+        // refusing presses.
+        self.locked().drain_commands();
+
+        if self.retry_at.is_some_and(|at| now < at) {
+            return None;
+        }
+        self.retry_at = Some(now + RETRY_INTERVAL);
+
+        match self.reopen() {
+            Ok(()) => {
+                self.retry_at = None;
+                self.refusal = None;
+                self.health.lost.store(false, Ordering::Relaxed);
+                Some(DeviceChange::Back)
+            }
+            Err(error) => {
+                // Reported once per reason, or an absent device would say so every
+                // interval for as long as it is gone.
+                let reason = error.to_string();
+                if self.refusal.as_ref() == Some(&reason) {
+                    return None;
+                }
+                self.refusal = Some(reason);
+                Some(DeviceChange::Refused(error))
+            }
+        }
+    }
+
+    /// Opens the devices again and starts them, if they offer what the engine expects.
+    fn reopen(&mut self) -> Result<(), AudioError> {
+        let opened = open(&self.config)?;
+        let found = opened.negotiated();
+
+        compatible(self.negotiated, found)?;
+        self.spawn(&opened)
+    }
+
+    /// Builds a capture ring and a pair of streams, and starts them.
+    fn spawn(&mut self, opened: &Opened) -> Result<(), AudioError> {
+        let negotiated = opened.negotiated;
+        let map = ChannelMap::new(
+            negotiated.input_channels,
+            negotiated.channels,
+            negotiated.input_source,
+        );
+        let block = usize::try_from(negotiated.buffer_frames.unwrap_or(ASSUMED_BLOCK_FRAMES))
+            .unwrap_or(usize::from(u16::MAX));
+        let (writer, reader) = capture_ring(
+            negotiated.cushion_frames + 4 * block,
+            negotiated.cushion_frames,
+            map,
+        );
+
+        // Whatever the previous device left is audio from before it went away.
+        self.locked().reader = Some(reader);
+
+        let callback = Render {
+            shared: Arc::clone(&self.shared),
+            input_latency: Arc::clone(&self.input_latency),
+            capture_offset: Arc::clone(&self.capture_offset),
+            cushion: u32::try_from(negotiated.cushion_frames).unwrap_or(u32::MAX),
+            offset_override: negotiated.capture_offset,
+            sample_rate: negotiated.sample_rate,
+        };
+
+        let input = build_input(
+            &opened.input,
+            opened.input_config,
+            negotiated.input_format,
+            writer,
+            self.health.clone(),
+            Arc::clone(&self.input_latency),
+            negotiated.sample_rate,
+        )?;
+        let output = build_output(
+            &opened.output,
+            opened.output_config,
+            negotiated.output_format,
+            callback,
+            self.health.clone(),
+        )?;
+
+        input.play()?;
+        output.play()?;
+
+        self.negotiated = negotiated;
+        self.streams = Some(Streams { input, output });
+        Ok(())
     }
 
     /// Queues a command for the engine.
@@ -321,7 +439,7 @@ impl AudioIo {
 
     /// Errors either device has reported since the streams started.
     pub fn device_errors(&self) -> u64 {
-        self.errors.load(Ordering::Relaxed)
+        self.health.errors.load(Ordering::Relaxed)
     }
 
     /// Stops both streams without dropping them.
@@ -330,8 +448,10 @@ impl AudioIo {
     ///
     /// [`AudioError::Cpal`] if a device refuses.
     pub fn pause(&self) -> Result<(), AudioError> {
-        self.input.pause()?;
-        self.output.pause()?;
+        if let Some(streams) = self.streams.as_ref() {
+            streams.input.pause()?;
+            streams.output.pause()?;
+        }
         Ok(())
     }
 
@@ -341,8 +461,10 @@ impl AudioIo {
     ///
     /// [`AudioError::Cpal`] if a device refuses.
     pub fn play(&self) -> Result<(), AudioError> {
-        self.input.play()?;
-        self.output.play()?;
+        if let Some(streams) = self.streams.as_ref() {
+            streams.input.play()?;
+            streams.output.play()?;
+        }
         Ok(())
     }
 }
@@ -420,11 +542,31 @@ impl Render {
 }
 
 impl Shared {
+    /// Applies everything the control thread has queued.
+    fn drain_commands(&mut self) {
+        let Self {
+            engine,
+            commands,
+            events,
+            dropped_events,
+            ..
+        } = self;
+
+        let mut sink = RingSink {
+            events,
+            dropped: dropped_events,
+        };
+        while let Ok(command) = commands.pop() {
+            engine.handle(command, &mut sink);
+        }
+    }
+
     fn fill<T: FromSample<f32> + Copy>(&mut self, out: &mut [T]) {
+        self.drain_commands();
+
         let Self {
             engine,
             reader,
-            commands,
             events,
             captured,
             rendered,
@@ -437,10 +579,6 @@ impl Shared {
             events,
             dropped: dropped_events,
         };
-
-        while let Ok(command) = commands.pop() {
-            engine.handle(command, &mut sink);
-        }
 
         let frames = out.len() / *channels;
         let mut done = 0;
@@ -468,22 +606,22 @@ fn build_input(
     config: StreamConfig,
     format: SampleFormat,
     writer: CaptureWriter,
-    errors: Arc<AtomicU64>,
+    health: Health,
     latency: Arc<AtomicU32>,
     sample_rate: u32,
 ) -> Result<Stream, AudioError> {
     match format {
         SampleFormat::F32 => {
-            input_stream::<f32>(device, config, writer, errors, latency, sample_rate)
+            input_stream::<f32>(device, config, writer, health, latency, sample_rate)
         }
         SampleFormat::I16 => {
-            input_stream::<i16>(device, config, writer, errors, latency, sample_rate)
+            input_stream::<i16>(device, config, writer, health, latency, sample_rate)
         }
         SampleFormat::I32 => {
-            input_stream::<i32>(device, config, writer, errors, latency, sample_rate)
+            input_stream::<i32>(device, config, writer, health, latency, sample_rate)
         }
         SampleFormat::U16 => {
-            input_stream::<u16>(device, config, writer, errors, latency, sample_rate)
+            input_stream::<u16>(device, config, writer, health, latency, sample_rate)
         }
         other => Err(AudioError::UnsupportedFormat(other)),
     }
@@ -493,7 +631,7 @@ fn input_stream<T>(
     device: &Device,
     config: StreamConfig,
     mut writer: CaptureWriter,
-    errors: Arc<AtomicU64>,
+    health: Health,
     latency: Arc<AtomicU32>,
     sample_rate: u32,
 ) -> Result<Stream, AudioError>
@@ -511,12 +649,48 @@ where
 
             writer.write(data);
         },
-        move |_| {
-            errors.fetch_add(1, Ordering::Relaxed);
-        },
+        move |error| note_error(&error, &health),
         None,
     )?;
     Ok(stream)
+}
+
+/// Whether a device that has come back can carry on with a session built for `wanted`.
+///
+/// Every clip length and phase is a frame count at one rate, and the engine interleaves
+/// for one channel count. Anything else about the device may differ.
+fn compatible(wanted: Negotiated, found: Negotiated) -> Result<(), AudioError> {
+    if wanted.sample_rate == found.sample_rate && wanted.channels == found.channels {
+        return Ok(());
+    }
+    Err(AudioError::ConfigurationChanged {
+        wanted_rate: wanted.sample_rate,
+        found_rate: found.sample_rate,
+        wanted_channels: wanted.channels,
+        found_channels: found.channels,
+    })
+}
+
+/// What both streams report their trouble into.
+#[derive(Debug, Clone)]
+struct Health {
+    /// Every error either device has reported.
+    errors: Arc<AtomicU64>,
+    /// Set when the streams have to be rebuilt.
+    lost: Arc<AtomicBool>,
+}
+
+/// Counts a stream error, and flags the ones that mean the stream has to be rebuilt.
+///
+/// A reroute leaves the stream working, so it is counted and otherwise left alone.
+fn note_error(error: &cpal::Error, health: &Health) {
+    health.errors.fetch_add(1, Ordering::Relaxed);
+    if matches!(
+        error.kind(),
+        cpal::ErrorKind::DeviceNotAvailable | cpal::ErrorKind::StreamInvalidated
+    ) {
+        health.lost.store(true, Ordering::Relaxed);
+    }
 }
 
 fn build_output(
@@ -524,13 +698,13 @@ fn build_output(
     config: StreamConfig,
     format: SampleFormat,
     render: Render,
-    errors: Arc<AtomicU64>,
+    health: Health,
 ) -> Result<Stream, AudioError> {
     match format {
-        SampleFormat::F32 => output_stream::<f32>(device, config, render, errors),
-        SampleFormat::I16 => output_stream::<i16>(device, config, render, errors),
-        SampleFormat::I32 => output_stream::<i32>(device, config, render, errors),
-        SampleFormat::U16 => output_stream::<u16>(device, config, render, errors),
+        SampleFormat::F32 => output_stream::<f32>(device, config, render, health),
+        SampleFormat::I16 => output_stream::<i16>(device, config, render, health),
+        SampleFormat::I32 => output_stream::<i32>(device, config, render, health),
+        SampleFormat::U16 => output_stream::<u16>(device, config, render, health),
         other => Err(AudioError::UnsupportedFormat(other)),
     }
 }
@@ -539,7 +713,7 @@ fn output_stream<T>(
     device: &Device,
     config: StreamConfig,
     mut render: Render,
-    errors: Arc<AtomicU64>,
+    health: Health,
 ) -> Result<Stream, AudioError>
 where
     T: SizedSample + FromSample<f32>,
@@ -553,10 +727,110 @@ where
 
             render.fill(data);
         },
-        move |_| {
-            errors.fetch_add(1, Ordering::Relaxed);
-        },
+        move |error| note_error(&error, &health),
         None,
     )?;
     Ok(stream)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ring::InputSource;
+
+    fn negotiated(sample_rate: u32, channels: usize) -> Negotiated {
+        Negotiated {
+            sample_rate,
+            channels,
+            input_channels: 2,
+            input_format: SampleFormat::F32,
+            output_format: SampleFormat::F32,
+            input_source: InputSource::Direct,
+            buffer_frames: None,
+            cushion_frames: 512,
+            capture_offset: None,
+        }
+    }
+
+    fn health() -> Health {
+        Health {
+            errors: Arc::new(AtomicU64::new(0)),
+            lost: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[test]
+    fn the_same_configuration_carries_on() {
+        assert!(compatible(negotiated(48_000, 2), negotiated(48_000, 2)).is_ok());
+    }
+
+    #[test]
+    fn another_rate_is_refused() {
+        let error = compatible(negotiated(48_000, 2), negotiated(44_100, 2));
+        assert!(matches!(
+            error,
+            Err(AudioError::ConfigurationChanged {
+                wanted_rate: 48_000,
+                found_rate: 44_100,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn another_channel_count_is_refused() {
+        let error = compatible(negotiated(48_000, 2), negotiated(48_000, 4));
+        assert!(matches!(
+            error,
+            Err(AudioError::ConfigurationChanged {
+                wanted_channels: 2,
+                found_channels: 4,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn the_rest_of_the_configuration_may_differ() {
+        let mut found = negotiated(48_000, 2);
+        found.input_channels = 8;
+        found.input_format = SampleFormat::I16;
+        found.cushion_frames = 1_024;
+        assert!(
+            compatible(negotiated(48_000, 2), found).is_ok(),
+            "only the rate and the engine's channel count are fixed"
+        );
+    }
+
+    #[test]
+    fn a_missing_device_asks_for_a_rebuild() {
+        let health = health();
+        note_error(
+            &cpal::Error::new(cpal::ErrorKind::DeviceNotAvailable),
+            &health,
+        );
+        assert!(health.lost.load(Ordering::Relaxed));
+        assert_eq!(health.errors.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn an_invalidated_stream_asks_for_a_rebuild() {
+        let health = health();
+        note_error(
+            &cpal::Error::new(cpal::ErrorKind::StreamInvalidated),
+            &health,
+        );
+        assert!(health.lost.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_reroute_is_counted_and_left_alone() {
+        let health = health();
+        note_error(&cpal::Error::new(cpal::ErrorKind::DeviceChanged), &health);
+        assert!(
+            !health.lost.load(Ordering::Relaxed),
+            "the stream is still working"
+        );
+        assert_eq!(health.errors.load(Ordering::Relaxed), 1);
+    }
 }
