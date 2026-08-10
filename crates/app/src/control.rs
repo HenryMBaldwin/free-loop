@@ -10,8 +10,8 @@
 use core::time::Duration;
 
 use free_loop_core::{
-    Command, Event, MAX_BPM, MIN_BPM, PadMask, SLOT_COUNT, SessionModel, SlotAddr, TRACK_COUNT,
-    Tempo, column_mask, pad_bit, row_mask,
+    Command, Event, MAX_BPM, MIN_BPM, SLOT_COUNT, SessionModel, SlotAddr, TRACK_COUNT, Tempo,
+    column_mask, pad_bit, row_mask,
 };
 use free_loop_surface::{
     Axis, Chrome, Control, Led, LedColor, LedFrame, MUTE_SIDE, PAUSE_SIDE, SOLO_SIDE, SurfaceEvent,
@@ -133,10 +133,6 @@ pub struct Controller {
     mode: Mode,
     /// A bit per pad that holds a session.
     sessions: u64,
-    /// Pads that do not sound.
-    muted: PadMask,
-    /// Pads that sound to the exclusion of the rest.
-    soloed: PadMask,
     /// The session in use, if one was loaded or saved this run.
     current: Option<SlotAddr>,
     frame: LedFrame,
@@ -152,8 +148,8 @@ impl Controller {
             click_enabled,
             paused: false,
             axis: Axis::Row,
-            any_muted: false,
-            any_soloed: false,
+            muted: 0,
+            soloed: 0,
         };
         let session = SessionModel::new();
         Self {
@@ -171,8 +167,6 @@ impl Controller {
             text_until: None,
             mode: Mode::Perform,
             sessions: 0,
-            muted: 0,
-            soloed: 0,
             current: None,
             dirty: true,
         }
@@ -226,9 +220,9 @@ impl Controller {
         };
 
         let marks = if self.mode == Mode::Solo {
-            &mut self.soloed
+            &mut self.chrome.soloed
         } else {
-            &mut self.muted
+            &mut self.chrome.muted
         };
         // The pad pressed decides, so a part-set group turns fully on rather than
         // toggling each pad separately.
@@ -238,11 +232,9 @@ impl Controller {
             *marks &= !group;
         }
 
-        self.chrome.any_muted = self.muted != 0;
-        self.chrome.any_soloed = self.soloed != 0;
         self.commands.push(Command::SetMutes {
-            muted: self.muted,
-            soloed: self.soloed,
+            muted: self.chrome.muted,
+            soloed: self.chrome.soloed,
         });
         self.dirty = true;
     }
@@ -419,14 +411,6 @@ impl Controller {
         });
     }
 
-    /// A bit per pad that holds a clip.
-    fn holds(&self) -> PadMask {
-        SlotAddr::all()
-            .filter(|addr| self.session.state(*addr).clip().is_some())
-            .map(pad_bit)
-            .fold(0, |mask, bit| mask | bit)
-    }
-
     /// Whether a held tempo button has started repeating.
     fn tempo_repeating(&self) -> bool {
         self.tempo_hold.is_some_and(|hold| hold.last > hold.since)
@@ -550,15 +534,20 @@ impl Controller {
             return Some(&self.frame);
         }
 
-        if matches!(self.mode, Mode::Mute | Mode::Solo) {
-            let soloing = self.mode == Mode::Solo;
-            let marked = if soloing { self.soloed } else { self.muted };
-            self.frame = paint::mutes(self.holds(), marked, self.chrome, soloing);
-            self.dirty = false;
-            return Some(&self.frame);
+        self.frame = paint::frame(&self.session, self.chrome);
+
+        // The grid already shows what is silenced, so choosing a group changes only what
+        // a press does. Flashing the button that opened it is the whole difference.
+        match self.mode {
+            Mode::Mute => self
+                .frame
+                .set_side(MUTE_SIDE, Led::flash(self.chrome.axis.color())),
+            Mode::Solo => self
+                .frame
+                .set_side(SOLO_SIDE, Led::flash(self.chrome.axis.color())),
+            _ => {}
         }
 
-        self.frame = paint::frame(&self.session, self.chrome);
         // Painted over the session colour so a hold about to empty a pad says so before
         // the audio disappears.
         if self.warning != 0 {
@@ -701,6 +690,49 @@ mod tests {
                 muted: row_mask(TrackId::new(0).unwrap()),
                 soloed: row_mask(TrackId::new(1).unwrap()),
             }]
+        );
+    }
+
+    #[test]
+    fn the_grid_keeps_showing_the_loops_while_choosing_a_group() {
+        let mut controller = controller();
+        controller.on_engine(Event::SlotChanged {
+            addr: addr(0, 0),
+            state: SlotState::Playing { clip: ClipId(0) },
+        });
+        let playing = controller.take_frame().unwrap().pad(addr(0, 0));
+
+        controller.on_surface(side(MUTE_SIDE), T0);
+        let frame = controller.take_frame().expect("the mode changed");
+        assert_eq!(
+            frame.pad(addr(0, 0)),
+            playing,
+            "opening mute must not blank what the loops are doing"
+        );
+        assert_eq!(
+            frame.side(MUTE_SIDE).style,
+            free_loop_surface::LedStyle::Flash
+        );
+    }
+
+    #[test]
+    fn a_silenced_row_shows_on_the_grid_without_the_mode_open() {
+        let mut controller = controller();
+        controller.on_engine(Event::SlotChanged {
+            addr: addr(0, 0),
+            state: SlotState::Playing { clip: ClipId(0) },
+        });
+
+        controller.on_surface(side(MUTE_SIDE), T0);
+        press(&mut controller, addr(0, 0), T0);
+        controller.on_surface(side(MUTE_SIDE), T0);
+        assert_eq!(controller.mode(), Mode::Perform);
+
+        let frame = controller.take_frame().unwrap();
+        assert_eq!(
+            frame.pad(addr(0, 0)),
+            Led::pulse(LedColor::Red),
+            "still playing, still silenced, and both are visible"
         );
     }
 
