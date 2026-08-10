@@ -18,7 +18,7 @@ pub mod load;
 pub mod recycle;
 pub mod snapshot;
 
-pub use buffer::{AudioBuffer, Clip, SEGMENT_FRAMES, Segment, SegmentPool};
+pub use buffer::{AudioBuffer, Clip, Ramp, SEGMENT_FRAMES, Segment, SegmentPool};
 pub use click::{Click, ClickConfig};
 pub use engine::{Engine, EngineConfig, EngineError, EventSink, Housekeeping};
 pub use load::{LoadMessage, Loader};

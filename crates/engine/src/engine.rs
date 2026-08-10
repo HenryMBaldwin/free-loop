@@ -16,7 +16,7 @@ use free_loop_core::{
 
 use std::sync::Arc;
 
-use crate::buffer::{Clip, SEGMENT_FRAMES, SegmentPool};
+use crate::buffer::{Clip, Ramp, SEGMENT_FRAMES, SegmentPool};
 use crate::click::{Click, ClickConfig};
 use crate::load::{LoadInbox, LoadMessage, Loader};
 use crate::recycle::{Recycler, Retirement, channel};
@@ -810,7 +810,7 @@ impl Engine {
             }
             let gain = self.gain(addr.track);
             if let Some(clip) = self.audio.clip(addr) {
-                clip.mix_into(self.position, out, gain);
+                clip.mix_into(self.position, out, Ramp::constant(gain));
             }
         }
 
