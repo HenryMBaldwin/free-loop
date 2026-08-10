@@ -24,5 +24,5 @@ pub use led::{
     BEAT_LEDS, CONTROL_COUNT, FIRST_BEAT_LED, Led, LedColor, LedFrame, LedStyle, SIDE_COUNT,
 };
 pub use mock::MockSurface;
-pub use paint::{Chrome, PAUSE_SIDE};
+pub use paint::{Axis, Chrome, MUTE_SIDE, PAUSE_SIDE, SOLO_SIDE};
 pub use surface::{ControlSurface, SurfaceError};

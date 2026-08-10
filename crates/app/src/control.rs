@@ -10,10 +10,12 @@
 use core::time::Duration;
 
 use free_loop_core::{
-    Command, Event, MAX_BPM, MIN_BPM, SLOT_COUNT, SessionModel, SlotAddr, TRACK_COUNT, Tempo,
+    Command, Event, MAX_BPM, MIN_BPM, PadMask, SLOT_COUNT, SessionModel, SlotAddr, TRACK_COUNT,
+    Tempo, column_mask, pad_bit, row_mask,
 };
 use free_loop_surface::{
-    Chrome, Control, Led, LedColor, LedFrame, PAUSE_SIDE, SurfaceEvent, paint,
+    Axis, Chrome, Control, Led, LedColor, LedFrame, MUTE_SIDE, PAUSE_SIDE, SOLO_SIDE, SurfaceEvent,
+    paint,
 };
 
 /// Beats per minute one press of the tempo buttons moves.
@@ -54,15 +56,20 @@ pub enum Mode {
     SavePicker,
     /// Sessions, waiting for one to be chosen to load.
     LoadPicker,
+    /// Which pads are silenced.
+    Mute,
+    /// Which pads are soloed.
+    Solo,
 }
 
 impl Mode {
     /// The button that opens a picker, if this mode is one.
     fn button(self) -> Option<Control> {
         match self {
-            Self::Perform => None,
             Self::SavePicker => Some(Control::SaveSession),
             Self::LoadPicker => Some(Control::LoadSession),
+            // Mute and solo open from the side column, not the top row.
+            Self::Perform | Self::Mute | Self::Solo => None,
         }
     }
 }
@@ -126,6 +133,10 @@ pub struct Controller {
     mode: Mode,
     /// A bit per pad that holds a session.
     sessions: u64,
+    /// Pads that do not sound.
+    muted: PadMask,
+    /// Pads that sound to the exclusion of the rest.
+    soloed: PadMask,
     /// The session in use, if one was loaded or saved this run.
     current: Option<SlotAddr>,
     frame: LedFrame,
@@ -140,6 +151,9 @@ impl Controller {
             beats_per_bar,
             click_enabled,
             paused: false,
+            axis: Axis::Row,
+            any_muted: false,
+            any_soloed: false,
         };
         let session = SessionModel::new();
         Self {
@@ -157,6 +171,8 @@ impl Controller {
             text_until: None,
             mode: Mode::Perform,
             sessions: 0,
+            muted: 0,
+            soloed: 0,
             current: None,
             dirty: true,
         }
@@ -195,6 +211,39 @@ impl Controller {
     /// Tells the controller which pads hold sessions.
     pub fn set_sessions(&mut self, sessions: impl IntoIterator<Item = SlotAddr>) {
         self.sessions = sessions.into_iter().map(bit).fold(0, |mask, b| mask | b);
+        self.dirty = true;
+    }
+
+    /// Silences or frees the row or column a pad sits in.
+    ///
+    /// Whole groups rather than single pads, since only one slot per track sounds at a
+    /// time and silencing just the one that happens to be playing would come undone the
+    /// moment another was launched.
+    fn toggle_group(&mut self, addr: SlotAddr) {
+        let group = match self.chrome.axis {
+            Axis::Row => row_mask(addr.track),
+            Axis::Column => column_mask(addr.slot),
+        };
+
+        let marks = if self.mode == Mode::Solo {
+            &mut self.soloed
+        } else {
+            &mut self.muted
+        };
+        // The pad pressed decides, so a part-set group turns fully on rather than
+        // toggling each pad separately.
+        if *marks & pad_bit(addr) == 0 {
+            *marks |= group;
+        } else {
+            *marks &= !group;
+        }
+
+        self.chrome.any_muted = self.muted != 0;
+        self.chrome.any_soloed = self.soloed != 0;
+        self.commands.push(Command::SetMutes {
+            muted: self.muted,
+            soloed: self.soloed,
+        });
         self.dirty = true;
     }
 
@@ -246,6 +295,11 @@ impl Controller {
             SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::SavePicker => {
                 self.requests.push(Request::SaveSession(addr));
             }
+            SurfaceEvent::PadPressed { addr, .. }
+                if matches!(self.mode, Mode::Mute | Mode::Solo) =>
+            {
+                self.toggle_group(addr);
+            }
             SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::LoadPicker => {
                 // Nothing to load from a pad that holds nothing.
                 if self.sessions & bit(addr) != 0 {
@@ -279,6 +333,16 @@ impl Controller {
             }
             SurfaceEvent::ControlPressed(Control::StopAll) => self.commands.push(Command::StopAll),
             SurfaceEvent::ControlPressed(Control::Rewind) => self.commands.push(Command::Rewind),
+            SurfaceEvent::ControlPressed(Control::Axis) => {
+                self.chrome.axis = self.chrome.axis.flipped();
+                self.dirty = true;
+            }
+            SurfaceEvent::SidePressed { index } if usize::from(index) == MUTE_SIDE => {
+                self.set_mode(Mode::Mute);
+            }
+            SurfaceEvent::SidePressed { index } if usize::from(index) == SOLO_SIDE => {
+                self.set_mode(Mode::Solo);
+            }
             SurfaceEvent::ControlPressed(Control::SaveSession) => {
                 self.set_mode(Mode::SavePicker);
             }
@@ -353,6 +417,14 @@ impl Controller {
             last: now,
             started_at: before,
         });
+    }
+
+    /// A bit per pad that holds a clip.
+    fn holds(&self) -> PadMask {
+        SlotAddr::all()
+            .filter(|addr| self.session.state(*addr).clip().is_some())
+            .map(pad_bit)
+            .fold(0, |mask, bit| mask | bit)
     }
 
     /// Whether a held tempo button has started repeating.
@@ -478,6 +550,14 @@ impl Controller {
             return Some(&self.frame);
         }
 
+        if matches!(self.mode, Mode::Mute | Mode::Solo) {
+            let soloing = self.mode == Mode::Solo;
+            let marked = if soloing { self.soloed } else { self.muted };
+            self.frame = paint::mutes(self.holds(), marked, self.chrome, soloing);
+            self.dirty = false;
+            return Some(&self.frame);
+        }
+
         self.frame = paint::frame(&self.session, self.chrome);
         // Painted over the session colour so a hold about to empty a pad says so before
         // the audio disappears.
@@ -505,7 +585,7 @@ mod tests {
     )]
 
     use super::*;
-    use free_loop_core::{ClipId, Frames, SlotId, SlotState, TrackId};
+    use free_loop_core::{ClipId, Frames, SlotId, SlotState, TrackId, column_mask, row_mask};
 
     const T0: Duration = Duration::ZERO;
 
@@ -548,6 +628,106 @@ mod tests {
 
         controller.on_surface(SurfaceEvent::PadReleased { addr: pad }, millis(80));
         assert_eq!(commands(&mut controller), vec![Command::Press(pad)]);
+    }
+
+    fn side(index: usize) -> SurfaceEvent {
+        SurfaceEvent::SidePressed {
+            index: u8::try_from(index).unwrap(),
+        }
+    }
+
+    #[test]
+    fn muting_silences_the_whole_row() {
+        let mut controller = controller();
+        controller.on_surface(side(MUTE_SIDE), T0);
+        press(&mut controller, addr(2, 0), T0);
+
+        assert_eq!(
+            commands(&mut controller),
+            vec![Command::SetMutes {
+                muted: row_mask(TrackId::new(2).unwrap()),
+                soloed: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn the_axis_button_switches_to_columns() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Axis), T0);
+        controller.on_surface(side(MUTE_SIDE), T0);
+        press(&mut controller, addr(2, 5), T0);
+
+        assert_eq!(
+            commands(&mut controller),
+            vec![Command::SetMutes {
+                muted: column_mask(SlotId::new(5).unwrap()),
+                soloed: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn pressing_a_silenced_group_frees_it() {
+        let mut controller = controller();
+        controller.on_surface(side(MUTE_SIDE), T0);
+        press(&mut controller, addr(2, 0), T0);
+        commands(&mut controller);
+
+        press(&mut controller, addr(2, 4), T0);
+        assert_eq!(
+            commands(&mut controller),
+            vec![Command::SetMutes {
+                muted: 0,
+                soloed: 0,
+            }],
+            "any pad in the group frees the group"
+        );
+    }
+
+    #[test]
+    fn mute_and_solo_are_kept_apart() {
+        let mut controller = controller();
+        controller.on_surface(side(MUTE_SIDE), T0);
+        press(&mut controller, addr(0, 0), T0);
+        commands(&mut controller);
+
+        controller.on_surface(side(SOLO_SIDE), T0);
+        press(&mut controller, addr(1, 0), T0);
+
+        assert_eq!(
+            commands(&mut controller),
+            vec![Command::SetMutes {
+                muted: row_mask(TrackId::new(0).unwrap()),
+                soloed: row_mask(TrackId::new(1).unwrap()),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_pad_in_the_mute_screen_does_not_touch_the_loops() {
+        let mut controller = controller();
+        controller.on_surface(side(MUTE_SIDE), T0);
+        press(&mut controller, addr(0, 0), T0);
+
+        let sent = commands(&mut controller);
+        assert!(!sent.iter().any(|c| matches!(c, Command::Press(_))));
+
+        controller.tick(millis(2_000));
+        assert!(
+            commands(&mut controller).is_empty(),
+            "and cannot empty a pad by holding"
+        );
+    }
+
+    #[test]
+    fn the_mute_screen_closes_on_a_second_press() {
+        let mut controller = controller();
+        controller.on_surface(side(MUTE_SIDE), T0);
+        assert_eq!(controller.mode(), Mode::Mute);
+
+        controller.on_surface(side(MUTE_SIDE), T0);
+        assert_eq!(controller.mode(), Mode::Perform);
     }
 
     #[test]
