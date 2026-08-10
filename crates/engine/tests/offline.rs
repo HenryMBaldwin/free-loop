@@ -1063,3 +1063,98 @@ fn rewinding_discards_a_take_in_progress() {
     harness.command(Command::Rewind);
     assert_eq!(harness.engine.state(pad), SlotState::Empty);
 }
+
+#[test]
+fn a_muted_pad_does_not_sound() {
+    use free_loop_core::{pad_bit, row_mask};
+
+    let mut harness = Harness::new(128);
+    let pad = addr(0, 0);
+    record(&mut harness, pad, 0, 1);
+
+    harness.command(Command::SetMutes {
+        muted: row_mask(pad.track),
+        soloed: 0,
+    });
+    let out = harness.run_frames(256);
+    assert!(out.iter().all(|s| *s == 0.0), "a muted row is silent");
+    assert!(!harness.engine.is_audible(pad));
+
+    harness.command(Command::SetMutes {
+        muted: 0,
+        soloed: 0,
+    });
+    let out = harness.run_frames(256);
+    assert!(out.iter().any(|s| *s != 0.0), "and comes back");
+    let _ = pad_bit(pad);
+}
+
+#[test]
+fn a_solo_silences_everything_outside_it() {
+    use free_loop_core::row_mask;
+
+    let mut harness = Harness::new(128);
+    let kept = addr(0, 0);
+    let dropped = addr(1, 0);
+
+    record(&mut harness, kept, 0, 1);
+    let after = harness.position();
+    record(&mut harness, dropped, after, 1);
+
+    harness.command(Command::SetMutes {
+        muted: 0,
+        soloed: row_mask(kept.track),
+    });
+
+    assert!(harness.engine.is_audible(kept));
+    assert!(!harness.engine.is_audible(dropped));
+
+    let from = harness.position();
+    let out = harness.run_to(from + BAR);
+    for (i, sample) in out.iter().enumerate() {
+        let frame = from + (i / CHANNELS) as u64;
+        let channel = i % CHANNELS;
+        assert_eq!(*sample, signal(frame % BAR, channel), "only the solo");
+    }
+}
+
+#[test]
+fn a_mute_beats_a_solo_on_the_same_pad() {
+    use free_loop_core::row_mask;
+
+    let mut harness = Harness::new(128);
+    let pad = addr(0, 0);
+    record(&mut harness, pad, 0, 1);
+
+    let row = row_mask(pad.track);
+    harness.command(Command::SetMutes {
+        muted: row,
+        soloed: row,
+    });
+
+    assert!(!harness.engine.is_audible(pad));
+    let out = harness.run_frames(256);
+    assert!(out.iter().all(|s| *s == 0.0));
+}
+
+#[test]
+fn muting_a_column_reaches_across_tracks() {
+    use free_loop_core::{SlotId, column_mask};
+
+    let mut harness = Harness::new(128);
+    let first = addr(0, 0);
+    let second = addr(1, 0);
+    record(&mut harness, first, 0, 1);
+    let after = harness.position();
+    record(&mut harness, second, after, 1);
+
+    harness.command(Command::SetMutes {
+        muted: column_mask(SlotId::new(0).unwrap()),
+        soloed: 0,
+    });
+
+    assert!(!harness.engine.is_audible(first));
+    assert!(!harness.engine.is_audible(second));
+    let out = harness.run_frames(256);
+    assert!(out.iter().all(|s| *s == 0.0));
+}
