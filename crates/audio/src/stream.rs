@@ -294,8 +294,7 @@ impl AudioIo {
     ///
     /// # Errors
     ///
-    /// Returns the command back if the queue is full, which means the audio thread has
-    /// stalled.
+    /// Returns the command back if the queue is full.
     pub fn send(&mut self, command: Command) -> Result<(), Command> {
         self.commands
             .push(command)
@@ -311,8 +310,7 @@ impl AudioIo {
 
     /// The round-trip latency currently being compensated for, in frames.
     ///
-    /// Zero until the first output callback has run, since it comes from what the driver
-    /// reports rather than from a guess.
+    /// Zero until the first output callback has run.
     pub fn capture_offset_frames(&self) -> u32 {
         self.capture_offset.load(Ordering::Relaxed)
     }
@@ -381,9 +379,9 @@ struct Render {
 impl Render {
     /// Tells the engine how far behind captured audio is running.
     ///
-    /// The driver reports how long its own buffering adds on each side; the cushion
-    /// between the two callbacks is ours and known exactly. Together they are the round
-    /// trip between playing a note and the engine seeing it.
+    /// The driver reports what its own buffering adds on each side; the cushion between
+    /// the two callbacks is known exactly. Together they are the round trip between
+    /// playing a note and the engine seeing it.
     fn update_capture_offset(&mut self, output_latency: core::time::Duration) {
         let total = self.offset_override.unwrap_or_else(|| {
             frames_in(output_latency, self.sample_rate)

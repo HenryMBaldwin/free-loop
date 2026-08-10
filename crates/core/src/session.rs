@@ -32,8 +32,8 @@ impl SessionModel {
 
     /// Overwrites a pad's state without running the machine.
     ///
-    /// For a mirror kept in step with a report from elsewhere. Using it on the model
-    /// that owns the transitions would skip the rules in [`Self::press`].
+    /// For a mirror kept in step with a report from elsewhere, not for the model that
+    /// owns the transitions.
     pub fn mirror(&mut self, addr: SlotAddr, state: SlotState) {
         self.set(addr, state);
     }
@@ -51,9 +51,7 @@ impl SessionModel {
 
     /// Handles a press, applying the one-slot-per-track rule.
     ///
-    /// While a track is recording, presses on its other pads are ignored: arming a
-    /// second pad mid-recording would seal, auto-play and stop the first in one
-    /// instant, with no useful reading of the gesture.
+    /// While a track is recording, presses on its other pads are ignored.
     pub fn press(&mut self, addr: SlotAddr, ctx: &Ctx, sink: &mut impl FnMut(SlotAddr, Effect)) {
         let busy_elsewhere = Self::track_addrs(addr.track)
             .any(|other| other != addr && self.state(other).is_recording());
@@ -103,8 +101,7 @@ impl SessionModel {
     /// Moves every transition still waiting on a bar line to fire at `at` instead.
     ///
     /// A queued transition holds the frame it is due at, so moving the transport leaves
-    /// it scheduled against a position that may now be far ahead. Retargeting keeps the
-    /// gesture rather than stranding it.
+    /// it scheduled against a position that may now be far ahead.
     pub fn retarget_pending(&mut self, at: Frames) {
         for addr in SlotAddr::all() {
             let state = match self.state(addr) {
@@ -119,8 +116,7 @@ impl SessionModel {
 
     /// Discards any recording in progress, leaving everything else alone.
     ///
-    /// Used when the transport freezes: a take that spans a pause would splice two
-    /// moments together, which is never what was played.
+    /// Used when the transport freezes, since a take cannot span a pause.
     pub fn cancel_recordings(&mut self, ctx: &Ctx, sink: &mut impl FnMut(SlotAddr, Effect)) {
         for addr in SlotAddr::all() {
             if self.state(addr).is_recording() {

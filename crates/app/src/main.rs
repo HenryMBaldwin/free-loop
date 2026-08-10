@@ -25,9 +25,6 @@ use free_loop_session::{SavedClip, SessionData, SessionStore};
 use free_loop_surface::{ControlSurface, LaunchpadX, MockSurface, SurfaceError, SurfaceEvent};
 
 /// How often the control loop runs.
-///
-/// Fast enough that a press never feels late against the bar it is quantised to, slow
-/// enough to leave the machine alone.
 const TICK: Duration = Duration::from_millis(2);
 
 /// Where the config lives unless told otherwise.
@@ -434,8 +431,7 @@ fn load(
 
 /// Connects a Launchpad, falling back to a surface with no hardware behind it.
 ///
-/// A missing pad is not fatal: the click and the audio path still work, which is enough
-/// to tell whether the rig is right before hunting for the controller.
+/// A missing pad is not fatal: the click and the audio path still work.
 fn connect_surface() -> Box<dyn ControlSurface> {
     match LaunchpadX::connect() {
         Ok(launchpad) => {

@@ -65,8 +65,7 @@ impl Axis {
 impl Chrome {
     /// The colour a pad's whole group has been marked with, if any.
     ///
-    /// Each colour matches the side button that sets it. Silence outranks solo, matching
-    /// the engine.
+    /// Each colour matches the side button that sets it. Silence outranks solo.
     pub fn mark(&self, addr: SlotAddr) -> Option<LedColor> {
         let bit = pad_bit(addr);
         if self.muted & bit != 0 {
@@ -182,10 +181,9 @@ pub fn pause_button(chrome: Chrome) -> Led {
 
 /// Paints the beat indicator over whatever the shared buttons already show.
 ///
-/// One button lit at a time, beat one in white so the bar line is unmistakable at a
-/// glance. Only the current beat is overwritten, so the buttons it shares keep their own
-/// colour the rest of the time. Meters wider than the indicator show only the beats that
-/// fit.
+/// One button lit at a time, beat one in white. Only the current beat is overwritten, so
+/// the buttons it shares keep their own colour the rest of the time. Meters wider than
+/// the indicator show only the beats that fit.
 pub fn beat_indicator(frame: &mut LedFrame, chrome: Chrome) {
     let shown = usize::try_from(chrome.beats_per_bar)
         .unwrap_or(BEAT_LEDS)
@@ -205,7 +203,7 @@ pub fn beat_indicator(frame: &mut LedFrame, chrome: Chrome) {
 
 /// Paints the tempo as a fill across the grid, spanning [`MIN_BPM`] to [`MAX_BPM`].
 ///
-/// One pad is about one step of a held tempo button, so the fill rate is the rate.
+/// One pad is about one step of a held tempo button.
 pub fn tempo_gauge(tempo: f64, chrome: Chrome) -> LedFrame {
     let mut frame = LedFrame::new();
     let total = TRACK_COUNT * SLOT_COUNT;
@@ -271,8 +269,8 @@ pub fn volumes(chrome: Chrome) -> LedFrame {
 /// Paints the session picker over the grid.
 ///
 /// `existing` has a bit set per pad that holds a session, indexed track-major. `current`
-/// is the session in use, shown differently so an overwrite is deliberate. `active` is
-/// the button that opened the picker, flashed so the mode is obvious.
+/// is the session in use, shown differently. `active` is the button that opened the
+/// picker, flashed.
 pub fn picker(
     existing: u64,
     current: Option<SlotAddr>,

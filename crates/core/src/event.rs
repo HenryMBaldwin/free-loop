@@ -20,9 +20,6 @@ pub enum Event {
         bar: u64,
     },
     /// MIDI clock ticks have passed.
-    ///
-    /// Sent so a surface can lock its own animations to the transport rather than
-    /// running them off its own clock.
     Clock {
         /// How many since the last report.
         ticks: u32,
@@ -66,10 +63,7 @@ pub enum Event {
     },
     /// A tempo change was refused because clips already exist.
     TempoRejected,
-    /// Every pad holding a clip has been published.
-    ///
-    /// Sent even when nothing was, so a reader can tell an empty session from a request
-    /// that has not been answered yet.
+    /// Every pad holding a clip has been published. Sent even when none did.
     SnapshotComplete {
         /// How many pads were published.
         clips: u32,

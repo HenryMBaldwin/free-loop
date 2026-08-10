@@ -103,8 +103,7 @@ impl SlotAddr {
 
 /// A set of pads, one bit each, track-major.
 ///
-/// Small enough to cross the realtime boundary in a command and to compare in one
-/// instruction, which mute and solo both need every block.
+/// Kept to one word so it can cross the realtime boundary in a command.
 pub type PadMask = u64;
 
 /// The bit for a pad in a [`PadMask`].
@@ -126,9 +125,7 @@ pub fn column_mask(slot: SlotId) -> PadMask {
         .fold(0, |mask, bit| mask | bit)
 }
 
-/// Identifies a recorded clip.
-///
-/// Supplied via [`crate::slot::Ctx`] rather than generated internally, which keeps
+/// Identifies a recorded clip. Supplied via [`crate::slot::Ctx`], which keeps
 /// [`crate::slot::step`] pure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct ClipId(pub u32);
