@@ -1,7 +1,5 @@
-//! The config file.
-//!
-//! Everything that is a fact about a rig rather than a choice made per run: which jack
-//! the instrument is in, what the interface is called, how big its blocks are.
+//! The config file: which jack the instrument is in, what the interface is called, how
+//! big its blocks are.
 
 use std::path::Path;
 
@@ -157,8 +155,7 @@ pub struct Config {
 impl Config {
     /// Reads a config file, falling back to defaults when it is not there.
     ///
-    /// A missing file is normal and means every default suits this rig. A malformed one
-    /// is an error, since ignoring it would run with settings the file says otherwise.
+    /// A missing file means every default suits this rig. A malformed one is an error.
     ///
     /// # Errors
     ///

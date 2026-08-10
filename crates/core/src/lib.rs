@@ -1,7 +1,6 @@
 //! Pure domain model for Free Loop.
 //!
-//! No I/O, no threads, no allocation. Only value types and pure functions, so timing
-//! behaviour is testable with a fake clock and no hardware.
+//! No I/O, no threads, no allocation. Only value types and pure functions.
 //!
 //! - [`time`]: the bar grid and the quantisation rules.
 //! - [`gain`]: track volume in the steps a row of pads offers.

@@ -19,10 +19,8 @@ pub enum Command {
     StopAll,
     /// Empty every pad, leaving nothing loaded.
     ClearAll,
-    /// Set how loud each track plays, as a step on the gain ladder.
-    ///
-    /// Sent whole for the same reason as the mute masks: the engine never holds a
-    /// different picture from the surface showing it.
+    /// Set how loud each track plays, as a step on the gain ladder. Sent whole, like the
+    /// mute masks.
     SetGains([u8; TRACK_COUNT]),
     /// Publish a reference to every pad that holds a clip.
     Snapshot,

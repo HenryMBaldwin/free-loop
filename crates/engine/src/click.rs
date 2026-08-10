@@ -1,7 +1,7 @@
 //! The metronome click.
 //!
-//! A synthesised blip rather than a sample, so there is no file to load and nothing to
-//! allocate. Beat one is pitched higher and runs slightly longer than the others.
+//! A synthesised blip rather than a sample. Beat one is pitched higher and runs slightly
+//! longer than the others.
 
 use free_loop_core::SampleRate;
 
