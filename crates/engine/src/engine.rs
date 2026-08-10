@@ -37,10 +37,6 @@ enum Deferred {
 }
 
 /// Holds the mix at full scale and reports how much was held.
-///
-/// Tracks sum without headroom, and material in the same register sums coherently, so a
-/// handful of loops can pass full scale. Past that an integer sample format wraps, which
-/// is far worse than the limit itself.
 fn limit(output: &mut [f32], sink: &mut impl EventSink) {
     let mut held = 0_u32;
     for sample in output.iter_mut() {
@@ -61,8 +57,7 @@ fn limit(output: &mut [f32], sink: &mut impl EventSink) {
 /// Moves an anchor back by `shift`, wrapped into the loop rather than clamped.
 ///
 /// Only `recorded_at` modulo the loop length affects playback, so wrapping keeps the
-/// phase exact. Subtracting directly would clamp at zero for anything recorded before
-/// the reference, which is the case a uniform shift exists to protect.
+/// phase exact.
 fn shifted_anchor(recorded_at: Frames, len: Frames, shift: Frames) -> Frames {
     if len.0 == 0 {
         return Frames::ZERO;
@@ -126,8 +121,7 @@ impl EngineConfig {
     ///
     /// # Errors
     ///
-    /// [`EngineError::Time`] never occurs for these values, but the constructors are
-    /// fallible so the result is propagated.
+    /// [`EngineError::Time`], which these values never trigger.
     pub fn stereo_48k() -> Result<Self, EngineError> {
         Ok(Self {
             sample_rate: SampleRate::new(48_000)?,
@@ -145,8 +139,7 @@ impl EngineConfig {
 
 /// A destination for engine reports.
 ///
-/// Implemented for any `FnMut(Event)` and for `Vec<Event>`, so tests can collect and the
-/// audio thread can push straight onto a ring.
+/// Implemented for any `FnMut(Event)` and for `Vec<Event>`.
 pub trait EventSink {
     /// Records one event.
     fn event(&mut self, event: Event);
@@ -465,8 +458,7 @@ impl Engine {
 
     /// Whether a pad would be heard if it were playing.
     ///
-    /// A solo anywhere silences everything outside it, which is what makes solo a way of
-    /// hearing one thing rather than a second kind of mute.
+    /// A solo anywhere silences everything outside it.
     pub fn is_audible(&self, addr: SlotAddr) -> bool {
         let bit = pad_bit(addr);
         if self.muted & bit != 0 {
@@ -526,8 +518,7 @@ impl Engine {
     /// Sets the round-trip latency to compensate for.
     ///
     /// Captured audio arrives this many frames after it was played. The clip is stamped
-    /// as having started that much earlier, which puts every frame back on the grid
-    /// position it was played at.
+    /// as having started that much earlier.
     ///
     /// Takes effect on the next recording sealed.
     pub fn set_capture_offset(&mut self, offset: Frames) {
@@ -547,8 +538,7 @@ impl Engine {
     /// Applies a control instruction.
     ///
     /// Instructions take effect at the position the transport has reached, so they land
-    /// at the start of the block they are drained in. That granularity only matters for
-    /// a press within one block of a bar line.
+    /// at the start of the block they are drained in.
     pub fn handle(&mut self, command: Command, sink: &mut impl EventSink) {
         let before = self.session;
         let ctx = self.ctx();
@@ -733,7 +723,7 @@ impl Engine {
 
     /// Sets the tempo without the guard that protects existing clips.
     ///
-    /// A load replaces the grid wholesale, so there is nothing left to fall out of sync.
+    /// Safe during a load, which replaces the grid wholesale.
     fn set_tempo_unchecked(&mut self, tempo: Tempo) {
         if let Ok(grid) = BarGrid::new(self.sample_rate, tempo, self.time_signature) {
             self.position = self.grid.rebase_onto(self.position, grid);
@@ -852,8 +842,7 @@ impl Engine {
 
     /// Reports the MIDI clock ticks crossed by this block.
     ///
-    /// A block is shorter than a tick at any usable tempo, so these arrive spaced rather
-    /// than in bursts, which is what a device deriving tempo from them needs.
+    /// A block is shorter than a tick at any usable tempo, so these arrive spaced.
     fn report_clock(&mut self, sink: &mut impl EventSink) {
         let now = self.grid.clock_ticks_at(self.position);
         let ticks = now.saturating_sub(self.last_clock);
@@ -868,8 +857,7 @@ impl Engine {
 
     /// Takes the clock count from wherever the transport now is.
     ///
-    /// Called after anything that moves the transport other than playing, so the next
-    /// report is a step rather than the whole jump.
+    /// Called after anything that moves the transport other than playing.
     fn resync_clock(&mut self) {
         self.last_clock = self.grid.clock_ticks_at(self.position);
     }

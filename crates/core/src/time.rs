@@ -319,11 +319,6 @@ impl BarGrid {
 
     /// The position under `target` that sits at the same musical place as `position`
     /// does under `self`.
-    ///
-    /// A tempo change rebuilds the grid, so the same frame count lands on a different
-    /// bar and beat. Moving the transport with the grid keeps the bar number and the
-    /// fraction through it, so the next beat arrives one new-tempo interval later
-    /// instead of the click jumping.
     pub fn rebase_onto(self, position: Frames, target: Self) -> Frames {
         let bar = self.bar_of(position);
         let into_bar = position.0 - self.bar_start(bar).0;
@@ -333,10 +328,7 @@ impl BarGrid {
 
     /// Where a recording begun at `start` ends, given stop was pressed at `pressed_at`.
     ///
-    /// Rounds back to the bar line that just passed, so a take is whatever whole bars
-    /// were finished before the press. A bar in progress is discarded rather than
-    /// completed. Press after the bar you want, not during it.
-    ///
+    /// Rounds back to the bar line that just passed, so a take is whole bars only.
     /// Result is at least one bar. `start` must be on a boundary.
     pub fn quantize_record_end(self, start: Frames, pressed_at: Frames) -> Frames {
         let end = self.previous_boundary(pressed_at);

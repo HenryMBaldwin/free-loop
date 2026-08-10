@@ -23,22 +23,17 @@ pub struct ClipEntry {
     /// Loop length in frames.
     pub len_frames: u64,
     /// Where the loop sits against the bar grid, in frames from a bar line.
-    ///
-    /// Stored rather than the absolute position it was recorded at, which means nothing
-    /// once the transport has been restarted.
     pub phase_frames: u64,
     /// Whether the pad was sounding.
     pub playing: bool,
     /// The step on the gain ladder its track was playing at.
     ///
-    /// Stored per clip although volume is set per track, so a clip keeps its level even
-    /// if it ends up on another track.
+    /// Stored per clip although volume is set per track.
     #[serde(default = "unity")]
     pub gain_step: u8,
     /// The round trip compensated for when the take was sealed.
     ///
-    /// Already folded into `phase_frames`. Recorded so the alignment is visible rather
-    /// than baked in and unrecoverable.
+    /// Already folded into `phase_frames`.
     #[serde(default)]
     pub capture_offset_frames: u64,
 }

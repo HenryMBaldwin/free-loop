@@ -18,7 +18,7 @@ pub enum SurfaceError {
 pub trait ControlSurface {
     /// Appends everything the performer has done since the last call.
     ///
-    /// Never blocks. Appending rather than returning lets the caller keep one buffer.
+    /// Never blocks.
     fn poll(&mut self, events: &mut Vec<SurfaceEvent>);
 
     /// Shows `frame`.

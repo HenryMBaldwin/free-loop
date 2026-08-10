@@ -36,8 +36,7 @@ pub const TEMPO_HOLD_INTERVAL: Duration = Duration::from_millis(120);
 
 /// How long the bpm stays up before the grid comes back.
 ///
-/// The device scrolls text across the grid and says nothing when it finishes, so the
-/// time it needs is waited out rather than detected.
+/// The device says nothing when its scroll finishes, so the time is waited out.
 pub const TEXT_DURATION: Duration = Duration::from_millis(1_400);
 
 /// Bit for a pad in the grid masks.
@@ -110,9 +109,7 @@ pub enum Request {
 /// Turns gestures into commands and reports into a frame.
 ///
 /// A pad's action lands on release rather than on press, because a press cannot be told
-/// from the start of a hold. That costs the length of the tap in latency, which only
-/// matters if the tap straddles the bar line it was aimed at. Acting on press instead
-/// would let a hold arm and start recording before the clear killed it.
+/// from the start of a hold.
 #[derive(Debug)]
 pub struct Controller {
     session: SessionModel,
@@ -238,9 +235,6 @@ impl Controller {
     }
 
     /// Silences or frees the row or column a pad sits in.
-    ///
-    /// Whole groups rather than single pads: only one slot per track sounds at a time, so
-    /// a single pad's silence lasts only until another is launched.
     fn toggle_group(&mut self, addr: SlotAddr) {
         let group = match self.chrome.axis {
             Axis::Row => row_mask(addr.track),
@@ -425,8 +419,8 @@ impl Controller {
 
     /// Advances anything that depends on time passing rather than on an event.
     ///
-    /// Call every pass of the control loop, or a hold will only complete when something
-    /// else happens to arrive.
+    /// Call every pass of the control loop, or a hold completes only when another event
+    /// arrives.
     pub fn tick(&mut self, now: Duration) {
         self.repeat_tempo(now);
 
@@ -462,8 +456,7 @@ impl Controller {
 
     /// Nudges once and arms the repeat, or just reports the tempo if it is locked.
     ///
-    /// The tempo cannot move once a clip exists, so a press is a question rather than an
-    /// instruction and gets answered with the number.
+    /// The tempo cannot move once a clip exists.
     fn press_tempo(&mut self, direction: f64, now: Duration) {
         if self.session.has_any_clip() {
             self.show_tempo(now);
@@ -493,8 +486,8 @@ impl Controller {
 
     /// Stops the repeat and reports where the tempo landed.
     ///
-    /// Shown on release rather than as it moves: each update restarts the scroll from the
-    /// edge. A press that moved nothing says nothing.
+    /// Shown on release, since each update restarts the scroll from the edge. A press that
+    /// moved nothing says nothing.
     fn release_tempo(&mut self, now: Duration) {
         let Some(hold) = self.tempo_hold.take() else {
             return;
@@ -590,8 +583,7 @@ impl Controller {
 
     /// Marks whatever is waiting on the next press.
     ///
-    /// Applied to every screen, so a button held or a mode open looks the same wherever
-    /// the grid happens to be.
+    /// Applied to every screen, so a held button looks the same on any of them.
     fn overlay(&mut self) {
         match self.mode {
             Mode::Volume => self.frame.set_side(VOLUME_SIDE, Led::flash(SELECTED)),

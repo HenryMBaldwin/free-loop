@@ -259,9 +259,7 @@ impl Clip {
 
     /// The round trip that was compensated for when this was sealed.
     ///
-    /// Already folded into [`Clip::recorded_at`] and not read back when playing. Kept so
-    /// a recording describes how it was aligned, which a bad latency reading would
-    /// otherwise leave permanently baked in and invisible.
+    /// Already folded into [`Clip::recorded_at`] and not read back when playing.
     pub fn capture_offset(&self) -> Frames {
         self.capture_offset
     }
@@ -273,8 +271,8 @@ impl Clip {
 
     /// Whether this clip's storage belongs to whoever handed it to the engine.
     ///
-    /// The engine returns borrowed storage instead of absorbing it, so its pools stay the
-    /// size they were allocated at however many sessions are loaded.
+    /// The engine returns borrowed storage instead of absorbing it, so its pools keep
+    /// their size.
     pub fn is_borrowed(&self) -> bool {
         self.borrowed
     }

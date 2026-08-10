@@ -40,8 +40,8 @@ pub struct AudioConfig {
     pub cushion_blocks: u32,
     /// Round-trip latency to compensate for, in frames.
     ///
-    /// `None` measures it from the driver's own callback timestamps, which is right for
-    /// almost every rig. Set it only to override a driver that reports badly.
+    /// `None` measures it from the driver's own callback timestamps. Set it only to
+    /// override a driver that reports badly.
     pub capture_offset: Option<u32>,
 }
 
@@ -106,9 +106,9 @@ fn format_rank(format: SampleFormat) -> Option<u8> {
 /// How far a rate misses.
 ///
 /// With no request, rates are ranked by position in [`PREFERRED_RATES`]. `CoreAudio`
-/// reports each discrete rate as its own single-rate range, so preferring 48 kHz within a
-/// range never gets to choose between them. Rates outside the list rank below every rate
-/// in it, closest to the top preference first.
+/// reports each discrete rate as its own single-rate range, so preferring 48 kHz
+/// within a range never gets to choose between them. Rates outside the list rank
+/// below every rate in it, closest to the top preference first.
 fn rate_penalty(rate: u32, wanted: Option<u32>) -> u32 {
     if let Some(wanted) = wanted {
         return wanted.abs_diff(rate);
