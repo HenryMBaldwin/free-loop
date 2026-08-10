@@ -108,10 +108,9 @@ pub fn pad(state: SlotState) -> Led {
 
 /// How a pad looks when its whole group has been marked.
 ///
-/// The group lights end to end, empty pads included, so the row or column reads as one
-/// thing. Within it the colour is fixed and the state is carried by brightness and
-/// movement: an empty pad sits dim, a clip waiting is steady, one playing pulses, and one
-/// waiting on a bar line flashes. What the pad is doing survives the shift.
+/// Every pad in the group lights, empty ones included. The colour is fixed and the state
+/// is carried by style: empty is dim, a parked clip steady, a playing one pulsing, and
+/// one waiting on a bar line flashing.
 pub fn marked_pad(state: SlotState, color: LedColor) -> Led {
     let style = match state {
         SlotState::Empty => LedStyle::Dim,
@@ -144,9 +143,6 @@ pub fn control(control: Control, chrome: Chrome) -> Led {
 }
 
 /// Colour a button takes while it is waiting for the press that follows it.
-///
-/// One colour for every such button, so anything flashing pink means the same thing
-/// wherever it is.
 pub const SELECTED: LedColor = LedColor::Pink;
 
 /// Colour a silenced group takes, matching its side button.
@@ -164,10 +160,8 @@ pub const MUTE_SIDE: usize = 5;
 /// The right-hand column button that opens the soloed pads.
 pub const SOLO_SIDE: usize = 6;
 
-/// The right-hand column button that starts a session from nothing.
-///
-/// Only offered from the load picker, since emptying the grid is not something to have
-/// within reach while playing.
+/// The right-hand column button that starts a session from nothing. Offered only from
+/// the load picker.
 pub const NEW_SIDE: usize = 7;
 
 /// How the transport button looks.
@@ -202,11 +196,9 @@ pub fn beat_indicator(frame: &mut LedFrame, chrome: Chrome) {
     frame.set_control(FIRST_BEAT_LED + beat, led);
 }
 
-/// Paints the tempo as a fill across the grid.
+/// Paints the tempo as a fill across the grid, spanning [`MIN_BPM`] to [`MAX_BPM`].
 ///
-/// Shown while a tempo button is held, where the number cannot be: each text update
-/// restarts the scroll. The grid spans [`MIN_BPM`] to [`MAX_BPM`], so one pad is about
-/// the size of one step of the hold and the fill rate is the rate.
+/// One pad is about one step of a held tempo button, so the fill rate is the rate.
 pub fn tempo_gauge(tempo: f64, chrome: Chrome) -> LedFrame {
     let mut frame = LedFrame::new();
     let total = TRACK_COUNT * SLOT_COUNT;

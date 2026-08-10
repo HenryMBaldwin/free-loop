@@ -1,7 +1,10 @@
 //! Control instructions for the realtime side. `Copy` and allocation-free.
 
-use crate::ids::{PadMask, SlotAddr, TrackId};
+use crate::gain::GAIN_STEPS;
+use crate::ids::{PadMask, SlotAddr, TRACK_COUNT, TrackId};
 use crate::time::Tempo;
+
+const _: () = assert!(GAIN_STEPS == 8);
 
 /// An instruction for the realtime side.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -16,6 +19,11 @@ pub enum Command {
     StopAll,
     /// Empty every pad, leaving nothing loaded.
     ClearAll,
+    /// Set how loud each track plays, as a step on the gain ladder.
+    ///
+    /// Sent whole for the same reason as the mute masks: the engine never holds a
+    /// different picture from the surface showing it.
+    SetGains([u8; TRACK_COUNT]),
     /// Publish a reference to every pad that holds a clip.
     Snapshot,
     /// Set which pads are silenced and which are soloed.

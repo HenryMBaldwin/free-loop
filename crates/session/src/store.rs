@@ -334,7 +334,7 @@ fn write_wav(
         slice.fill(0.0);
         // Reading from the clip's own start gives phase zero, so the file begins where
         // the loop begins.
-        clip.mix_into(clip.recorded_at() + Frames(done), slice);
+        clip.mix_into(clip.recorded_at() + Frames(done), slice, 1.0);
 
         for sample in slice.iter() {
             writer
@@ -683,7 +683,7 @@ mod tests {
         assert!(read.clip.is_borrowed(), "the caller owns the storage");
 
         let mut out = vec![0.0_f32; 200 * usize::from(CH)];
-        read.clip.mix_into(read.clip.recorded_at(), &mut out);
+        read.clip.mix_into(read.clip.recorded_at(), &mut out, 1.0);
         let expected: Vec<f32> = (0..200 * usize::from(CH))
             .map(|i| i as f32 / 1000.0)
             .collect();
@@ -715,7 +715,7 @@ mod tests {
         let mut out = vec![0.0_f32; 4 * usize::from(CH)];
         loaded.clips[0]
             .clip
-            .mix_into(Frames(frames as u64 - 4), &mut out);
+            .mix_into(Frames(frames as u64 - 4), &mut out, 1.0);
         let base = (frames - 4) * usize::from(CH);
         let expected: Vec<f32> = (base..base + 4 * usize::from(CH))
             .map(|i| i as f32 / 1000.0)
@@ -747,7 +747,7 @@ mod tests {
         assert_eq!(read.len(), Frames(frames as u64));
 
         let mut out = vec![0.0_f32; frames * usize::from(CH)];
-        read.mix_into(read.recorded_at(), &mut out);
+        read.mix_into(read.recorded_at(), &mut out, 1.0);
 
         let expected: Vec<f32> = (0..frames * usize::from(CH))
             .map(|i| i as f32 / 1000.0)

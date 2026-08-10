@@ -1158,3 +1158,70 @@ fn muting_a_column_reaches_across_tracks() {
     let out = harness.run_frames(256);
     assert!(out.iter().all(|s| *s == 0.0));
 }
+
+#[test]
+fn a_track_plays_at_the_gain_it_was_given() {
+    use free_loop_core::{TRACK_COUNT, UNITY_STEP, gain_for_step};
+
+    let mut harness = Harness::new(128);
+    let pad = addr(0, 0);
+    record(&mut harness, pad, 0, 1);
+
+    let mut gains = [UNITY_STEP; TRACK_COUNT];
+    gains[0] = UNITY_STEP - 1;
+    harness.command(Command::SetGains(gains));
+
+    let quieter = gain_for_step(UNITY_STEP - 1);
+    let from = harness.position();
+    let out = harness.run_to(from + 256);
+
+    for (i, sample) in out.iter().enumerate() {
+        let frame = from + (i / CHANNELS) as u64;
+        let channel = i % CHANNELS;
+        assert_eq!(*sample, signal(frame % BAR, channel) * quieter);
+    }
+}
+
+#[test]
+fn the_bottom_of_the_ladder_is_silence() {
+    use free_loop_core::{TRACK_COUNT, UNITY_STEP};
+
+    let mut harness = Harness::new(128);
+    record(&mut harness, addr(0, 0), 0, 1);
+
+    let mut gains = [UNITY_STEP; TRACK_COUNT];
+    gains[0] = 0;
+    harness.command(Command::SetGains(gains));
+
+    let out = harness.run_frames(256);
+    assert!(out.iter().all(|s| *s == 0.0));
+}
+
+#[test]
+fn gain_is_per_track_not_per_grid() {
+    use free_loop_core::{TRACK_COUNT, UNITY_STEP, gain_for_step};
+
+    let mut harness = Harness::new(128);
+    let quiet = addr(0, 0);
+    let loud = addr(1, 0);
+    record(&mut harness, quiet, 0, 1);
+    let after = harness.position();
+    record(&mut harness, loud, after, 1);
+
+    let mut gains = [UNITY_STEP; TRACK_COUNT];
+    gains[0] = 1;
+    harness.command(Command::SetGains(gains));
+
+    let scale = gain_for_step(1);
+    let from = harness.position();
+    let out = harness.run_to(from + 256);
+
+    for (i, sample) in out.iter().enumerate() {
+        let frame = from + (i / CHANNELS) as u64;
+        let channel = i % CHANNELS;
+        // The second take starts on the bar 2 line, so that is where its content begins.
+        let first = signal(frame % BAR, channel) * scale;
+        let second = signal(2 * BAR + (frame - 2 * BAR) % BAR, channel);
+        assert_eq!(*sample, first + second, "frame {frame}");
+    }
+}

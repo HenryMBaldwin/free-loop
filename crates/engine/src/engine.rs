@@ -10,7 +10,8 @@
 
 use free_loop_core::{
     BarGrid, ClipId, Command, Ctx, Effect, Event, Frames, MIN_BPM, PadMask, SLOT_COUNT, SampleRate,
-    SessionModel, SlotAddr, SlotState, TRACK_COUNT, Tempo, TimeError, TimeSignature, pad_bit,
+    SessionModel, SlotAddr, SlotState, TRACK_COUNT, Tempo, TimeError, TimeSignature, UNITY_STEP,
+    gain_for_step, pad_bit,
 };
 
 use std::sync::Arc;
@@ -297,6 +298,8 @@ pub struct Engine {
     muted: PadMask,
     /// Pads that sound to the exclusion of the rest.
     soloed: PadMask,
+    /// How loud each track plays, as a step on the gain ladder.
+    gains: [u8; TRACK_COUNT],
     /// The last position a beat fired on, so a grid change cannot fire it twice.
     last_boundary: Option<Frames>,
     /// MIDI clock ticks already reported.
@@ -365,6 +368,7 @@ impl Engine {
             paused: false,
             muted: 0,
             soloed: 0,
+            gains: [UNITY_STEP; TRACK_COUNT],
             last_boundary: None,
             last_clock: 0,
             capture_offset: config.capture_offset,
@@ -404,6 +408,11 @@ impl Engine {
     /// Whether the transport is frozen.
     pub fn is_paused(&self) -> bool {
         self.paused
+    }
+
+    /// How loud a track plays.
+    pub fn gain(&self, track: free_loop_core::TrackId) -> f32 {
+        gain_for_step(self.gains[track.index()])
     }
 
     /// Whether a pad would be heard if it were playing.
@@ -472,6 +481,7 @@ impl Engine {
                 self.muted = muted;
                 self.soloed = soloed;
             }
+            Command::SetGains(gains) => self.gains = gains,
             Command::ClearAll => self.clear_all(sink),
             Command::Rewind => self.rewind(sink),
             Command::Snapshot => self.publish_snapshot(sink),
@@ -500,18 +510,12 @@ impl Engine {
 
     /// Sends the transport back to the start, with the longest loop at its beginning.
     ///
-    /// Every anchor moves by the same amount rather than to zero. Zeroing them would put
-    /// each loop at its own beginning, which shifts loops against each other: a four bar
-    /// take recorded while a two bar one was halfway through is meant to stay halfway
-    /// through. A uniform shift keeps every one of those relationships and only decides
-    /// where the ensemble starts.
-    ///
-    /// The longest loop is the reference, since it is the one that sets the phrase.
+    /// Every anchor moves by the same amount, which keeps the loops where they were
+    /// against each other. The longest loop is the reference.
     fn rewind(&mut self, sink: &mut impl EventSink) {
         let shift = self.reference_anchor();
 
-        // A take spanning a rewind would splice two moments together, and its start would
-        // sit ahead of the transport.
+        // A take spanning a rewind splices two moments together.
         let ctx = self.ctx();
         self.with_session(|session, audio| {
             session.cancel_recordings(&ctx, &mut |a, e| audio.apply(a, e, sink));
@@ -541,8 +545,7 @@ impl Engine {
 
     /// The anchor everything is measured against when rewinding.
     ///
-    /// The longest loop, and the earliest of those if several share a length, so the
-    /// choice does not wander between rewinds.
+    /// The longest loop, earliest first, so the choice is stable across rewinds.
     fn reference_anchor(&self) -> Frames {
         SlotAddr::all()
             .filter_map(|addr| self.audio.clip(addr))
@@ -784,8 +787,9 @@ impl Engine {
             if !sounding || !self.is_audible(addr) {
                 continue;
             }
+            let gain = self.gain(addr.track);
             if let Some(clip) = self.audio.clip(addr) {
-                clip.mix_into(self.position, out);
+                clip.mix_into(self.position, out, gain);
             }
         }
 

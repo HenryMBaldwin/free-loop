@@ -321,9 +321,8 @@ fn save(
 
 /// Shows any frame, then any text.
 ///
-/// The frame goes first so the buttons are up to date before text takes the grid: a
-/// tempo button let go on the same pass has to stop showing as held, and once the text
-/// is running nothing more is sent until it finishes.
+/// Text takes the grid over, so the frame goes first and nothing more is sent until the
+/// text finishes.
 fn repaint(surface: &mut dyn ControlSurface, controller: &mut Controller) {
     if let Some(frame) = controller.take_frame()
         && let Err(error) = surface.render(frame)
