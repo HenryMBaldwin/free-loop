@@ -25,9 +25,25 @@ pub const CLEAR_HOLD: Duration = Duration::from_secs(1);
 /// How long into a hold the pad starts warning that it is about to empty.
 pub const CLEAR_WARNING: Duration = Duration::from_millis(400);
 
-/// Bit for a pad in the hold masks.
+/// Bit for a pad in the grid masks.
 fn bit(addr: SlotAddr) -> u64 {
     1 << (addr.track.index() * SLOT_COUNT + addr.slot.index())
+}
+
+/// What the grid is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// The loops.
+    Perform,
+    /// Sessions, waiting for one to be chosen to save over.
+    SavePicker,
+}
+
+/// Work for the caller to do, which the controller cannot because it owns no I/O.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Request {
+    /// Write the session under this pad.
+    SaveSession(SlotAddr),
 }
 
 /// Turns gestures into commands and reports into a frame.
@@ -48,6 +64,12 @@ pub struct Controller {
     /// Pads currently warning that they are about to empty.
     warning: u64,
     commands: Vec<Command>,
+    requests: Vec<Request>,
+    mode: Mode,
+    /// A bit per pad that holds a session.
+    sessions: u64,
+    /// The session in use, if one was loaded or saved this run.
+    current: Option<SlotAddr>,
     frame: LedFrame,
     dirty: bool,
 }
@@ -71,6 +93,10 @@ impl Controller {
             held: [[None; SLOT_COUNT]; TRACK_COUNT],
             warning: 0,
             commands: Vec::new(),
+            requests: Vec::new(),
+            mode: Mode::Perform,
+            sessions: 0,
+            current: None,
             dirty: true,
         }
     }
@@ -95,9 +121,41 @@ impl Controller {
         self.chrome.paused
     }
 
+    /// What the grid is showing.
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    /// The session in use.
+    pub fn current_session(&self) -> Option<SlotAddr> {
+        self.current
+    }
+
+    /// Tells the controller which pads hold sessions.
+    pub fn set_sessions(&mut self, sessions: impl IntoIterator<Item = SlotAddr>) {
+        self.sessions = sessions.into_iter().map(bit).fold(0, |mask, b| mask | b);
+        self.dirty = true;
+    }
+
+    /// Records which session is in use, and leaves the picker.
+    pub fn session_saved(&mut self, addr: SlotAddr) {
+        self.sessions |= bit(addr);
+        self.current = Some(addr);
+        self.mode = Mode::Perform;
+        self.dirty = true;
+    }
+
+    /// Takes everything the caller needs to act on.
+    pub fn drain_requests(&mut self) -> std::vec::Drain<'_, Request> {
+        self.requests.drain(..)
+    }
+
     /// Handles something the performer did, at time `now` since the app started.
     pub fn on_surface(&mut self, event: SurfaceEvent, now: Duration) {
         match event {
+            SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::SavePicker => {
+                self.requests.push(Request::SaveSession(addr));
+            }
             SurfaceEvent::PadPressed { addr, .. } => {
                 // Nothing yet: which gesture this is depends on how long it lasts.
                 self.held[addr.track.index()][addr.slot.index()] = Some(now);
@@ -121,14 +179,21 @@ impl Controller {
             SurfaceEvent::ControlPressed(Control::TempoDown) => self.nudge_tempo(-TEMPO_STEP),
             SurfaceEvent::ControlPressed(Control::TempoUp) => self.nudge_tempo(TEMPO_STEP),
             SurfaceEvent::ControlPressed(Control::StopAll) => self.commands.push(Command::StopAll),
+            SurfaceEvent::ControlPressed(Control::SaveSession) => {
+                self.mode = match self.mode {
+                    Mode::SavePicker => Mode::Perform,
+                    Mode::Perform => Mode::SavePicker,
+                };
+                self.dirty = true;
+            }
             SurfaceEvent::SidePressed { index } if usize::from(index) == PAUSE_SIDE => {
                 self.chrome.paused = !self.chrome.paused;
                 self.commands.push(Command::SetPaused(self.chrome.paused));
                 self.dirty = true;
             }
 
-            // Sessions are not wired up yet, and the other side buttons are unbound.
-            SurfaceEvent::ControlPressed(Control::LoadSession | Control::SaveSession)
+            // Loading is not wired up yet, and the other side buttons are unbound.
+            SurfaceEvent::ControlPressed(Control::LoadSession)
             | SurfaceEvent::ControlReleased(_)
             | SurfaceEvent::SidePressed { .. }
             | SurfaceEvent::SideReleased { .. } => {}
@@ -202,7 +267,8 @@ impl Controller {
             | Event::ClipRecorded { .. }
             | Event::ClipReleased { .. }
             | Event::RecordBufferLow { .. }
-            | Event::Xrun { .. } => {}
+            | Event::Xrun { .. }
+            | Event::SnapshotComplete { .. } => {}
         }
     }
 
@@ -215,6 +281,17 @@ impl Controller {
     pub fn take_frame(&mut self) -> Option<&LedFrame> {
         if !self.dirty {
             return None;
+        }
+
+        if self.mode == Mode::SavePicker {
+            self.frame = paint::picker(
+                self.sessions,
+                self.current,
+                self.chrome,
+                Control::SaveSession,
+            );
+            self.dirty = false;
+            return Some(&self.frame);
         }
 
         self.frame = paint::frame(&self.session, self.chrome);
@@ -334,11 +411,95 @@ mod tests {
     }
 
     #[test]
-    fn the_session_buttons_are_not_wired_up_yet() {
+    fn loading_is_not_wired_up_yet() {
         let mut controller = controller();
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
         controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
         assert!(commands(&mut controller).is_empty());
+    }
+
+    fn requests(controller: &mut Controller) -> Vec<Request> {
+        controller.drain_requests().collect()
+    }
+
+    #[test]
+    fn the_save_button_toggles_the_picker() {
+        let mut controller = controller();
+        assert_eq!(controller.mode(), Mode::Perform);
+
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        assert_eq!(controller.mode(), Mode::SavePicker);
+
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        assert_eq!(controller.mode(), Mode::Perform, "pressing again backs out");
+    }
+
+    #[test]
+    fn a_pad_in_the_picker_asks_for_a_save_rather_than_playing() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        press(&mut controller, addr(2, 3), T0);
+
+        assert!(
+            commands(&mut controller).is_empty(),
+            "a pad in the picker must not touch the loops"
+        );
+        assert_eq!(
+            requests(&mut controller),
+            vec![Request::SaveSession(addr(2, 3))]
+        );
+    }
+
+    #[test]
+    fn a_picker_press_cannot_start_a_hold() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        press(&mut controller, addr(0, 0), T0);
+        requests(&mut controller);
+
+        controller.tick(millis(2_000));
+        assert!(
+            commands(&mut controller).is_empty(),
+            "choosing where to save must not empty a pad"
+        );
+    }
+
+    #[test]
+    fn a_completed_save_leaves_the_picker_and_marks_the_session() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        controller.session_saved(addr(1, 1));
+
+        assert_eq!(controller.mode(), Mode::Perform);
+        assert_eq!(controller.current_session(), Some(addr(1, 1)));
+    }
+
+    #[test]
+    fn the_picker_shows_the_sessions_it_was_told_about() {
+        let mut controller = controller();
+        controller.set_sessions([addr(0, 1), addr(3, 4)]);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+
+        let frame = controller.take_frame().expect("the picker opened");
+        assert!(frame.pad(addr(0, 1)).is_lit());
+        assert!(frame.pad(addr(3, 4)).is_lit());
+        assert!(!frame.pad(addr(7, 7)).is_lit());
+    }
+
+    #[test]
+    fn the_picker_hides_the_loops() {
+        let mut controller = controller();
+        controller.on_engine(Event::SlotChanged {
+            addr: addr(0, 0),
+            state: SlotState::Playing { clip: ClipId(0) },
+        });
+        controller.take_frame();
+
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        let frame = controller.take_frame().expect("the picker opened");
+        assert!(
+            !frame.pad(addr(0, 0)).is_lit(),
+            "an empty session pad must not look like a playing loop"
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 [package]
-name = "free-loop"
+name = "free-loop-session"
 version = "0.1.0"
-description = "DAWless measure-based looper for the Novation Launchpad X"
+description = "Saving and loading Free Loop sessions"
 edition.workspace = true
 license.workspace = true
 readme.workspace = true
@@ -9,21 +9,10 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
-[lib]
-name = "free_loop"
-path = "src/lib.rs"
-
-[[bin]]
-name = "free-loop"
-path = "src/main.rs"
-
 [dependencies]
-ctrlc.workspace = true
-free-loop-audio.workspace = true
 free-loop-core.workspace = true
 free-loop-engine.workspace = true
-free-loop-session.workspace = true
-free-loop-surface.workspace = true
+hound.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true

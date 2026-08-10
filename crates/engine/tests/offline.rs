@@ -11,7 +11,7 @@
 )]
 
 use free_loop_core::{ClipId, Command, Event, Frames, SlotAddr, SlotId, SlotState, TrackId};
-use free_loop_engine::{ClickConfig, Engine, EngineConfig};
+use free_loop_engine::{ClickConfig, Engine, EngineConfig, Housekeeping, Snapshot};
 
 const CHANNELS: usize = 2;
 const BAR: u64 = 96_000; // 120 bpm, 4/4, 48 kHz
@@ -25,6 +25,7 @@ fn signal(frame: u64, channel: usize) -> f32 {
 
 struct Harness {
     engine: Engine,
+    housekeeping: Housekeeping,
     events: Vec<Event>,
     block: usize,
 }
@@ -42,8 +43,10 @@ impl Harness {
             enabled: false,
             level: 0.0,
         };
+        let (engine, housekeeping) = Engine::new(config).unwrap();
         Self {
-            engine: Engine::new(config).unwrap().0,
+            engine,
+            housekeeping,
             events: Vec::new(),
             block,
         }
@@ -455,6 +458,70 @@ fn the_click_sounds_on_every_beat() {
             "the blip on beat {beat} did not decay before the next"
         );
     }
+}
+
+#[test]
+fn a_snapshot_publishes_every_pad_that_holds_audio() {
+    let mut harness = Harness::new(128);
+    let playing = addr(0, 0);
+    let stopped = addr(1, 1);
+
+    record(&mut harness, playing, 0, 1);
+    let after = harness.position();
+    record(&mut harness, stopped, after, 1);
+    // Recording the second pad on another track leaves the first playing.
+    harness.command(Command::Press(stopped));
+    harness.run_to(harness.position() + BAR + 1);
+
+    harness.command(Command::Snapshot);
+
+    let mut seen: Vec<Snapshot> = Vec::new();
+    harness.housekeeping.snapshots.drain(|s| seen.push(s));
+
+    assert_eq!(seen.len(), 2, "both pads hold audio");
+    assert!(seen.iter().all(|s| s.clip.len() == Frames(BAR)));
+    assert!(seen.iter().any(|s| s.addr == playing));
+    assert!(seen.iter().any(|s| s.addr == stopped));
+}
+
+#[test]
+fn a_pad_still_recording_is_not_published() {
+    let mut harness = Harness::new(128);
+    let pad = addr(0, 0);
+
+    harness.command(Command::Press(pad));
+    harness.run_to(2 * BAR);
+    assert!(harness.engine.state(pad).is_recording());
+
+    harness.command(Command::Snapshot);
+    let mut count = 0;
+    harness.housekeeping.snapshots.drain(|_| count += 1);
+    assert_eq!(count, 0, "an unfinished take has no length yet");
+}
+
+#[test]
+fn a_held_snapshot_delays_reclaiming_the_pad() {
+    let mut harness = Harness::new(128);
+    let pad = addr(0, 0);
+
+    let available = harness.engine.segments_available();
+    record(&mut harness, pad, 0, 1);
+    harness.command(Command::Snapshot);
+
+    let mut held = Vec::new();
+    harness.housekeeping.snapshots.drain(|s| held.push(s));
+    assert_eq!(held.len(), 1);
+
+    harness.command(Command::Clear(pad));
+    assert!(
+        harness.engine.segments_available() < available,
+        "the reader still has the audio"
+    );
+
+    drop(held);
+    harness.housekeeping.recycler.run();
+    harness.run_frames(64);
+    assert_eq!(harness.engine.segments_available(), available);
 }
 
 #[test]
