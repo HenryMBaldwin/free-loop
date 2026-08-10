@@ -246,11 +246,32 @@ impl Opened {
     }
 }
 
+/// How a device made itself known as gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceLoss {
+    /// The driver reported it.
+    Reported,
+    /// The capture stopped delivering.
+    Starved,
+    /// The name it was opened under is no longer listed.
+    Missing,
+}
+
+impl core::fmt::Display for DeviceLoss {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Reported => "the driver said so",
+            Self::Starved => "capture stopped",
+            Self::Missing => "no longer listed",
+        })
+    }
+}
+
 /// What happened to the devices on one pass of the control loop.
 #[derive(Debug)]
 pub enum DeviceChange {
     /// A device went away. Nothing sounds and the transport is frozen where it was.
-    Lost,
+    Lost(DeviceLoss),
     /// The devices are running again.
     Back,
     /// A device was there but could not be used. Reported once per reason.
@@ -326,29 +347,11 @@ impl AudioIo {
     /// Call every pass of the control loop. Returns what changed, if anything.
     pub fn tick(&mut self, now: Duration) -> Option<DeviceChange> {
         if self.streams.is_some() {
-            // A device that has been unplugged does not always report an error, but it
-            // does stop delivering.
-            let starved = self.health.starved.load(Ordering::Relaxed);
-            if starved_out(starved, self.negotiated.sample_rate) {
-                self.health.lost.store(true, Ordering::Relaxed);
-            }
-
-            if now >= self.check_at {
-                self.check_at = now + RETRY_INTERVAL;
-                let host = cpal::default_host();
-                let (input, output) = &self.open_names;
-                if !still_listed(&host, input, false) || !still_listed(&host, output, true) {
-                    self.health.lost.store(true, Ordering::Relaxed);
-                }
-            }
-
-            if !self.health.lost.swap(false, Ordering::Relaxed) {
-                return None;
-            }
+            let loss = self.loss(now)?;
             // Dropping stops both, which also hands the device back to the system.
             self.streams = None;
             self.retry_at = Some(now + RETRY_INTERVAL);
-            return Some(DeviceChange::Lost);
+            return Some(DeviceChange::Lost(loss));
         }
 
         // Nothing is draining the command ring, so it would otherwise fill and start
@@ -380,9 +383,36 @@ impl AudioIo {
         }
     }
 
+    /// How the running devices have made themselves known as gone, if they have.
+    ///
+    /// An unplugged device does not always report an error. It does stop delivering, and
+    /// its name does stop being listed, so all three are watched.
+    fn loss(&mut self, now: Duration) -> Option<DeviceLoss> {
+        if self.health.lost.swap(false, Ordering::Relaxed) {
+            return Some(DeviceLoss::Reported);
+        }
+
+        let starved = self.health.starved.load(Ordering::Relaxed);
+        if starved_out(starved, self.negotiated.sample_rate) {
+            return Some(DeviceLoss::Starved);
+        }
+
+        if now < self.check_at {
+            return None;
+        }
+        self.check_at = now + RETRY_INTERVAL;
+
+        let host = cpal::default_host();
+        let (input, output) = &self.open_names;
+        if still_listed(&host, input, false) && still_listed(&host, output, true) {
+            return None;
+        }
+        Some(DeviceLoss::Missing)
+    }
+
     /// Opens the devices again and starts them, if they offer what the engine expects.
     fn reopen(&mut self) -> Result<(), AudioError> {
-        let opened = open(&self.config)?;
+        let opened = open(&pinned(&self.config, &self.open_names))?;
         let found = opened.negotiated();
 
         compatible(self.negotiated, found)?;
@@ -709,6 +739,20 @@ where
     Ok(stream)
 }
 
+/// The same request, but for the devices already in use.
+///
+/// A configuration that names nothing takes the host's default, which is whatever the
+/// host fell back to when the device went away. Reopening on that would settle onto the
+/// fallback and leave the session there.
+fn pinned(config: &AudioConfig, names: &(String, String)) -> AudioConfig {
+    let (input, output) = names;
+    AudioConfig {
+        input_device: Some(input.clone()),
+        output_device: Some(output.clone()),
+        ..config.clone()
+    }
+}
+
 /// Whether a device of this name is still listed.
 ///
 /// A device that is unplugged can be replaced by the host rather than reported as an
@@ -871,6 +915,20 @@ mod tests {
             compatible(negotiated(48_000, 2), found).is_ok(),
             "only the rate and the engine's channel count are fixed"
         );
+    }
+
+    #[test]
+    fn reopening_asks_for_the_devices_already_in_use() {
+        let config = AudioConfig {
+            sample_rate: Some(48_000),
+            ..AudioConfig::new()
+        };
+        let names = ("Scarlett Input".to_owned(), "Scarlett Output".to_owned());
+        let wanted = pinned(&config, &names);
+
+        assert_eq!(wanted.input_device.as_deref(), Some("Scarlett Input"));
+        assert_eq!(wanted.output_device.as_deref(), Some("Scarlett Output"));
+        assert_eq!(wanted.sample_rate, Some(48_000), "the rest is unchanged");
     }
 
     #[test]
