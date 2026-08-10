@@ -134,6 +134,8 @@ pub struct Controller {
     text: Option<TextUpdate>,
     /// When the grid comes back, while text has it.
     text_until: Option<Duration>,
+    /// Whether text is on the grid now, as opposed to merely queued.
+    text_running: bool,
     mode: Mode,
     /// A bit per pad that holds a session.
     sessions: u64,
@@ -170,6 +172,7 @@ impl Controller {
             tempo_hold: None,
             text: None,
             text_until: None,
+            text_running: false,
             mode: Mode::Perform,
             sessions: 0,
             current: None,
@@ -304,7 +307,9 @@ impl Controller {
 
     /// Takes a display change, if there is one.
     pub fn take_text(&mut self) -> Option<TextUpdate> {
-        self.text.take()
+        let update = self.text.take()?;
+        self.text_running = matches!(update, TextUpdate::Show(_));
+        Some(update)
     }
 
     /// Takes everything the caller needs to act on.
@@ -587,8 +592,9 @@ impl Controller {
 
     /// The frame to show, if anything changed since it was last taken.
     pub fn take_frame(&mut self) -> Option<&LedFrame> {
-        // Text has the grid, and a frame sent now would cut it off part way.
-        if !self.dirty || self.text_until.is_some() {
+        // Text on the grid would be cut off part way by a frame. Queued text is not on
+        // the grid yet, so the frame that goes with it still gets out.
+        if !self.dirty || self.text_running {
             return None;
         }
 
@@ -925,12 +931,19 @@ mod tests {
         );
 
         controller.on_surface(SurfaceEvent::ControlReleased(Control::TempoUp), millis(500));
+
+        // The frame that clears the button goes out before the number takes the grid.
+        let frame = controller.take_frame().expect("the button was let go");
+        assert_ne!(
+            frame.control(Control::TempoUp.index()).color,
+            SELECTED,
+            "the button stops showing as held the moment it is released"
+        );
+
         controller.take_text();
         controller.tick(millis(500) + TEXT_DURATION);
         controller.take_text();
-
-        let frame = controller.take_frame().expect("the grid came back");
-        assert_ne!(frame.control(Control::TempoUp.index()).color, SELECTED);
+        assert!(controller.take_frame().is_some(), "and the grid comes back");
     }
 
     #[test]
@@ -1343,6 +1356,7 @@ mod tests {
         controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
         controller.tick(millis(400));
         controller.on_surface(SurfaceEvent::ControlReleased(Control::TempoUp), millis(500));
+        controller.take_frame();
         controller.take_text();
 
         controller.tick(millis(600));
