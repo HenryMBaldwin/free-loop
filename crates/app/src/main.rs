@@ -187,7 +187,7 @@ fn run(s: Session<'_>) {
         let now = started.elapsed();
 
         connected = watch_surface(surface, now, connected);
-        watch_devices(io, now);
+        watch_devices(io, now, controller, config.audio.pause_on_disconnect);
 
         events.clear();
         surface.poll(&mut events);
@@ -446,10 +446,20 @@ fn write_session(
 }
 
 /// Lets the audio devices come back after being unplugged, reporting what changed.
-fn watch_devices(io: &mut AudioIo, now: Duration) {
+fn watch_devices(
+    io: &mut AudioIo,
+    now: Duration,
+    controller: &mut Controller,
+    pause_on_disconnect: bool,
+) {
     match io.tick(now) {
         Some(DeviceChange::Lost) => {
-            eprintln!("audio: device gone. the set is held where it stopped");
+            if pause_on_disconnect {
+                controller.pause();
+                eprintln!("audio: device gone. paused");
+            } else {
+                eprintln!("audio: device gone. the set is held where it stopped");
+            }
         }
         Some(DeviceChange::Back) => println!("audio: device back"),
         Some(DeviceChange::Refused(error)) => eprintln!("audio: {error}"),
