@@ -1,7 +1,6 @@
 //! Choosing a stream configuration from what a device offers.
 //!
-//! Pure: everything here works on `SupportedStreamConfigRange` values, so the selection
-//! rules can be tested without a device.
+//! Works on `SupportedStreamConfigRange` values rather than on an open device.
 
 use cpal::{
     BufferSize, SampleFormat, SupportedBufferSize, SupportedStreamConfig,

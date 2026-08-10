@@ -1,11 +1,8 @@
 //! The capture ring between the input and output callbacks.
 //!
-//! cpal has no duplex stream, so input and output arrive as separate callbacks even on
-//! one device. The input side does nothing but convert and push; the output side pops
-//! and runs the engine. On one device both callbacks share a hardware clock, so the ring
-//! level is stable and the cushion is a fixed, known latency rather than drift.
-//!
-//! Only rtrb is involved here, so the behaviour is testable without a device.
+//! The input side converts and pushes; the output side pops and runs the engine. On one
+//! device both callbacks share a hardware clock, so the ring level is stable and the
+//! cushion is a fixed, known latency rather than drift.
 
 use cpal::FromSample;
 use rtrb::{Consumer, Producer, RingBuffer};

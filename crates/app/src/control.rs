@@ -1,11 +1,9 @@
 //! The control loop's state.
 //!
 //! Sits between the surface and the engine: gestures in, commands out, reports in, a
-//! frame out. Owns no I/O and takes the time as an argument rather than reading a clock,
-//! so the mapping and the hold timing are both testable without a device.
+//! frame out. Owns no I/O and takes the time as an argument rather than reading a clock.
 //!
-//! The session model here is a mirror. The engine owns the real one, because only it
-//! knows where the transport is; this copy exists to paint the grid.
+//! The session model here is a mirror of the engine's, kept to paint the grid.
 
 use core::time::Duration;
 
@@ -495,9 +493,8 @@ impl Controller {
 
     /// Stops the repeat and reports where the tempo landed.
     ///
-    /// Shown on release rather than as it moves, because each update restarts the scroll
-    /// from the edge and one sent every repeat never gets anywhere. A tap that hit the
-    /// end of the range says nothing, since the number would not have changed.
+    /// Shown on release rather than as it moves: each update restarts the scroll from the
+    /// edge. A press that moved nothing says nothing.
     fn release_tempo(&mut self, now: Duration) {
         let Some(hold) = self.tempo_hold.take() else {
             return;

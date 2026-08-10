@@ -1,10 +1,7 @@
 //! Returning shared clips to the engine after a reader is done with them.
 //!
-//! Dropping the last reference to a clip deallocates, which the audio thread must not do.
-//! The engine reclaims clips nobody else holds directly. Clips someone is still reading
-//! go through here instead.
-//!
-//! Run [`Recycler`] off the audio thread.
+//! Only clips someone is still reading come through here; the engine reclaims the rest
+//! itself. Run [`Recycler`] off the audio thread.
 
 use std::sync::Arc;
 

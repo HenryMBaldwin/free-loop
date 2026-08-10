@@ -1,11 +1,8 @@
 //! Handing clips out for something off the audio thread to read.
 //!
-//! The engine lives inside the audio callback, so nothing else can reach its clips
-//! directly. A snapshot request makes it publish a reference to each occupied pad, which
-//! is an atomic increment per clip and no copying of audio.
-//!
-//! Holding a snapshot keeps a clip alive. The engine cannot reclaim one until the reader
-//! drops it, which is what [`crate::recycle`] handles.
+//! A snapshot request publishes a reference to each occupied pad: an atomic increment per
+//! clip, no audio copied. Holding one keeps its clip alive until [`crate::recycle`] takes
+//! it back.
 
 use std::sync::Arc;
 

@@ -15,9 +15,6 @@ pub enum SurfaceError {
 }
 
 /// A grid controller.
-///
-/// The trait exists so the looper can run against a mock with no hardware attached, and
-/// so a change in the device library stays inside one implementation.
 pub trait ControlSurface {
     /// Appends everything the performer has done since the last call.
     ///

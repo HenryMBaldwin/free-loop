@@ -1,11 +1,8 @@
 //! Putting a saved session back into the engine.
 //!
-//! The engine cannot allocate, so loaded audio arrives as storage the loader owns. Every
-//! message travels one ordered channel, so clearing the grid, filling it and freezing the
-//! transport cannot arrive out of order.
-//!
-//! The engine hands the displaced clips back through [`crate::recycle`], and marks the
-//! loaded ones borrowed so it never absorbs storage it did not allocate.
+//! Loaded audio arrives as storage the loader owns, marked borrowed so the engine returns
+//! it rather than absorbing it. One ordered channel carries every step, so clearing the
+//! grid, filling it and freezing the transport keep their order.
 
 use std::sync::Arc;
 

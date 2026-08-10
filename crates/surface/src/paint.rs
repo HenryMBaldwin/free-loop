@@ -1,7 +1,6 @@
 //! Turning session state into a frame.
 //!
-//! The one place the looper's colour scheme is decided. Pure, so the whole scheme is
-//! testable without a device.
+//! The one place the looper's colour scheme is decided.
 
 use core::cmp::Ordering;
 
@@ -66,9 +65,8 @@ impl Axis {
 impl Chrome {
     /// The colour a pad's whole group has been marked with, if any.
     ///
-    /// Each colour matches the side button that sets it, so the grid says which of the
-    /// two is in play without a legend. Silence outranks solo, matching the engine, so a
-    /// group that is both reads as silenced rather than as heard.
+    /// Each colour matches the side button that sets it. Silence outranks solo, matching
+    /// the engine.
     pub fn mark(&self, addr: SlotAddr) -> Option<LedColor> {
         let bit = pad_bit(addr);
         if self.muted & bit != 0 {
