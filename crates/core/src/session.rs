@@ -37,7 +37,7 @@ impl SessionModel {
         self.set(addr, state);
     }
 
-    /// Whether any pad holds a clip. The tempo is locked once this is true — changing
+    /// Whether any pad holds a clip. The tempo locks once this is true, since changing
     /// it would leave existing clips misaligned with the grid.
     pub fn has_any_clip(&self) -> bool {
         SlotAddr::all().any(|addr| self.state(addr).clip().is_some())

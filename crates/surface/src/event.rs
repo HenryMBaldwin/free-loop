@@ -6,7 +6,7 @@ use free_loop_core::SlotAddr;
 ///
 /// The beat indicator shares the first four buttons rather than owning any. The tempo
 /// controls are momentary nudges with no state to display, so lighting them with the
-/// beat costs nothing, and that is what leaves room for everything else.
+/// beat costs nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Control {
     /// Speed up.

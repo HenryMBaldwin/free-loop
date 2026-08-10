@@ -157,9 +157,8 @@ pub struct Config {
 impl Config {
     /// Reads a config file, falling back to defaults when it is not there.
     ///
-    /// A missing file is normal — it means every default suits this rig. A malformed one
-    /// is an error, because silently ignoring it would run with settings the file says
-    /// otherwise.
+    /// A missing file is normal and means every default suits this rig. A malformed one
+    /// is an error, since ignoring it would run with settings the file says otherwise.
     ///
     /// # Errors
     ///
