@@ -177,8 +177,11 @@ impl Audio {
             ..
         } = self;
 
+        // The recycler sends borrowed storage to its own queue, so everything arriving
+        // here is the engine's. Filtering for that would drop what it rejected, and
+        // dropping the last reference is an allocator call in the callback.
         retirement.reclaim(|mut clip| {
-            if let Some(inner) = Arc::get_mut(&mut clip).filter(|c| !c.is_borrowed()) {
+            if let Some(inner) = Arc::get_mut(&mut clip) {
                 inner.release_segments(segments);
                 inner.reset();
                 shells.push(clip);
