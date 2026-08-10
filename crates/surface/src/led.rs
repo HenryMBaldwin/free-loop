@@ -29,6 +29,8 @@ pub enum LedColor {
     Green,
     /// Transport controls.
     Blue,
+    /// Row grouping.
+    Purple,
 }
 
 impl LedColor {
@@ -41,6 +43,7 @@ impl LedColor {
             Self::Amber => (255, 140, 0),
             Self::Green => (0, 255, 0),
             Self::Blue => (0, 80, 255),
+            Self::Purple => (160, 0, 255),
         }
     }
 }

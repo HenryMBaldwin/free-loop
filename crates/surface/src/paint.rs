@@ -56,7 +56,7 @@ impl Axis {
     /// The colour that stands for this grouping wherever it is shown.
     pub fn color(self) -> LedColor {
         match self {
-            Self::Row => LedColor::Amber,
+            Self::Row => LedColor::Purple,
             Self::Column => LedColor::Blue,
         }
     }

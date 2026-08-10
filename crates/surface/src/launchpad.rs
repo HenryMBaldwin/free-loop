@@ -86,6 +86,7 @@ fn palette(color: LedColor) -> x::PaletteColor {
         LedColor::Amber => x::PaletteColor::ORANGE,
         LedColor::Green => x::PaletteColor::GREEN,
         LedColor::Blue => x::PaletteColor::BLUE,
+        LedColor::Purple => x::PaletteColor::PURPLE,
     }
 }
 
@@ -370,6 +371,7 @@ mod tests {
             LedColor::Amber,
             LedColor::Green,
             LedColor::Blue,
+            LedColor::Purple,
         ] {
             for make in [Led::solid, Led::dim, Led::flash, Led::pulse] {
                 assert!(
