@@ -238,6 +238,7 @@ impl Opened {
             input_latency,
             retry_at: None,
             check_at: RETRY_INTERVAL,
+            open_names: (String::new(), String::new()),
             refusal: None,
         };
         io.spawn(&self)?;
@@ -275,8 +276,11 @@ pub struct AudioIo {
     input_latency: Arc<AtomicU32>,
     /// Time of the next attempt, or `None` while the devices are running.
     retry_at: Option<Duration>,
-    /// Time of the next check that the named devices are still there.
+    /// Time of the next check that the open devices are still there.
     check_at: Duration,
+    /// Names the running streams were opened under. Checked rather than the configured
+    /// names, which may be absent and leave nothing to check.
+    open_names: (String, String),
     /// The last reason a reopen was refused, so it is reported once.
     refusal: Option<String>,
 }
@@ -332,9 +336,8 @@ impl AudioIo {
             if now >= self.check_at {
                 self.check_at = now + RETRY_INTERVAL;
                 let host = cpal::default_host();
-                if !named_present(&host, self.config.input_device.as_deref(), false)
-                    || !named_present(&host, self.config.output_device.as_deref(), true)
-                {
+                let (input, output) = &self.open_names;
+                if !still_listed(&host, input, false) || !still_listed(&host, output, true) {
                     self.health.lost.store(true, Ordering::Relaxed);
                 }
             }
@@ -436,6 +439,7 @@ impl AudioIo {
         output.play()?;
 
         self.health.starved.store(0, Ordering::Relaxed);
+        self.open_names = (opened.input_name(), opened.output_name());
         self.negotiated = negotiated;
         self.streams = Some(Streams { input, output });
         Ok(())
@@ -705,16 +709,13 @@ where
     Ok(stream)
 }
 
-/// Whether a device the configuration names by name is still there.
+/// Whether a device of this name is still listed.
 ///
 /// A device that is unplugged can be replaced by the host rather than reported as an
-/// error, which leaves the streams running against something else entirely. A name that
-/// no longer matches anything is the only sign of that.
-fn named_present(host: &Host, wanted: Option<&str>, output: bool) -> bool {
-    let Some(wanted) = wanted else {
-        return true;
-    };
-    find_device(host, Some(wanted), output).is_ok()
+/// error, which leaves the streams running against something else entirely. The name it
+/// was opened under no longer being listed is the only sign of that.
+fn still_listed(host: &Host, name: &str, output: bool) -> bool {
+    find_device(host, Some(name), output).is_ok()
 }
 
 /// Whether the capture has delivered nothing for long enough to count as gone.
@@ -873,16 +874,19 @@ mod tests {
     }
 
     #[test]
-    fn a_configuration_naming_no_device_is_always_satisfied() {
+    fn a_name_matching_nothing_is_a_loss() {
         let host = cpal::default_host();
-        assert!(named_present(&host, None, true));
-        assert!(named_present(&host, None, false));
+        assert!(!still_listed(&host, "no such device anywhere", true));
+        assert!(!still_listed(&host, "no such device anywhere", false));
     }
 
     #[test]
-    fn a_name_matching_nothing_is_a_loss() {
+    fn a_device_the_host_lists_is_not_a_loss() {
         let host = cpal::default_host();
-        assert!(!named_present(&host, Some("no such device anywhere"), true));
+        let Ok(devices) = list_devices() else { return };
+        if let Some(name) = devices.outputs.first() {
+            assert!(still_listed(&host, name, true), "{name} is right there");
+        }
     }
 
     #[test]

@@ -178,6 +178,7 @@ fn run(s: Session<'_>) {
     let mut snapshots: Vec<Snapshot> = Vec::new();
     let mut pending_save: Option<free_loop_core::SlotAddr> = None;
     let mut clipping = ClipReport::default();
+    let mut xruns = XrunReport::default();
     let started = Instant::now();
     // Only known once the driver has run a callback and said how much it buffers.
     let mut reported_latency = false;
@@ -237,17 +238,20 @@ fn run(s: Session<'_>) {
         let mut snapshot_ready = false;
         let mut clock_ticks = 0;
         let mut clipped = 0_u32;
+        let mut short_frames = 0_u64;
         io.drain_events(|event| {
             match event {
                 Event::SnapshotComplete { .. } => snapshot_ready = true,
                 Event::Clock { ticks } => clock_ticks += ticks,
                 Event::Clipped { samples } => clipped += samples,
+                Event::Xrun { frames } => short_frames += frames,
                 _ => {}
             }
             report(event);
             controller.on_engine(event);
         });
         clipping.note(clipped, now);
+        xruns.note(short_frames, now);
 
         // Keeps the device's flash and pulse animations on the transport's tempo.
         if clock_ticks > 0
@@ -273,7 +277,32 @@ fn run(s: Session<'_>) {
 }
 
 /// How long to gather clipping before saying anything.
+const XRUN_REPORT_EVERY: Duration = Duration::from_secs(2);
+
 const CLIP_REPORT_EVERY: Duration = Duration::from_secs(2);
+
+/// Collects short capture blocks so a dropout is one line, not one per block.
+///
+/// A device delivering nothing reports every block, which at any usable block size is
+/// fast enough that printing each one holds up the control loop.
+#[derive(Debug, Default)]
+struct XrunReport {
+    frames: u64,
+    last: Duration,
+}
+
+impl XrunReport {
+    fn note(&mut self, frames: u64, now: Duration) {
+        self.frames += frames;
+        if self.frames == 0 || now.saturating_sub(self.last) < XRUN_REPORT_EVERY {
+            return;
+        }
+
+        eprintln!("capture came up short by {} frames", self.frames);
+        self.frames = 0;
+        self.last = now;
+    }
+}
 
 /// Counts clipped samples and mentions them now and then.
 #[derive(Default)]
@@ -517,7 +546,7 @@ fn report(event: Event) {
                 len.0
             );
         }
-        Event::Xrun { frames } => eprintln!("xrun: {frames} frames"),
+
         Event::RecordBufferLow { addr } => {
             eprintln!(
                 "out of recording space on track {} slot {}",
@@ -526,8 +555,10 @@ fn report(event: Event) {
             );
         }
         Event::TempoRejected => eprintln!("tempo is locked while clips exist"),
-        // Clipping reports per block, too often to print. `ClipReport` throttles it.
+        // Clipping and short capture report per block, too often to print. `ClipReport`
+        // and `XrunReport` throttle them.
         Event::Clipped { .. }
+        | Event::Xrun { .. }
         | Event::SnapshotComplete { .. }
         | Event::Clock { .. }
         | Event::Bar { .. }
