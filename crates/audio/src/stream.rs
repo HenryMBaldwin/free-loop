@@ -27,6 +27,12 @@ const EVENT_SLOTS: usize = 4_096;
 /// How long to wait between attempts to reopen a device that went away.
 pub const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Seconds of capture delivering nothing before the input counts as gone.
+///
+/// A device that is unplugged stops delivering without always reporting an error, so this
+/// is the other way the streams learn they have to be rebuilt.
+const STARVED_SECONDS: u32 = 1;
+
 /// Devices the host can see.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DeviceList {
@@ -204,6 +210,7 @@ impl Opened {
         let health = Health {
             errors: Arc::new(AtomicU64::new(0)),
             lost: Arc::new(AtomicBool::new(false)),
+            starved: Arc::new(AtomicU32::new(0)),
         };
         let input_latency = Arc::new(AtomicU32::new(0));
         let capture_offset = Arc::new(AtomicU32::new(0));
@@ -312,6 +319,13 @@ impl AudioIo {
     /// Call every pass of the control loop. Returns what changed, if anything.
     pub fn tick(&mut self, now: Duration) -> Option<DeviceChange> {
         if self.streams.is_some() {
+            // A device that has been unplugged does not always report an error, but it
+            // does stop delivering.
+            let starved = self.health.starved.load(Ordering::Relaxed);
+            if starved_out(starved, self.negotiated.sample_rate) {
+                self.health.lost.store(true, Ordering::Relaxed);
+            }
+
             if !self.health.lost.swap(false, Ordering::Relaxed) {
                 return None;
             }
@@ -380,6 +394,7 @@ impl AudioIo {
 
         let callback = Render {
             shared: Arc::clone(&self.shared),
+            health: self.health.clone(),
             input_latency: Arc::clone(&self.input_latency),
             capture_offset: Arc::clone(&self.capture_offset),
             cushion: u32::try_from(negotiated.cushion_frames).unwrap_or(u32::MAX),
@@ -407,6 +422,7 @@ impl AudioIo {
         input.play()?;
         output.play()?;
 
+        self.health.starved.store(0, Ordering::Relaxed);
         self.negotiated = negotiated;
         self.streams = Some(Streams { input, output });
         Ok(())
@@ -502,6 +518,7 @@ struct Shared {
 /// The output callback's state.
 struct Render {
     shared: Arc<Mutex<Shared>>,
+    health: Health,
     input_latency: Arc<AtomicU32>,
     capture_offset: Arc<AtomicU32>,
     /// Frames of capture buffered before this callback started consuming.
@@ -532,11 +549,21 @@ impl Render {
 
     /// Renders one block, or silence if the state is being handed over.
     fn fill<T: SizedSample + FromSample<f32>>(&mut self, out: &mut [T]) {
-        match self.shared.try_lock() {
-            Ok(mut shared) => shared.fill(out),
+        let Ok(mut shared) = self.shared.try_lock() else {
             // Held only while the streams are stopped, so this is a block either side of
             // a device going away.
-            Err(_) => out.fill(T::EQUILIBRIUM),
+            out.fill(T::EQUILIBRIUM);
+            return;
+        };
+
+        let wanted = shared.frames(out);
+        let filled = shared.fill(out);
+        if filled == 0 && wanted > 0 {
+            self.health
+                .starved
+                .fetch_add(u32::try_from(wanted).unwrap_or(u32::MAX), Ordering::Relaxed);
+        } else {
+            self.health.starved.store(0, Ordering::Relaxed);
         }
     }
 }
@@ -561,7 +588,13 @@ impl Shared {
         }
     }
 
-    fn fill<T: FromSample<f32> + Copy>(&mut self, out: &mut [T]) {
+    /// Frames one block of `out` holds.
+    fn frames<T>(&self, out: &[T]) -> usize {
+        out.len() / self.channels
+    }
+
+    /// Renders one block, returning how many frames of capture it had to work with.
+    fn fill<T: FromSample<f32> + Copy>(&mut self, out: &mut [T]) -> usize {
         self.drain_commands();
 
         let Self {
@@ -582,6 +615,7 @@ impl Shared {
 
         let frames = out.len() / *channels;
         let mut done = 0;
+        let mut captured_frames = 0;
 
         while done < frames {
             let run = (frames - done).min(MAX_BLOCK_FRAMES);
@@ -590,6 +624,7 @@ impl Shared {
             let filled = reader
                 .as_mut()
                 .map_or(0, |reader| reader.read(&mut captured[..samples]));
+            captured_frames += filled / *channels;
             engine.process(&captured[..filled], &mut rendered[..samples], &mut sink);
 
             let target = &mut out[done * *channels..][..samples];
@@ -598,6 +633,8 @@ impl Shared {
             }
             done += run;
         }
+
+        captured_frames
     }
 }
 
@@ -655,6 +692,11 @@ where
     Ok(stream)
 }
 
+/// Whether the capture has delivered nothing for long enough to count as gone.
+fn starved_out(frames: u32, sample_rate: u32) -> bool {
+    frames >= sample_rate.saturating_mul(STARVED_SECONDS)
+}
+
 /// Whether a device that has come back can carry on with a session built for `wanted`.
 ///
 /// Every clip length and phase is a frame count at one rate, and the engine interleaves
@@ -678,6 +720,8 @@ struct Health {
     errors: Arc<AtomicU64>,
     /// Set when the streams have to be rebuilt.
     lost: Arc<AtomicBool>,
+    /// Frames the capture has delivered nothing for, in a row.
+    starved: Arc<AtomicU32>,
 }
 
 /// Counts a stream error, and flags the ones that mean the stream has to be rebuilt.
@@ -756,6 +800,7 @@ mod tests {
         Health {
             errors: Arc::new(AtomicU64::new(0)),
             lost: Arc::new(AtomicBool::new(false)),
+            starved: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -800,6 +845,21 @@ mod tests {
             compatible(negotiated(48_000, 2), found).is_ok(),
             "only the rate and the engine's channel count are fixed"
         );
+    }
+
+    #[test]
+    fn a_short_gap_in_the_capture_is_not_a_loss() {
+        assert!(!starved_out(0, 48_000));
+        assert!(
+            !starved_out(47_999, 48_000),
+            "a hiccup, not an unplugged jack"
+        );
+    }
+
+    #[test]
+    fn capture_silent_for_a_whole_second_is_a_loss() {
+        assert!(starved_out(48_000, 48_000));
+        assert!(starved_out(96_000, 48_000));
     }
 
     #[test]
