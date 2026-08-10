@@ -24,6 +24,12 @@ pub struct ClipEntry {
     pub phase_frames: u64,
     /// Whether the pad was sounding.
     pub playing: bool,
+    /// The round trip compensated for when the take was sealed.
+    ///
+    /// Already folded into `phase_frames`. Recorded so the alignment is visible rather
+    /// than baked in and unrecoverable.
+    #[serde(default)]
+    pub capture_offset_frames: u64,
 }
 
 impl ClipEntry {
@@ -89,6 +95,7 @@ mod tests {
                 len_frames: 96_000,
                 phase_frames: 1_234,
                 playing: true,
+                capture_offset_frames: 2_348,
             }],
         }
     }
@@ -120,6 +127,18 @@ mod tests {
             "tempo = 120.0\nbeats_per_bar = 4\nbeat_unit = 4\nsample_rate = 48000\nchannels = 2\n";
         let read: Manifest = toml::from_str(text).unwrap();
         assert!(read.clips.is_empty());
+    }
+
+    #[test]
+    fn an_older_session_without_the_offset_still_parses() {
+        let text = concat!(
+            "tempo = 120.0\nbeats_per_bar = 4\nbeat_unit = 4\n",
+            "sample_rate = 48000\nchannels = 2\n",
+            "[[clips]]\ntrack = 0\nslot = 0\nfile = \"t0s0.wav\"\n",
+            "len_frames = 96000\nphase_frames = 0\nplaying = true\n",
+        );
+        let read: Manifest = toml::from_str(text).unwrap();
+        assert_eq!(read.clips[0].capture_offset_frames, 0);
     }
 
     #[test]
