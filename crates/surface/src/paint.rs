@@ -3,7 +3,9 @@
 //! The one place the looper's colour scheme is decided. Pure, so the whole scheme is
 //! testable without a device.
 
-use free_loop_core::{SLOT_COUNT, SessionModel, SlotAddr, SlotState};
+use free_loop_core::{
+    MAX_BPM, MIN_BPM, SLOT_COUNT, SessionModel, SlotAddr, SlotState, TRACK_COUNT,
+};
 
 use crate::event::Control;
 use crate::led::{BEAT_LEDS, FIRST_BEAT_LED, Led, LedColor, LedFrame};
@@ -97,6 +99,44 @@ pub fn beat_indicator(frame: &mut LedFrame, chrome: Chrome) {
         Led::solid(LedColor::Blue)
     };
     frame.set_control(FIRST_BEAT_LED + beat, led);
+}
+
+/// Paints the tempo as a fill across the grid.
+///
+/// Shown while a tempo button is held, where the number cannot be: each text update
+/// restarts the scroll. The grid spans [`MIN_BPM`] to [`MAX_BPM`], so one pad is about
+/// the size of one step of the hold and the fill rate is the rate.
+pub fn tempo_gauge(tempo: f64, chrome: Chrome) -> LedFrame {
+    let mut frame = LedFrame::new();
+    let total = TRACK_COUNT * SLOT_COUNT;
+
+    let fraction = ((tempo - MIN_BPM) / (MAX_BPM - MIN_BPM)).clamp(0.0, 1.0);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "a fraction of 64, clamped above"
+    )]
+    let lit = (fraction * total as f64).round() as usize;
+
+    for (index, addr) in SlotAddr::all().enumerate() {
+        let led = if index + 1 == lit {
+            Led::solid(LedColor::White)
+        } else if index < lit {
+            Led::dim(LedColor::Blue)
+        } else {
+            Led::OFF
+        };
+        frame.set_pad(addr, led);
+    }
+
+    for button in Control::all() {
+        frame.set_control(button.index(), control(button, chrome));
+    }
+    beat_indicator(&mut frame, chrome);
+    frame.set_side(PAUSE_SIDE, pause_button(chrome));
+
+    frame
 }
 
 /// Paints the session picker over the grid.
@@ -355,6 +395,66 @@ mod tests {
         let painted = frame(&session, Chrome::default());
         assert_eq!(painted.pad(addr(2, 3)), Led::flash(LedColor::Red));
         assert_eq!(painted.pad(addr(3, 2)), Led::OFF);
+    }
+
+    #[test]
+    fn the_gauge_fills_with_the_tempo() {
+        let low = tempo_gauge(MIN_BPM, Chrome::default());
+        let high = tempo_gauge(MAX_BPM, Chrome::default());
+
+        assert!(
+            SlotAddr::all().all(|a| !low.pad(a).is_lit()),
+            "empty at the bottom"
+        );
+        assert!(
+            SlotAddr::all().all(|a| high.pad(a).is_lit()),
+            "full at the top"
+        );
+    }
+
+    #[test]
+    fn the_gauge_never_goes_backwards() {
+        let lit = |bpm: f64| {
+            let frame = tempo_gauge(bpm, Chrome::default());
+            SlotAddr::all().filter(|a| frame.pad(*a).is_lit()).count()
+        };
+
+        let mut previous = 0;
+        let mut bpm = MIN_BPM;
+        while bpm <= MAX_BPM {
+            let now = lit(bpm);
+            assert!(
+                now >= previous,
+                "{bpm} lit fewer pads than the tempo below it"
+            );
+            previous = now;
+            bpm += 5.0;
+        }
+    }
+
+    #[test]
+    fn one_step_of_a_hold_moves_the_gauge() {
+        let lit = |bpm: f64| {
+            let frame = tempo_gauge(bpm, Chrome::default());
+            SlotAddr::all().filter(|a| frame.pad(*a).is_lit()).count()
+        };
+        assert_ne!(lit(120.0), lit(125.0), "a step should be visible");
+    }
+
+    #[test]
+    fn the_gauge_marks_where_the_tempo_is() {
+        let frame = tempo_gauge(120.0, Chrome::default());
+        let leading = SlotAddr::all()
+            .filter(|a| frame.pad(*a) == Led::solid(LedColor::White))
+            .count();
+        assert_eq!(leading, 1, "one pad shows the tempo itself");
+    }
+
+    #[test]
+    fn the_gauge_keeps_the_transport_and_beat() {
+        let frame = tempo_gauge(120.0, Chrome::default());
+        assert!(frame.side(PAUSE_SIDE).is_lit());
+        assert_eq!(frame.control(FIRST_BEAT_LED).color, LedColor::White);
     }
 
     #[test]
