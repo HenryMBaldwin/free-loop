@@ -101,6 +101,31 @@ impl SlotAddr {
     }
 }
 
+/// A set of pads, one bit each, track-major.
+///
+/// Small enough to cross the realtime boundary in a command and to compare in one
+/// instruction, which mute and solo both need every block.
+pub type PadMask = u64;
+
+/// The bit for a pad in a [`PadMask`].
+pub fn pad_bit(addr: SlotAddr) -> PadMask {
+    1 << (addr.track.index() * SLOT_COUNT + addr.slot.index())
+}
+
+/// Every pad in a track's row.
+pub fn row_mask(track: TrackId) -> PadMask {
+    SlotId::all()
+        .map(|slot| pad_bit(SlotAddr::new(track, slot)))
+        .fold(0, |mask, bit| mask | bit)
+}
+
+/// Every pad in a slot's column.
+pub fn column_mask(slot: SlotId) -> PadMask {
+    TrackId::all()
+        .map(|track| pad_bit(SlotAddr::new(track, slot)))
+        .fold(0, |mask, bit| mask | bit)
+}
+
 /// Identifies a recorded clip.
 ///
 /// Supplied via [`crate::slot::Ctx`] rather than generated internally, which keeps
@@ -118,6 +143,8 @@ impl ClipId {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, reason = "tests should fail loudly")]
+
     use super::*;
 
     #[test]
@@ -133,6 +160,38 @@ mod tests {
         assert_eq!(TrackId::all().count(), TRACK_COUNT);
         assert_eq!(SlotId::all().count(), SLOT_COUNT);
         assert_eq!(SlotAddr::all().count(), TRACK_COUNT * SLOT_COUNT);
+    }
+
+    #[test]
+    fn every_pad_has_its_own_bit() {
+        let mut seen = 0;
+        for addr in SlotAddr::all() {
+            let bit = pad_bit(addr);
+            assert_eq!(seen & bit, 0, "{addr:?} collides");
+            seen |= bit;
+        }
+        assert_eq!(seen.count_ones(), 64);
+    }
+
+    #[test]
+    fn a_row_and_a_column_meet_at_one_pad() {
+        let track = TrackId::new(3).unwrap();
+        let slot = SlotId::new(5).unwrap();
+
+        let row = row_mask(track);
+        let column = column_mask(slot);
+        assert_eq!(row.count_ones(), 8);
+        assert_eq!(column.count_ones(), 8);
+        assert_eq!(row & column, pad_bit(SlotAddr::new(track, slot)));
+    }
+
+    #[test]
+    fn rows_cover_the_grid_and_do_not_overlap() {
+        let all = TrackId::all().fold(0_u64, |mask, t| mask | row_mask(t));
+        assert_eq!(all, u64::MAX);
+
+        let summed: u32 = TrackId::all().map(|t| row_mask(t).count_ones()).sum();
+        assert_eq!(summed, 64, "rows overlap");
     }
 
     #[test]

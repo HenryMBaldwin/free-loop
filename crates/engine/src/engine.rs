@@ -9,8 +9,8 @@
 //! exact frame it was scheduled for rather than at the next block edge.
 
 use free_loop_core::{
-    BarGrid, ClipId, Command, Ctx, Effect, Event, Frames, MIN_BPM, SLOT_COUNT, SampleRate,
-    SessionModel, SlotAddr, SlotState, TRACK_COUNT, Tempo, TimeError, TimeSignature,
+    BarGrid, ClipId, Command, Ctx, Effect, Event, Frames, MIN_BPM, PadMask, SLOT_COUNT, SampleRate,
+    SessionModel, SlotAddr, SlotState, TRACK_COUNT, Tempo, TimeError, TimeSignature, pad_bit,
 };
 
 use std::sync::Arc;
@@ -293,6 +293,10 @@ pub struct Engine {
     channels: usize,
     max_bars: u32,
     paused: bool,
+    /// Pads that do not sound.
+    muted: PadMask,
+    /// Pads that sound to the exclusion of the rest.
+    soloed: PadMask,
     /// The last position a beat fired on, so a grid change cannot fire it twice.
     last_boundary: Option<Frames>,
     /// MIDI clock ticks already reported.
@@ -359,6 +363,8 @@ impl Engine {
             channels: config.channels,
             max_bars: config.max_bars,
             paused: false,
+            muted: 0,
+            soloed: 0,
             last_boundary: None,
             last_clock: 0,
             capture_offset: config.capture_offset,
@@ -398,6 +404,18 @@ impl Engine {
     /// Whether the transport is frozen.
     pub fn is_paused(&self) -> bool {
         self.paused
+    }
+
+    /// Whether a pad would be heard if it were playing.
+    ///
+    /// A solo anywhere silences everything outside it, which is what makes solo a way of
+    /// hearing one thing rather than a second kind of mute.
+    pub fn is_audible(&self, addr: SlotAddr) -> bool {
+        let bit = pad_bit(addr);
+        if self.muted & bit != 0 {
+            return false;
+        }
+        self.soloed == 0 || self.soloed & bit != 0
     }
 
     /// The round-trip latency being compensated for.
@@ -450,6 +468,10 @@ impl Engine {
             Command::StopAll => self.with_session(|session, audio| {
                 session.stop_all(&ctx, &mut |a, e| audio.apply(a, e, sink));
             }),
+            Command::SetMutes { muted, soloed } => {
+                self.muted = muted;
+                self.soloed = soloed;
+            }
             Command::Rewind => self.rewind(sink),
             Command::Snapshot => self.publish_snapshot(sink),
             Command::SetPaused(paused) => self.set_paused(paused, sink),
@@ -749,7 +771,7 @@ impl Engine {
                 self.session.state(addr),
                 SlotState::Playing { .. } | SlotState::QueuedStop { .. }
             );
-            if !sounding {
+            if !sounding || !self.is_audible(addr) {
                 continue;
             }
             if let Some(clip) = self.audio.clip(addr) {

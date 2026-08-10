@@ -1,6 +1,6 @@
 //! Control instructions for the realtime side. `Copy` and allocation-free.
 
-use crate::ids::{SlotAddr, TrackId};
+use crate::ids::{PadMask, SlotAddr, TrackId};
 use crate::time::Tempo;
 
 /// An instruction for the realtime side.
@@ -16,6 +16,16 @@ pub enum Command {
     StopAll,
     /// Publish a reference to every pad that holds a clip.
     Snapshot,
+    /// Set which pads are silenced and which are soloed.
+    ///
+    /// Sent whole rather than as toggles, so the engine never holds a different picture
+    /// from the surface showing it.
+    SetMutes {
+        /// Pads that do not sound.
+        muted: PadMask,
+        /// Pads that sound to the exclusion of the rest. Empty means no solo.
+        soloed: PadMask,
+    },
     /// Send the transport back to the start, with every loop at its beginning.
     Rewind,
     /// Freeze or resume the transport.
