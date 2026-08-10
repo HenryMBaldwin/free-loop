@@ -296,6 +296,7 @@ version = "0.1.0"
 dependencies = [
  "free-loop-core",
  "launchy",
+ "midir",
  "thiserror 2.0.20",
 ]
 
