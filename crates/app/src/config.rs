@@ -110,11 +110,16 @@ pub struct Engine {
     /// Segments to allocate. The ceiling on total recorded audio, about 1.4 s each at
     /// 48 kHz.
     pub segment_pool: usize,
+    /// Frames a level takes to travel the full gain range. 5 ms at 48 kHz.
+    pub declick_frames: u64,
 }
 
 impl Default for Engine {
     fn default() -> Self {
-        Self { segment_pool: 64 }
+        Self {
+            segment_pool: 64,
+            declick_frames: free_loop_engine::DEFAULT_DECLICK.0,
+        }
     }
 }
 
@@ -231,6 +236,7 @@ impl Config {
             channels,
             max_bars: self.transport.max_bars,
             segment_pool: self.engine.segment_pool,
+            declick: free_loop_core::Frames(self.engine.declick_frames),
             // Replaced by what the driver reports once the streams are running.
             capture_offset: free_loop_core::Frames::ZERO,
             click: ClickConfig {
@@ -274,6 +280,8 @@ max_bars = 32
 [engine]
 # About 1.4 s of stereo audio each at 48 kHz.
 segment_pool = 64
+# Frames a level takes to travel the full gain range. 5 ms at 48 kHz.
+declick_frames = 240
 
 [click]
 enabled = true

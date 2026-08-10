@@ -22,6 +22,20 @@ use crate::load::{LoadInbox, LoadMessage, Loader};
 use crate::recycle::{Recycler, Retirement, channel};
 use crate::snapshot::{Snapshot, SnapshotReader, SnapshotWriter};
 
+/// Frames a level travels the full gain range in by default. 5 ms at 48 kHz.
+pub const DEFAULT_DECLICK: Frames = Frames(240);
+
+/// A transport move that waits for the mix to fade out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Deferred {
+    /// Back to the start.
+    Rewind,
+    /// Freeze.
+    Pause,
+    /// Empty every pad and start over.
+    ClearAll,
+}
+
 /// Holds the mix at full scale and reports how much was held.
 ///
 /// Tracks sum without headroom, and material in the same register sums coherently, so a
@@ -103,6 +117,8 @@ pub struct EngineConfig {
     pub capture_offset: Frames,
     /// Click settings.
     pub click: ClickConfig,
+    /// Frames a level takes to travel the full gain range. Zero switches instead.
+    pub declick: Frames,
 }
 
 impl EngineConfig {
@@ -122,6 +138,7 @@ impl EngineConfig {
             segment_pool: 64,
             capture_offset: Frames::ZERO,
             click: ClickConfig::default(),
+            declick: DEFAULT_DECLICK,
         })
     }
 }
@@ -322,6 +339,12 @@ pub struct Engine {
     soloed: PadMask,
     /// How loud each track plays, as a step on the gain ladder.
     gains: [u8; TRACK_COUNT],
+    /// The gain each pad is mixing at, which slides toward what it should be.
+    levels: [[f32; SLOT_COUNT]; TRACK_COUNT],
+    /// Frames a level takes to travel the full gain range.
+    declick: usize,
+    /// A transport move waiting for the mix to fade out.
+    pending: Option<Deferred>,
     /// The last position a beat fired on, so a grid change cannot fire it twice.
     last_boundary: Option<Frames>,
     /// MIDI clock ticks already reported.
@@ -391,6 +414,9 @@ impl Engine {
             muted: 0,
             soloed: 0,
             gains: [UNITY_STEP; TRACK_COUNT],
+            levels: [[0.0; SLOT_COUNT]; TRACK_COUNT],
+            declick: as_usize(config.declick.0),
+            pending: None,
             last_boundary: None,
             last_clock: 0,
             capture_offset: config.capture_offset,
@@ -449,6 +475,49 @@ impl Engine {
         self.soloed == 0 || self.soloed & bit != 0
     }
 
+    /// The gain a pad should be heading for. Zero for anything not being heard.
+    fn target_level(&self, addr: SlotAddr) -> f32 {
+        // A transport move fades everything out first.
+        if self.pending.is_some() {
+            return 0.0;
+        }
+        // A queued stop keeps sounding until its boundary arrives.
+        let sounding = matches!(
+            self.session.state(addr),
+            SlotState::Playing { .. } | SlotState::QueuedStop { .. }
+        );
+        if !sounding || !self.is_audible(addr) {
+            return 0.0;
+        }
+        self.gain(addr.track)
+    }
+
+    /// How a level moves toward `target` over `run` frames, and where it ends up.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "block lengths are far below f32's exact range"
+    )]
+    fn ramp_to(&self, level: f32, target: f32, run: usize) -> (Ramp, f32) {
+        // With no ramp the level changes at the block boundary, so the whole block is at
+        // the new one.
+        if self.declick == 0 {
+            return (Ramp::constant(target), target);
+        }
+
+        let most = run as f32 / self.declick as f32;
+        let reached = if target > level {
+            (level + most).min(target)
+        } else {
+            (level - most).max(target)
+        };
+        (Ramp::new(level, reached, run), reached)
+    }
+
+    /// Whether the mix has reached silence.
+    fn is_faded(&self) -> bool {
+        self.levels.iter().flatten().all(|level| *level == 0.0)
+    }
+
     /// The round-trip latency being compensated for.
     pub fn capture_offset(&self) -> Frames {
         self.capture_offset
@@ -502,8 +571,8 @@ impl Engine {
                 self.soloed = soloed;
             }
             Command::SetGains(gains) => self.gains = gains,
-            Command::ClearAll => self.clear_all(sink),
-            Command::Rewind => self.rewind(sink),
+            Command::ClearAll => self.defer(Deferred::ClearAll, sink),
+            Command::Rewind => self.defer(Deferred::Rewind, sink),
             Command::Snapshot => self.publish_snapshot(sink),
             Command::SetPaused(paused) => self.set_paused(paused, sink),
             Command::SetClickEnabled(enabled) => self.click.set_enabled(enabled),
@@ -512,6 +581,33 @@ impl Engine {
         }
 
         self.emit_changes(&before, sink);
+    }
+
+    /// Queues a transport move behind a fade. With no ramp it lands at once.
+    fn defer(&mut self, action: Deferred, sink: &mut impl EventSink) {
+        if self.declick == 0 {
+            self.apply_deferred(action, sink);
+        } else {
+            self.pending = Some(action);
+        }
+    }
+
+    /// Performs a move whose fade has finished.
+    fn apply_deferred(&mut self, action: Deferred, sink: &mut impl EventSink) {
+        match action {
+            Deferred::Rewind => self.rewind(sink),
+            Deferred::ClearAll => self.clear_all(sink),
+            Deferred::Pause => {
+                self.paused = true;
+                let ctx = self.ctx();
+                self.with_session(|session, audio| {
+                    session.cancel_recordings(&ctx, &mut |a, e| audio.apply(a, e, sink));
+                });
+            }
+        }
+
+        // Zero already after a fade. Forcing it covers having had nothing to fade.
+        self.levels = [[0.0; SLOT_COUNT]; TRACK_COUNT];
     }
 
     fn with_session(&mut self, apply: impl FnOnce(&mut SessionModel, &mut Audio)) {
@@ -670,17 +766,19 @@ impl Engine {
     }
 
     fn set_paused(&mut self, paused: bool, sink: &mut impl EventSink) {
-        if paused == self.paused {
+        if paused {
+            if self.paused || self.pending == Some(Deferred::Pause) {
+                return;
+            }
+            self.defer(Deferred::Pause, sink);
             return;
         }
-        self.paused = paused;
 
-        if paused {
-            let ctx = self.ctx();
-            self.with_session(|session, audio| {
-                session.cancel_recordings(&ctx, &mut |a, e| audio.apply(a, e, sink));
-            });
+        // A second press cancels a pause that has not landed yet.
+        if self.pending == Some(Deferred::Pause) {
+            self.pending = None;
         }
+        self.paused = false;
     }
 
     fn set_tempo(&mut self, tempo: Tempo, sink: &mut impl EventSink) {
@@ -709,6 +807,15 @@ impl Engine {
         output.fill(0.0);
         self.audio.reclaim();
         self.apply_loads(sink);
+
+        // Checked before the pause below, or a move requested while frozen would never
+        // come.
+        if let Some(action) = self.pending.filter(|_| self.is_faded()) {
+            self.pending = None;
+            let before = self.session;
+            self.apply_deferred(action, sink);
+            self.emit_changes(&before, sink);
+        }
 
         // A frozen transport holds its position, so nothing sounds, nothing is captured
         // and no bar line arrives. Input is dropped rather than buffered: it belongs to a
@@ -800,17 +907,17 @@ impl Engine {
         let out = &mut output[offset * self.channels..(offset + run) * self.channels];
 
         for addr in SlotAddr::all() {
-            // A queued stop keeps sounding until its boundary arrives.
-            let sounding = matches!(
-                self.session.state(addr),
-                SlotState::Playing { .. } | SlotState::QueuedStop { .. }
-            );
-            if !sounding || !self.is_audible(addr) {
+            let (track, slot) = (addr.track.index(), addr.slot.index());
+            let level = self.levels[track][slot];
+            let target = self.target_level(addr);
+            if level == 0.0 && target == 0.0 {
                 continue;
             }
-            let gain = self.gain(addr.track);
+
+            let (ramp, reached) = self.ramp_to(level, target, run);
+            self.levels[track][slot] = reached;
             if let Some(clip) = self.audio.clip(addr) {
-                clip.mix_into(self.position, out, Ramp::constant(gain));
+                clip.mix_into(self.position, out, ramp);
             }
         }
 
