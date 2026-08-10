@@ -346,6 +346,11 @@ impl Controller {
         });
     }
 
+    /// Whether a held tempo button has started repeating.
+    fn tempo_repeating(&self) -> bool {
+        self.tempo_hold.is_some_and(|hold| hold.last > hold.since)
+    }
+
     /// Stops the repeat and reports where the tempo landed.
     ///
     /// Shown on release rather than as it moves, because each update restarts the scroll
@@ -355,6 +360,8 @@ impl Controller {
         let Some(hold) = self.tempo_hold.take() else {
             return;
         };
+        // The gauge had the grid; whatever comes next has to redraw it.
+        self.dirty = true;
         if (self.tempo - hold.started_at).abs() < f64::EPSILON {
             return;
         }
@@ -380,6 +387,7 @@ impl Controller {
 
         self.nudge_tempo(hold.delta);
         self.tempo_hold = Some(TempoHold { last: now, ..hold });
+        self.dirty = true;
     }
 
     fn nudge_tempo(&mut self, delta: f64) {
@@ -440,6 +448,14 @@ impl Controller {
         // Text has the grid, and a frame sent now would cut it off part way.
         if !self.dirty || self.text_until.is_some() {
             return None;
+        }
+
+        // A number cannot track a tempo that is still moving, so the grid shows it
+        // instead until the button is let go.
+        if self.tempo_repeating() {
+            self.frame = paint::tempo_gauge(self.tempo, self.chrome);
+            self.dirty = false;
+            return Some(&self.frame);
         }
 
         if let Some(button) = self.mode.button() {
@@ -781,6 +797,50 @@ mod tests {
             Some(TextUpdate::Stop),
             "the number on the grid is no longer the tempo"
         );
+    }
+
+    #[test]
+    fn a_hold_shows_the_tempo_climbing() {
+        let mut controller = controller();
+        controller.take_frame();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
+
+        controller.tick(millis(400));
+        let lit_at_first = {
+            let frame = controller.take_frame().expect("the gauge appeared");
+            SlotAddr::all().filter(|a| frame.pad(*a).is_lit()).count()
+        };
+
+        for at in (520..1_200).step_by(120) {
+            controller.tick(millis(at));
+        }
+        let frame = controller.take_frame().expect("the gauge moved");
+        let lit_later = SlotAddr::all().filter(|a| frame.pad(*a).is_lit()).count();
+
+        assert!(
+            lit_later > lit_at_first,
+            "the fill should show the tempo climbing"
+        );
+    }
+
+    #[test]
+    fn the_grid_comes_back_when_the_hold_ends() {
+        let mut controller = controller();
+        controller.on_engine(Event::SlotChanged {
+            addr: addr(0, 0),
+            state: SlotState::Playing { clip: ClipId(0) },
+        });
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
+        controller.tick(millis(400));
+        controller.take_frame();
+
+        controller.on_surface(SurfaceEvent::ControlReleased(Control::TempoUp), millis(500));
+        controller.take_text();
+        controller.tick(millis(500) + TEXT_DURATION);
+        controller.take_text();
+
+        let frame = controller.take_frame().expect("the loops are back");
+        assert_eq!(frame.pad(addr(0, 0)), Led::pulse(LedColor::Green));
     }
 
     #[test]
