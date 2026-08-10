@@ -60,6 +60,10 @@ pub struct Audio {
     ///
     /// Empty measures it from the driver.
     pub capture_offset_frames: Option<u32>,
+    /// Whether losing a device freezes the transport.
+    ///
+    /// Off carries on where it left off as soon as the device is back.
+    pub pause_on_disconnect: bool,
 }
 
 impl Default for Audio {
@@ -73,6 +77,7 @@ impl Default for Audio {
             input_channel: None,
             cushion_blocks: 2,
             capture_offset_frames: None,
+            pause_on_disconnect: true,
         }
     }
 }
@@ -270,6 +275,9 @@ cushion_blocks = 2
 # which is right for almost every rig. Set it only if a driver reports badly.
 # capture_offset_frames = 512
 
+# Whether losing a device freezes the transport. Off carries on as soon as it is back.
+pause_on_disconnect = true
+
 [transport]
 tempo = 120.0
 beats_per_bar = 4
@@ -297,6 +305,13 @@ mod tests {
     )]
 
     use super::*;
+
+    #[test]
+    fn losing_a_device_pauses_unless_told_otherwise() {
+        assert!(Config::default().audio.pause_on_disconnect);
+        let config = Config::parse("[audio]\npause_on_disconnect = false\n").unwrap();
+        assert!(!config.audio.pause_on_disconnect);
+    }
 
     #[test]
     fn an_empty_file_gives_defaults() {
