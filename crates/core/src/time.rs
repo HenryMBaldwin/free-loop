@@ -26,6 +26,9 @@ pub enum TimeError {
     BarLengthUnrepresentable,
 }
 
+/// MIDI clock ticks in a quarter note.
+pub const CLOCK_TICKS_PER_QUARTER: u64 = 24;
+
 /// Lowest supported tempo, in beats per minute.
 pub const MIN_BPM: f64 = 20.0;
 /// Highest supported tempo, in beats per minute.
@@ -301,6 +304,19 @@ impl BarGrid {
         }
     }
 
+    /// How many MIDI clock ticks have passed by `pos`.
+    ///
+    /// Ticks are counted per quarter note rather than per beat, so a bar of 7/8 carries
+    /// half as many as a bar of 7/4.
+    pub fn clock_ticks_at(self, pos: Frames) -> u64 {
+        let quarters_per_bar = u128::from(self.time_signature.beats_per_bar()) * 4;
+        let per_bar = u128::from(CLOCK_TICKS_PER_QUARTER) * quarters_per_bar;
+        let divisor = u128::from(self.time_signature.beat_unit()) * u128::from(self.frames_per_bar);
+
+        let ticks = u128::from(pos.0) * per_bar / divisor;
+        u64::try_from(ticks).unwrap_or(u64::MAX)
+    }
+
     /// The position under `target` that sits at the same musical place as `position`
     /// does under `self`.
     ///
@@ -420,6 +436,55 @@ mod tests {
         assert_eq!(g.next_beat_boundary(Frames(0)), Frames(24_000));
         assert_eq!(g.next_beat_boundary(Frames(23_999)), Frames(24_000));
         assert_eq!(g.next_beat_boundary(Frames(72_001)), Frames(96_000));
+    }
+
+    #[test]
+    fn a_bar_of_four_four_carries_ninety_six_clock_ticks() {
+        let g = grid(120.0);
+        assert_eq!(g.clock_ticks_at(Frames::ZERO), 0);
+        assert_eq!(g.clock_ticks_at(g.frames_per_bar()), 96);
+        assert_eq!(g.clock_ticks_at(g.bar_start(4)), 4 * 96);
+    }
+
+    #[test]
+    fn clock_ticks_land_on_the_beats() {
+        let g = grid(120.0);
+        for beat in 0..4 {
+            assert_eq!(
+                g.clock_ticks_at(g.beat_offset(beat)),
+                u64::from(beat) * CLOCK_TICKS_PER_QUARTER
+            );
+        }
+    }
+
+    #[test]
+    fn clock_ticks_count_quarters_not_beats() {
+        // 7/8 is three and a half quarters, so 84 ticks rather than 7 beats worth.
+        let g = BarGrid::new(
+            SampleRate::new(48_000).unwrap(),
+            Tempo::new(120.0).unwrap(),
+            TimeSignature::new(7, 8).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(g.clock_ticks_at(g.frames_per_bar()), 84);
+    }
+
+    #[test]
+    fn clock_ticks_never_go_backwards() {
+        let g = grid(123.0);
+        let mut previous = 0;
+        for step in 0..2_000 {
+            let now = g.clock_ticks_at(Frames(step * 137));
+            assert!(now >= previous);
+            previous = now;
+        }
+    }
+
+    #[test]
+    fn a_faster_tempo_ticks_more_often() {
+        let slow = grid(60.0).clock_ticks_at(Frames(48_000));
+        let fast = grid(120.0).clock_ticks_at(Frames(48_000));
+        assert_eq!(fast, slow * 2);
     }
 
     #[test]

@@ -238,13 +238,23 @@ fn run(s: Session<'_>) {
         }
 
         let mut snapshot_ready = false;
+        let mut clock_ticks = 0;
         io.drain_events(|event| {
-            if let Event::SnapshotComplete { .. } = event {
-                snapshot_ready = true;
+            match event {
+                Event::SnapshotComplete { .. } => snapshot_ready = true,
+                Event::Clock { ticks } => clock_ticks += ticks,
+                _ => {}
             }
             report(event);
             controller.on_engine(event);
         });
+
+        // Keeps the device's flash and pulse animations on the transport's tempo.
+        if clock_ticks > 0
+            && let Err(error) = surface.send_clock(clock_ticks)
+        {
+            eprintln!("surface: {error}");
+        }
         housekeeping
             .snapshots
             .drain(|snapshot| snapshots.push(snapshot));
@@ -399,6 +409,7 @@ fn report(event: Event) {
         }
         Event::TempoRejected => eprintln!("tempo is locked while clips exist"),
         Event::SnapshotComplete { .. }
+        | Event::Clock { .. }
         | Event::Bar { .. }
         | Event::Beat { .. }
         | Event::SlotChanged { .. }

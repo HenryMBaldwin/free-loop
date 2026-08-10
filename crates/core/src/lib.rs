@@ -21,4 +21,7 @@ pub use event::Event;
 pub use ids::{ClipId, IndexOutOfRange, SLOT_COUNT, SlotAddr, SlotId, TRACK_COUNT, TrackId};
 pub use session::SessionModel;
 pub use slot::{Ctx, Effect, Effects, SlotInput, SlotState, step};
-pub use time::{BarGrid, Frames, MAX_BPM, MIN_BPM, SampleRate, Tempo, TimeError, TimeSignature};
+pub use time::{
+    BarGrid, CLOCK_TICKS_PER_QUARTER, Frames, MAX_BPM, MIN_BPM, SampleRate, Tempo, TimeError,
+    TimeSignature,
+};
