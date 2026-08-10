@@ -236,6 +236,15 @@ impl ControlSurface for LaunchpadX {
         Ok(())
     }
 
+    fn send_clock(&mut self, ticks: u32) -> Result<(), SurfaceError> {
+        // The device locks its flash and pulse animations to this. Without it they run
+        // at whatever it last assumed, which is only right by accident.
+        for _ in 0..ticks {
+            self.output.send_clock_tick().map_err(convert)?;
+        }
+        Ok(())
+    }
+
     fn show_text(&mut self, text: &str) -> Result<(), SurfaceError> {
         // Text takes the grid over, so nothing `shown` says about it holds any more.
         self.stale = true;

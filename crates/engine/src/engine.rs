@@ -279,6 +279,8 @@ pub struct Engine {
     paused: bool,
     /// The last position a beat fired on, so a grid change cannot fire it twice.
     last_boundary: Option<Frames>,
+    /// MIDI clock ticks already reported.
+    last_clock: u64,
     capture_offset: Frames,
     sample_rate: SampleRate,
     time_signature: TimeSignature,
@@ -342,6 +344,7 @@ impl Engine {
             max_bars: config.max_bars,
             paused: false,
             last_boundary: None,
+            last_clock: 0,
             capture_offset: config.capture_offset,
             sample_rate: config.sample_rate,
             time_signature: config.time_signature,
@@ -509,6 +512,7 @@ impl Engine {
         if let Ok(grid) = BarGrid::new(self.sample_rate, tempo, self.time_signature) {
             self.position = self.grid.rebase_onto(self.position, grid);
             self.grid = grid;
+            self.resync_clock();
         }
     }
 
@@ -563,6 +567,7 @@ impl Engine {
         // different beat and the click would jump instead of changing interval.
         self.position = self.grid.rebase_onto(self.position, grid);
         self.grid = grid;
+        self.resync_clock();
     }
 
     /// Renders one block.
@@ -601,6 +606,32 @@ impl Engine {
             self.position += Frames(as_u64(run));
             done += run;
         }
+
+        self.report_clock(sink);
+    }
+
+    /// Reports the MIDI clock ticks crossed by this block.
+    ///
+    /// A block is shorter than a tick at any usable tempo, so these arrive spaced rather
+    /// than in bursts, which is what a device deriving tempo from them needs.
+    fn report_clock(&mut self, sink: &mut impl EventSink) {
+        let now = self.grid.clock_ticks_at(self.position);
+        let ticks = now.saturating_sub(self.last_clock);
+        if ticks == 0 {
+            return;
+        }
+        self.last_clock = now;
+        sink.event(Event::Clock {
+            ticks: u32::try_from(ticks).unwrap_or(u32::MAX),
+        });
+    }
+
+    /// Takes the clock count from wherever the transport now is.
+    ///
+    /// Called after anything that moves the transport other than playing, so the next
+    /// report is a step rather than the whole jump.
+    fn resync_clock(&mut self) {
+        self.last_clock = self.grid.clock_ticks_at(self.position);
     }
 
     /// Fires anything scheduled for the exact frame the transport has reached.

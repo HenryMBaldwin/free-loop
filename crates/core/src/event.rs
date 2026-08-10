@@ -19,6 +19,14 @@ pub enum Event {
         /// Bar index from the transport origin.
         bar: u64,
     },
+    /// MIDI clock ticks have passed.
+    ///
+    /// Sent so a surface can lock its own animations to the transport rather than
+    /// running them off its own clock.
+    Clock {
+        /// How many since the last report.
+        ticks: u32,
+    },
     /// The transport crossed a beat.
     Beat {
         /// Bar index from the transport origin.
