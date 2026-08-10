@@ -76,6 +76,8 @@ struct TempoHold {
     since: Duration,
     /// When it last moved.
     last: Duration,
+    /// The tempo before it was pressed.
+    started_at: f64,
 }
 
 /// Something for the surface to display.
@@ -334,24 +336,26 @@ impl Controller {
 
     /// Nudges once and arms the repeat.
     fn press_tempo(&mut self, direction: f64, now: Duration) {
+        let before = self.tempo;
         self.nudge_tempo(direction * TEMPO_STEP);
         self.tempo_hold = Some(TempoHold {
             delta: direction * TEMPO_HOLD_STEP,
             since: now,
             last: now,
+            started_at: before,
         });
     }
 
     /// Stops the repeat and reports where the tempo landed.
     ///
-    /// The number is shown here rather than during the hold because each update restarts
-    /// the scroll from the edge, so one sent every repeat never gets anywhere.
+    /// Shown on release rather than as it moves, because each update restarts the scroll
+    /// from the edge and one sent every repeat never gets anywhere. A tap that hit the
+    /// end of the range says nothing, since the number would not have changed.
     fn release_tempo(&mut self, now: Duration) {
-        let repeated = self
-            .tempo_hold
-            .take()
-            .is_some_and(|hold| hold.last > hold.since);
-        if !repeated {
+        let Some(hold) = self.tempo_hold.take() else {
+            return;
+        };
+        if (self.tempo - hold.started_at).abs() < f64::EPSILON {
             return;
         }
 
@@ -409,6 +413,11 @@ impl Controller {
             }
             Event::TempoRejected => {
                 self.tempo = self.tempo_before_request;
+                // A number that has just been rolled back is worse than none.
+                if self.text_until.take().is_some() {
+                    self.text = Some(TextUpdate::Stop);
+                    self.dirty = true;
+                }
             }
             // Bars are already covered by the beat they start with, and the rest are for
             // logging rather than for the grid.
@@ -738,7 +747,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tap_moves_one_beat_and_says_nothing() {
+    fn a_tap_moves_one_beat_and_shows_it() {
         let mut controller = controller();
         controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
         controller.on_surface(SurfaceEvent::ControlReleased(Control::TempoUp), millis(80));
@@ -746,8 +755,31 @@ mod tests {
         assert_eq!(controller.tempo(), 121.0);
         assert_eq!(
             controller.take_text(),
-            None,
-            "text would take the grid over to say one beat"
+            Some(TextUpdate::Show("121".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_tap_that_moves_nothing_says_nothing() {
+        let mut controller = Controller::new(MAX_BPM, 4, true);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
+        controller.on_surface(SurfaceEvent::ControlReleased(Control::TempoUp), millis(80));
+        assert_eq!(controller.take_text(), None);
+    }
+
+    #[test]
+    fn a_rolled_back_tempo_takes_its_number_down_with_it() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
+        controller.on_surface(SurfaceEvent::ControlReleased(Control::TempoUp), millis(80));
+        controller.take_text();
+
+        controller.on_engine(Event::TempoRejected);
+        assert_eq!(controller.tempo(), 120.0);
+        assert_eq!(
+            controller.take_text(),
+            Some(TextUpdate::Stop),
+            "the number on the grid is no longer the tempo"
         );
     }
 
@@ -822,17 +854,6 @@ mod tests {
         controller.tick(millis(500) + TEXT_DURATION);
         assert_eq!(controller.take_text(), Some(TextUpdate::Stop));
         assert!(controller.take_frame().is_some(), "and the grid comes back");
-    }
-
-    #[test]
-    fn a_tap_leaves_no_text_to_stop() {
-        let mut controller = controller();
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoDown), T0);
-        controller.on_surface(
-            SurfaceEvent::ControlReleased(Control::TempoDown),
-            millis(50),
-        );
-        assert_eq!(controller.take_text(), None);
     }
 
     #[test]
