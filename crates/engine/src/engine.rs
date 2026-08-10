@@ -22,6 +22,28 @@ use crate::load::{LoadInbox, LoadMessage, Loader};
 use crate::recycle::{Recycler, Retirement, channel};
 use crate::snapshot::{Snapshot, SnapshotReader, SnapshotWriter};
 
+/// Holds the mix at full scale and reports how much was held.
+///
+/// Tracks sum without headroom, and material in the same register sums coherently, so a
+/// handful of loops can pass full scale. Past that an integer sample format wraps, which
+/// is far worse than the limit itself.
+fn limit(output: &mut [f32], sink: &mut impl EventSink) {
+    let mut held = 0_u32;
+    for sample in output.iter_mut() {
+        if *sample > 1.0 {
+            *sample = 1.0;
+            held += 1;
+        } else if *sample < -1.0 {
+            *sample = -1.0;
+            held += 1;
+        }
+    }
+
+    if held > 0 {
+        sink.event(Event::Clipped { samples: held });
+    }
+}
+
 /// Moves an anchor back by `shift`, wrapped into the loop rather than clamped.
 ///
 /// Only `recorded_at` modulo the loop length affects playback, so wrapping keeps the
@@ -715,6 +737,7 @@ impl Engine {
             done += run;
         }
 
+        limit(output, sink);
         self.report_clock(sink);
     }
 
@@ -835,9 +858,33 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, reason = "tests should fail loudly")]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::float_cmp,
+        reason = "tests should fail loudly, and compare exact rendered samples"
+    )]
 
     use super::*;
+
+    #[test]
+    fn the_mix_is_held_at_full_scale() {
+        let mut output = [2.0, -2.0, 0.5, -0.5];
+        let mut events = Vec::new();
+        limit(&mut output, &mut events);
+
+        assert_eq!(output, [1.0, -1.0, 0.5, -0.5]);
+        assert_eq!(events, vec![Event::Clipped { samples: 2 }]);
+    }
+
+    #[test]
+    fn a_mix_inside_full_scale_is_left_alone() {
+        let mut output = [1.0, -1.0, 0.0];
+        let mut events = Vec::new();
+        limit(&mut output, &mut events);
+
+        assert_eq!(output, [1.0, -1.0, 0.0], "the limit itself is not clipping");
+        assert!(events.is_empty());
+    }
 
     #[test]
     fn an_anchor_before_the_reference_wraps_rather_than_clamping() {

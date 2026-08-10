@@ -576,6 +576,7 @@ impl Controller {
             | Event::ClipReleased { .. }
             | Event::RecordBufferLow { .. }
             | Event::Xrun { .. }
+            | Event::Clipped { .. }
             | Event::SnapshotComplete { .. }
             // The clock goes straight to the surface rather than through the grid.
             | Event::Clock { .. } => {}

@@ -54,6 +54,11 @@ pub enum Event {
         /// Which pad is recording.
         addr: SlotAddr,
     },
+    /// The mix went past full scale and was held at the limit.
+    Clipped {
+        /// How many samples were held.
+        samples: u32,
+    },
     /// Captured input was unavailable; silence was substituted.
     Xrun {
         /// How many frames were lost.
