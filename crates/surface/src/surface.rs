@@ -40,4 +40,26 @@ pub trait ControlSurface {
     ///
     /// [`SurfaceError`] if the device rejected the update.
     fn clear(&mut self) -> Result<(), SurfaceError>;
+
+    /// Shows a short string, if the device can.
+    ///
+    /// Devices with nothing to show it on ignore it. Text takes the grid over while it
+    /// runs, so callers should stop it before expecting a frame to be visible.
+    ///
+    /// # Errors
+    ///
+    /// [`SurfaceError`] if the device rejected the update.
+    fn show_text(&mut self, text: &str) -> Result<(), SurfaceError> {
+        let _ = text;
+        Ok(())
+    }
+
+    /// Stops any text and gives the grid back.
+    ///
+    /// # Errors
+    ///
+    /// [`SurfaceError`] if the device rejected the update.
+    fn stop_text(&mut self) -> Result<(), SurfaceError> {
+        Ok(())
+    }
 }

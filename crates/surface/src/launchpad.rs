@@ -19,6 +19,10 @@ use crate::surface::{ControlSurface, SurfaceError};
 /// Buttons the device accepts in one update.
 const MAX_BUTTONS: usize = 80;
 
+/// Scroll speed the device accepts, 0 to 127. Fast enough to read a three digit number
+/// without waiting for it.
+const TEXT_SPEED: u8 = 24;
+
 /// Fraction of full brightness used for [`LedStyle::Dim`].
 const DIM_DIVISOR: u16 = 4;
 
@@ -209,6 +213,19 @@ impl ControlSurface for LaunchpadX {
 
     fn clear(&mut self) -> Result<(), SurfaceError> {
         self.output.clear().map_err(convert)?;
+        self.shown = LedFrame::new();
+        Ok(())
+    }
+
+    fn show_text(&mut self, text: &str) -> Result<(), SurfaceError> {
+        self.output
+            .scroll_text(text.as_bytes(), palette(LedColor::White), TEXT_SPEED, false)
+            .map_err(convert)
+    }
+
+    fn stop_text(&mut self) -> Result<(), SurfaceError> {
+        self.output.stop_scroll().map_err(convert)?;
+        // The device blanks the grid while text runs, so everything has to be sent again.
         self.shown = LedFrame::new();
         Ok(())
     }
