@@ -93,12 +93,10 @@ pub fn beat_indicator(frame: &mut LedFrame, chrome: Chrome) {
         return;
     }
 
-    // Beat one keeps its own colour so the bar line stays readable, and the backbeat
-    // carries the brightness.
-    let led = match (beat, beat % 2 == 1) {
-        (0, _) => Led::solid(LedColor::White),
-        (_, true) => Led::solid(LedColor::Blue),
-        (_, false) => Led::dim(LedColor::Blue),
+    let led = if beat == 0 {
+        Led::solid(LedColor::White)
+    } else {
+        Led::solid(LedColor::Blue)
     };
     frame.set_control(FIRST_BEAT_LED + beat, led);
 }
@@ -328,26 +326,6 @@ mod tests {
         assert_ne!(running.side(PAUSE_SIDE), frozen.side(PAUSE_SIDE));
         assert!(running.side(PAUSE_SIDE).is_lit());
         assert!(frozen.side(PAUSE_SIDE).is_lit());
-    }
-
-    #[test]
-    fn the_backbeat_is_brighter_than_the_beats_around_it() {
-        let led = |beat| {
-            let mut frame = LedFrame::new();
-            beat_indicator(
-                &mut frame,
-                Chrome {
-                    beat,
-                    ..Chrome::default()
-                },
-            );
-            frame.control(FIRST_BEAT_LED + beat as usize)
-        };
-
-        // Two and four, counting from one.
-        assert_eq!(led(1).style, LedStyle::Solid);
-        assert_eq!(led(3).style, LedStyle::Solid);
-        assert_eq!(led(2).style, LedStyle::Dim);
     }
 
     #[test]
