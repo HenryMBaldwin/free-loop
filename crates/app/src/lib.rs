@@ -10,4 +10,4 @@ pub mod config;
 pub mod control;
 
 pub use config::{Config, ConfigError};
-pub use control::Controller;
+pub use control::{Controller, Mode, Request};

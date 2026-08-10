@@ -12,14 +12,16 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use std::error::Error;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use free_loop::{Config, Controller, config};
-use free_loop_audio::open;
-use free_loop_core::Event;
-use free_loop_engine::Engine;
+use free_loop::config::{self, Config};
+use free_loop::control::{Controller, Request};
+use free_loop_audio::{AudioIo, Negotiated, open};
+use free_loop_core::{Command, Event};
+use free_loop_engine::{Engine, Housekeeping, Snapshot};
+use free_loop_session::{SavedClip, SessionData, SessionStore};
 use free_loop_surface::{ControlSurface, LaunchpadX, MockSurface, SurfaceError, SurfaceEvent};
 
 /// How often the control loop runs.
@@ -88,7 +90,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         negotiated.cushion_frames
     );
 
-    let (engine, mut recycler) =
+    let (engine, mut housekeeping) =
         Engine::new(config.engine(negotiated.sample_rate, negotiated.channels)?)?;
     let mut io = opened.start(engine)?;
 
@@ -98,6 +100,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         config.transport.beats_per_bar,
         config.click.enabled,
     );
+
+    let store = SessionStore::new(path.parent().unwrap_or(Path::new(".")).join("sessions"));
+    controller.set_sessions(store.index());
 
     println!(
         "transport: {:.1} bpm, {}/{}",
@@ -113,7 +118,56 @@ fn main() -> Result<(), Box<dyn Error>> {
         move || running.store(false, Ordering::Relaxed)
     })?;
 
+    run(Session {
+        io: &mut io,
+        surface: surface.as_mut(),
+        controller: &mut controller,
+        housekeeping: &mut housekeeping,
+        store: &store,
+        config: &config,
+        negotiated,
+        log_surface,
+        running: &running,
+    });
+
+    // Leaving the grid lit after the process is gone looks like it is still running.
+    if let Err(error) = surface.clear() {
+        eprintln!("surface: {error}");
+    }
+    println!("\nstopped. device errors: {}", io.device_errors());
+    Ok(())
+}
+
+/// Everything the control loop touches.
+struct Session<'a> {
+    io: &'a mut AudioIo,
+    surface: &'a mut dyn ControlSurface,
+    controller: &'a mut Controller,
+    housekeeping: &'a mut Housekeeping,
+    store: &'a SessionStore,
+    config: &'a Config,
+    negotiated: Negotiated,
+    log_surface: bool,
+    running: &'a AtomicBool,
+}
+
+/// Polls the surface, drives the engine and repaints until asked to stop.
+fn run(s: Session<'_>) {
+    let Session {
+        io,
+        surface,
+        controller,
+        housekeeping,
+        store,
+        config,
+        negotiated,
+        log_surface,
+        running,
+    } = s;
+
     let mut events: Vec<SurfaceEvent> = Vec::new();
+    let mut snapshots: Vec<Snapshot> = Vec::new();
+    let mut pending_save: Option<free_loop_core::SlotAddr> = None;
     let started = Instant::now();
     // Only known once the driver has run a callback and said how much it buffers.
     let mut reported_latency = false;
@@ -131,7 +185,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         controller.tick(now);
         // Returns clips the engine finished with while something else was reading them.
-        recycler.run();
+        housekeeping.recycler.run();
+
+        for request in controller.drain_requests() {
+            let Request::SaveSession(addr) = request;
+            // The audio lives in the engine, so ask for it and save once it arrives.
+            pending_save = Some(addr);
+            snapshots.clear();
+            if io.send(Command::Snapshot).is_err() {
+                eprintln!("could not ask for a snapshot");
+                pending_save = None;
+            }
+        }
 
         for command in controller.drain_commands() {
             if io.send(command).is_err() {
@@ -139,10 +204,28 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
 
+        let mut snapshot_ready = false;
         io.drain_events(|event| {
+            if let Event::SnapshotComplete { .. } = event {
+                snapshot_ready = true;
+            }
             report(event);
             controller.on_engine(event);
         });
+        housekeeping
+            .snapshots
+            .drain(|snapshot| snapshots.push(snapshot));
+
+        if snapshot_ready && let Some(addr) = pending_save.take() {
+            match save(store, addr, config, &negotiated, &snapshots) {
+                Ok(()) => {
+                    println!("saved session {}{}", addr.track.index(), addr.slot.index());
+                    controller.session_saved(addr);
+                }
+                Err(error) => eprintln!("save failed: {error}"),
+            }
+            snapshots.clear();
+        }
 
         if let Some(frame) = controller.take_frame()
             && let Err(error) = surface.render(frame)
@@ -161,13 +244,40 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         std::thread::sleep(TICK);
     }
+}
 
-    // Leaving the grid lit after the process is gone looks like it is still running.
-    if let Err(error) = surface.clear() {
-        eprintln!("surface: {error}");
-    }
-    println!("\nstopped. device errors: {}", io.device_errors());
-    Ok(())
+/// Writes the snapshotted clips out under `addr`.
+fn save(
+    store: &SessionStore,
+    addr: free_loop_core::SlotAddr,
+    config: &Config,
+    negotiated: &free_loop_audio::Negotiated,
+    snapshots: &[Snapshot],
+) -> Result<(), free_loop_session::SessionError> {
+    let clips = snapshots
+        .iter()
+        .map(|snapshot| SavedClip {
+            addr: snapshot.addr,
+            playing: matches!(
+                snapshot.state,
+                free_loop_core::SlotState::Playing { .. }
+                    | free_loop_core::SlotState::QueuedStop { .. }
+            ),
+            clip: &snapshot.clip,
+        })
+        .collect();
+
+    store.save(
+        addr,
+        &SessionData {
+            tempo: config.transport.tempo,
+            beats_per_bar: config.transport.beats_per_bar,
+            beat_unit: config.transport.beat_unit,
+            sample_rate: negotiated.sample_rate,
+            channels: u16::try_from(negotiated.channels).unwrap_or(2),
+            clips,
+        },
+    )
 }
 
 /// Connects a Launchpad, falling back to a surface with no hardware behind it.
@@ -211,7 +321,8 @@ fn report(event: Event) {
             );
         }
         Event::TempoRejected => eprintln!("tempo is locked while clips exist"),
-        Event::Bar { .. }
+        Event::SnapshotComplete { .. }
+        | Event::Bar { .. }
         | Event::Beat { .. }
         | Event::SlotChanged { .. }
         | Event::ClipReleased { .. } => {}
