@@ -334,8 +334,16 @@ impl Controller {
         }
     }
 
-    /// Nudges once and arms the repeat.
+    /// Nudges once and arms the repeat, or just reports the tempo if it is locked.
+    ///
+    /// The tempo cannot move once a clip exists, so a press is a question rather than an
+    /// instruction and gets answered with the number.
     fn press_tempo(&mut self, direction: f64, now: Duration) {
+        if self.session.has_any_clip() {
+            self.show_tempo(now);
+            return;
+        }
+
         let before = self.tempo;
         self.nudge_tempo(direction * TEMPO_STEP);
         self.tempo_hold = Some(TempoHold {
@@ -362,10 +370,13 @@ impl Controller {
         };
         // The gauge had the grid; whatever comes next has to redraw it.
         self.dirty = true;
-        if (self.tempo - hold.started_at).abs() < f64::EPSILON {
-            return;
+        if (self.tempo - hold.started_at).abs() >= f64::EPSILON {
+            self.show_tempo(now);
         }
+    }
 
+    /// Puts the tempo on the grid for long enough to read.
+    fn show_tempo(&mut self, now: Duration) {
         let bpm = self.tempo.round();
         #[expect(clippy::cast_possible_truncation, reason = "tempo is under 300")]
         let shown = bpm as i32;
@@ -773,6 +784,42 @@ mod tests {
             controller.take_text(),
             Some(TextUpdate::Show("121".to_owned()))
         );
+    }
+
+    #[test]
+    fn a_locked_tempo_is_reported_rather_than_changed() {
+        let mut controller = controller();
+        controller.on_engine(Event::SlotChanged {
+            addr: addr(0, 0),
+            state: SlotState::Stopped { clip: ClipId(0) },
+        });
+
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
+
+        assert_eq!(controller.tempo(), 120.0, "locked, so it does not move");
+        assert!(
+            commands(&mut controller).is_empty(),
+            "asking the engine to do what it will refuse is noise"
+        );
+        assert_eq!(
+            controller.take_text(),
+            Some(TextUpdate::Show("120".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_locked_tempo_does_not_start_a_repeat() {
+        let mut controller = controller();
+        controller.on_engine(Event::SlotChanged {
+            addr: addr(0, 0),
+            state: SlotState::Stopped { clip: ClipId(0) },
+        });
+
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
+        for at in (0..2_000).step_by(20) {
+            controller.tick(millis(at));
+        }
+        assert_eq!(controller.tempo(), 120.0);
     }
 
     #[test]
