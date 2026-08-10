@@ -6,6 +6,7 @@
 use core::time::Duration;
 
 use crate::event::SurfaceEvent;
+use crate::host::HostWatch;
 use crate::led::LedFrame;
 use crate::surface::{ControlSurface, SurfaceError};
 
@@ -25,6 +26,8 @@ pub struct Reconnecting<S, F> {
     retry_at: Option<Duration>,
     /// Time of the next check that the device in use is still attached.
     check_at: Duration,
+    /// Keeps the host's device list current, so one attached later is seen at all.
+    watch: HostWatch,
     now: Duration,
 }
 
@@ -42,6 +45,8 @@ impl<S: ControlSurface, F: FnMut() -> Result<S, SurfaceError>> Reconnecting<S, F
     /// The attempt made here counts as the one for the clock's origin, so the next falls
     /// one interval in.
     pub fn new(mut open: F) -> Self {
+        let watch = HostWatch::new();
+        watch.pump();
         let device = open().ok();
         Self {
             retry_at: device.is_none().then_some(RETRY_INTERVAL),
@@ -49,6 +54,7 @@ impl<S: ControlSurface, F: FnMut() -> Result<S, SurfaceError>> Reconnecting<S, F
             open,
             last: LedFrame::new(),
             check_at: RETRY_INTERVAL,
+            watch,
             now: Duration::ZERO,
         }
     }
@@ -77,6 +83,7 @@ impl<S: ControlSurface, F: FnMut() -> Result<S, SurfaceError>> ControlSurface
 {
     fn tick(&mut self, now: Duration) {
         self.now = now;
+        self.watch.pump();
 
         if let Some(device) = self.device.as_mut() {
             device.tick(now);
