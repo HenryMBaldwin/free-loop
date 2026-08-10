@@ -143,6 +143,12 @@ pub fn control(control: Control, chrome: Chrome) -> Led {
     }
 }
 
+/// Colour a button takes while it is waiting for the press that follows it.
+///
+/// One colour for every such button, so anything flashing pink means the same thing
+/// wherever it is.
+pub const SELECTED: LedColor = LedColor::Pink;
+
 /// Colour a silenced group takes, matching its side button.
 pub const MUTED: LedColor = LedColor::Red;
 
@@ -256,7 +262,7 @@ pub fn picker(
     for button in Control::all() {
         frame.set_control(button.index(), control(button, chrome));
     }
-    frame.set_control(active.index(), Led::flash(LedColor::White));
+    frame.set_control(active.index(), Led::flash(SELECTED));
     side_buttons(&mut frame, chrome);
 
     frame
@@ -754,11 +760,11 @@ mod tests {
         let painted = picker(0, None, Chrome::default(), Control::SaveSession);
         assert_eq!(
             painted.control(Control::SaveSession.index()),
-            Led::flash(LedColor::White)
+            Led::flash(SELECTED)
         );
         assert_ne!(
             painted.control(Control::LoadSession.index()),
-            Led::flash(LedColor::White)
+            Led::flash(SELECTED)
         );
     }
 

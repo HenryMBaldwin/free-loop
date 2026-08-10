@@ -14,8 +14,8 @@ use free_loop_core::{
     column_mask, pad_bit, row_mask,
 };
 use free_loop_surface::{
-    Axis, Chrome, Control, Led, LedColor, LedFrame, MUTE_SIDE, PAUSE_SIDE, SOLO_SIDE, SurfaceEvent,
-    paint,
+    Axis, Chrome, Control, Led, LedColor, LedFrame, MUTE_SIDE, PAUSE_SIDE, SELECTED, SOLO_SIDE,
+    SurfaceEvent, paint,
 };
 
 /// Beats per minute one press of the tempo buttons moves.
@@ -77,6 +77,8 @@ impl Mode {
 /// A tempo button being held down.
 #[derive(Debug, Clone, Copy)]
 struct TempoHold {
+    /// The button being held, so it can show that it is.
+    button: Control,
     /// Which way it moves.
     delta: f64,
     /// When it went down.
@@ -403,7 +405,13 @@ impl Controller {
 
         let before = self.tempo;
         self.nudge_tempo(direction * TEMPO_STEP);
+        self.dirty = true;
         self.tempo_hold = Some(TempoHold {
+            button: if direction > 0.0 {
+                Control::TempoUp
+            } else {
+                Control::TempoDown
+            },
             delta: direction * TEMPO_HOLD_STEP,
             since: now,
             last: now,
@@ -513,6 +521,30 @@ impl Controller {
         self.commands.drain(..)
     }
 
+    /// Marks whatever is waiting on the next press.
+    ///
+    /// Applied to every screen, so a button held or a mode open looks the same wherever
+    /// the grid happens to be.
+    fn overlay(&mut self) {
+        match self.mode {
+            Mode::Mute => self.frame.set_side(MUTE_SIDE, Led::flash(SELECTED)),
+            Mode::Solo => self.frame.set_side(SOLO_SIDE, Led::flash(SELECTED)),
+            _ => {}
+        }
+
+        if let Some(hold) = self.tempo_hold {
+            self.frame
+                .set_control(hold.button.index(), Led::flash(SELECTED));
+        }
+
+        // A hold about to empty a pad says so before the audio disappears.
+        for addr in SlotAddr::all() {
+            if self.warning & bit(addr) != 0 {
+                self.frame.set_pad(addr, Led::flash(LedColor::White));
+            }
+        }
+    }
+
     /// The frame to show, if anything changed since it was last taken.
     pub fn take_frame(&mut self) -> Option<&LedFrame> {
         // Text has the grid, and a frame sent now would cut it off part way.
@@ -520,44 +552,17 @@ impl Controller {
             return None;
         }
 
-        // A number cannot track a tempo that is still moving, so the grid shows it
-        // instead until the button is let go.
-        if self.tempo_repeating() {
-            self.frame = paint::tempo_gauge(self.tempo, self.chrome);
-            self.dirty = false;
-            return Some(&self.frame);
-        }
+        self.frame = if self.tempo_repeating() {
+            // A number cannot track a tempo that is still moving, so the grid shows it
+            // instead until the button is let go.
+            paint::tempo_gauge(self.tempo, self.chrome)
+        } else if let Some(button) = self.mode.button() {
+            paint::picker(self.sessions, self.current, self.chrome, button)
+        } else {
+            paint::frame(&self.session, self.chrome)
+        };
 
-        if let Some(button) = self.mode.button() {
-            self.frame = paint::picker(self.sessions, self.current, self.chrome, button);
-            self.dirty = false;
-            return Some(&self.frame);
-        }
-
-        self.frame = paint::frame(&self.session, self.chrome);
-
-        // The grid already shows what is silenced, so choosing a group changes only what
-        // a press does. Flashing the button that opened it is the whole difference.
-        match self.mode {
-            Mode::Mute => self
-                .frame
-                .set_side(MUTE_SIDE, Led::flash(self.chrome.axis.color())),
-            Mode::Solo => self
-                .frame
-                .set_side(SOLO_SIDE, Led::flash(self.chrome.axis.color())),
-            _ => {}
-        }
-
-        // Painted over the session colour so a hold about to empty a pad says so before
-        // the audio disappears.
-        if self.warning != 0 {
-            for addr in SlotAddr::all() {
-                if self.warning & bit(addr) != 0 {
-                    self.frame.set_pad(addr, Led::flash(LedColor::White));
-                }
-            }
-        }
-
+        self.overlay();
         self.dirty = false;
         Some(&self.frame)
     }
@@ -765,6 +770,54 @@ mod tests {
 
         controller.on_surface(side(MUTE_SIDE), T0);
         assert_eq!(controller.mode(), Mode::Perform);
+    }
+
+    #[test]
+    fn everything_waiting_on_a_press_flashes_the_same_colour() {
+        let mut controller = controller();
+
+        controller.on_surface(side(SOLO_SIDE), T0);
+        assert_eq!(
+            controller.take_frame().unwrap().side(SOLO_SIDE),
+            Led::flash(SELECTED)
+        );
+        controller.on_surface(side(SOLO_SIDE), T0);
+
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        assert_eq!(
+            controller
+                .take_frame()
+                .unwrap()
+                .control(Control::SaveSession.index()),
+            Led::flash(SELECTED)
+        );
+    }
+
+    #[test]
+    fn a_held_tempo_button_shows_that_it_is_held() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
+
+        let frame = controller.take_frame().expect("the button changed");
+        assert_eq!(
+            frame.control(Control::TempoUp.index()),
+            Led::flash(SELECTED)
+        );
+        assert_ne!(
+            frame.control(Control::TempoDown.index()),
+            Led::flash(SELECTED)
+        );
+
+        controller.on_surface(SurfaceEvent::ControlReleased(Control::TempoUp), millis(50));
+        controller.take_text();
+        controller.tick(millis(50) + TEXT_DURATION);
+        controller.take_text();
+
+        let frame = controller.take_frame().expect("the grid came back");
+        assert_ne!(
+            frame.control(Control::TempoUp.index()),
+            Led::flash(SELECTED)
+        );
     }
 
     #[test]
