@@ -556,8 +556,14 @@ impl Controller {
         }
 
         if let Some(hold) = self.tempo_hold {
-            self.frame
-                .set_control(hold.button.index(), Led::flash(SELECTED));
+            // Steady while pressed, blinking once it starts repeating, so the button
+            // says which of the two is happening.
+            let led = if self.tempo_repeating() {
+                Led::flash(SELECTED)
+            } else {
+                Led::solid(SELECTED)
+            };
+            self.frame.set_control(hold.button.index(), led);
         }
 
         // A hold about to empty a pad says so before the audio disappears.
@@ -872,23 +878,26 @@ mod tests {
         let frame = controller.take_frame().expect("the button changed");
         assert_eq!(
             frame.control(Control::TempoUp.index()),
-            Led::flash(SELECTED)
+            Led::solid(SELECTED),
+            "steady while simply pressed"
         );
-        assert_ne!(
-            frame.control(Control::TempoDown.index()),
-            Led::flash(SELECTED)
+        assert_ne!(frame.control(Control::TempoDown.index()).color, SELECTED);
+
+        controller.tick(millis(400));
+        let frame = controller.take_frame().expect("it started repeating");
+        assert_eq!(
+            frame.control(Control::TempoUp.index()),
+            Led::flash(SELECTED),
+            "and blinks once it repeats"
         );
 
-        controller.on_surface(SurfaceEvent::ControlReleased(Control::TempoUp), millis(50));
+        controller.on_surface(SurfaceEvent::ControlReleased(Control::TempoUp), millis(500));
         controller.take_text();
-        controller.tick(millis(50) + TEXT_DURATION);
+        controller.tick(millis(500) + TEXT_DURATION);
         controller.take_text();
 
         let frame = controller.take_frame().expect("the grid came back");
-        assert_ne!(
-            frame.control(Control::TempoUp.index()),
-            Led::flash(SELECTED)
-        );
+        assert_ne!(frame.control(Control::TempoUp.index()).color, SELECTED);
     }
 
     #[test]
