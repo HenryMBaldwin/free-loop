@@ -319,11 +319,18 @@ fn save(
     )
 }
 
-/// Shows any text, then any frame.
+/// Shows any frame, then any text.
 ///
-/// Text takes the grid over while it runs, so it goes first and the frame that follows
-/// puts the grid back.
+/// The frame goes first so the buttons are up to date before text takes the grid: a
+/// tempo button let go on the same pass has to stop showing as held, and once the text
+/// is running nothing more is sent until it finishes.
 fn repaint(surface: &mut dyn ControlSurface, controller: &mut Controller) {
+    if let Some(frame) = controller.take_frame()
+        && let Err(error) = surface.render(frame)
+    {
+        eprintln!("surface: {error}");
+    }
+
     if let Some(update) = controller.take_text() {
         let shown = match update {
             TextUpdate::Show(text) => surface.show_text(&text),
@@ -332,12 +339,6 @@ fn repaint(surface: &mut dyn ControlSurface, controller: &mut Controller) {
         if let Err(error) = shown {
             eprintln!("surface: {error}");
         }
-    }
-
-    if let Some(frame) = controller.take_frame()
-        && let Err(error) = surface.render(frame)
-    {
-        eprintln!("surface: {error}");
     }
 }
 
