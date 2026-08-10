@@ -4,6 +4,7 @@
 //! behaviour is testable with a fake clock and no hardware.
 //!
 //! - [`time`]: the bar grid and the quantisation rules.
+//! - [`gain`]: track volume in the steps a row of pads offers.
 //! - [`ids`]: the fixed 8×8 grid of pads, and clip identity.
 //! - [`slot`]: the per-pad state machine.
 //! - [`session`]: the whole grid, and the rules that span more than one pad.
@@ -11,6 +12,7 @@
 
 pub mod command;
 pub mod event;
+pub mod gain;
 pub mod ids;
 pub mod session;
 pub mod slot;
@@ -18,6 +20,7 @@ pub mod time;
 
 pub use command::Command;
 pub use event::Event;
+pub use gain::{GAIN_STEPS, UNITY_STEP, gain_for_step};
 pub use ids::{
     ClipId, IndexOutOfRange, PadMask, SLOT_COUNT, SlotAddr, SlotId, TRACK_COUNT, TrackId,
     column_mask, pad_bit, row_mask,

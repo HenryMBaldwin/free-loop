@@ -218,9 +218,8 @@ impl Controller {
 
     /// Silences or frees the row or column a pad sits in.
     ///
-    /// Whole groups rather than single pads, since only one slot per track sounds at a
-    /// time and silencing just the one that happens to be playing would come undone the
-    /// moment another was launched.
+    /// Whole groups rather than single pads: only one slot per track sounds at a time, so
+    /// a single pad's silence lasts only until another is launched.
     fn toggle_group(&mut self, addr: SlotAddr) {
         let group = match self.chrome.axis {
             Axis::Row => row_mask(addr.track),
@@ -592,8 +591,8 @@ impl Controller {
 
     /// The frame to show, if anything changed since it was last taken.
     pub fn take_frame(&mut self) -> Option<&LedFrame> {
-        // Text on the grid would be cut off part way by a frame. Queued text is not on
-        // the grid yet, so the frame that goes with it still gets out.
+        // A frame cuts off text that is on the grid. Queued text is not on it yet, so the
+        // frame that goes with it still gets out.
         if !self.dirty || self.text_running {
             return None;
         }

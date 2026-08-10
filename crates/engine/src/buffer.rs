@@ -142,14 +142,14 @@ impl AudioBuffer {
     /// Adds `run` frames starting at `frame` into `dst`.
     ///
     /// Segments that were never written read as silence.
-    fn add_into(&self, frame: u64, dst: &mut [f32], run: usize) {
+    fn add_into(&self, frame: u64, dst: &mut [f32], run: usize, gain: f32) {
         let (index, offset) = split(frame);
         let Some(Some(segment)) = self.segments.get(index) else {
             return;
         };
         let src = &segment.data[offset * self.channels..(offset + run) * self.channels];
         for (out, sample) in dst.iter_mut().zip(src) {
-            *out += sample;
+            *out += sample * gain;
         }
     }
 }
@@ -255,19 +255,18 @@ impl Clip {
         self.buffer.drain_into(pool);
     }
 
-    /// Adds the loop into `dst`, starting from the phase this clip has at `position`.
+    /// Adds the loop into `dst` at `gain`, from the phase this clip has at `position`.
     ///
     /// `dst` is interleaved and its length must be a multiple of the channel count.
-    pub fn mix_into(&self, position: Frames, dst: &mut [f32]) {
+    pub fn mix_into(&self, position: Frames, dst: &mut [f32], gain: f32) {
         let len = self.len.0;
-        if len == 0 {
+        if len == 0 || gain == 0.0 {
             return;
         }
 
         let total = dst.len() / self.channels;
         // Modular rather than saturating: a clip loaded from a session can sit ahead of
-        // the transport, and clamping to zero would replay the same fragment every block
-        // until the transport caught up.
+        // the transport, and clamping to zero replays one fragment until it catches up.
         let mut phase = (position.0 % len + len - self.recorded_at.0 % len) % len;
         let mut done = 0;
 
@@ -278,7 +277,7 @@ impl Clip {
                 .min(as_usize(len - phase));
 
             let slice = &mut dst[done * self.channels..(done + run) * self.channels];
-            self.buffer.add_into(phase, slice, run);
+            self.buffer.add_into(phase, slice, run, gain);
 
             done += run;
             phase += run as u64;
@@ -322,7 +321,7 @@ mod tests {
 
         let clip = Clip::new(buffer, Frames(at + 200), Frames(0), CH);
         let mut out = vec![0.0; 200 * CH];
-        clip.mix_into(Frames(at), &mut out);
+        clip.mix_into(Frames(at), &mut out, 1.0);
         assert_eq!(out, src);
     }
 
@@ -358,7 +357,7 @@ mod tests {
 
         let clip = Clip::new(buffer, Frames(4), Frames(0), CH);
         let mut out = vec![0.0; 10 * CH];
-        clip.mix_into(Frames(0), &mut out);
+        clip.mix_into(Frames(0), &mut out, 1.0);
 
         let expected: Vec<f32> = (0..10)
             .flat_map(|f| [(f % 4 * CH) as f32, (f % 4 * CH + 1) as f32])
@@ -375,7 +374,7 @@ mod tests {
         // Recorded starting at frame 100, so frame 106 is phase 2.
         let clip = Clip::new(buffer, Frames(4), Frames(100), CH);
         let mut out = vec![0.0; 2 * CH];
-        clip.mix_into(Frames(106), &mut out);
+        clip.mix_into(Frames(106), &mut out, 1.0);
         assert_eq!(out, vec![4.0, 5.0, 6.0, 7.0]);
     }
 
@@ -390,11 +389,11 @@ mod tests {
         let clip = Clip::new(buffer, Frames(4), Frames(3), CH);
 
         let mut out = vec![0.0; 2 * CH];
-        clip.mix_into(Frames(0), &mut out);
+        clip.mix_into(Frames(0), &mut out, 1.0);
         assert_eq!(out, vec![2.0, 3.0, 4.0, 5.0], "phase 1, not phase 0");
 
         let mut later = vec![0.0; 2 * CH];
-        clip.mix_into(Frames(1), &mut later);
+        clip.mix_into(Frames(1), &mut later, 1.0);
         assert_eq!(later, vec![4.0, 5.0, 6.0, 7.0], "and it advances");
     }
 
@@ -407,8 +406,8 @@ mod tests {
 
         let mut early = vec![0.0; 4 * CH];
         let mut late = vec![0.0; 4 * CH];
-        clip.mix_into(Frames(1), &mut early);
-        clip.mix_into(Frames(1 + 4 * 1_000), &mut late);
+        clip.mix_into(Frames(1), &mut early, 1.0);
+        clip.mix_into(Frames(1 + 4 * 1_000), &mut late, 1.0);
         assert_eq!(early, late);
     }
 
@@ -419,7 +418,7 @@ mod tests {
         let clip = Clip::new(buffer, Frames(8), Frames(0), CH);
 
         let mut out = vec![1.0; 8 * CH];
-        clip.mix_into(Frames(0), &mut out);
+        clip.mix_into(Frames(0), &mut out, 1.0);
         assert_eq!(
             out,
             vec![1.0; 8 * CH],
@@ -459,7 +458,7 @@ mod tests {
 
         let clip = Clip::new(buffer, Frames(4), Frames(0), CH);
         let mut out = vec![0.25; 4 * CH];
-        clip.mix_into(Frames(0), &mut out);
+        clip.mix_into(Frames(0), &mut out, 1.0);
         assert_eq!(out, vec![0.75; 4 * CH]);
     }
 }
