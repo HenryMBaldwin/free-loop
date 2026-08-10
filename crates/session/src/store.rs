@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use free_loop_core::{Frames, SLOT_COUNT, SlotAddr, TRACK_COUNT};
-use free_loop_engine::buffer::{Clip, SEGMENT_FRAMES};
+use free_loop_engine::buffer::{AudioBuffer, Clip, SEGMENT_FRAMES, SegmentPool};
 
 use crate::manifest::{ClipEntry, MANIFEST, Manifest};
 
@@ -33,6 +33,19 @@ pub enum SessionError {
     /// A manifest could not be written.
     #[error("could not encode the manifest: {0}")]
     Encode(#[from] toml::ser::Error),
+    /// The session was recorded for a different setup.
+    #[error("session was recorded at {found} {what}, but the device is running {wanted}")]
+    Mismatch {
+        /// What differs.
+        what: &'static str,
+        /// What the device is running.
+        wanted: u32,
+        /// What the session holds.
+        found: u32,
+    },
+    /// A manifest named a pad outside the grid.
+    #[error("{0}")]
+    OffGrid(#[from] free_loop_core::IndexOutOfRange),
     /// An audio file could not be read or written.
     #[error("{path}: {source}")]
     Wav {
@@ -69,6 +82,26 @@ pub struct SessionData<'a> {
     pub channels: u16,
     /// The pads that hold something.
     pub clips: Vec<SavedClip<'a>>,
+}
+
+/// One pad's audio, read back.
+#[derive(Debug)]
+pub struct LoadedClip {
+    /// Which pad it belongs to.
+    pub addr: SlotAddr,
+    /// Whether the pad was sounding.
+    pub playing: bool,
+    /// The audio, with storage owned by the caller.
+    pub clip: Clip,
+}
+
+/// A session read back off disk.
+#[derive(Debug)]
+pub struct LoadedSession {
+    /// The settings it was saved with.
+    pub manifest: Manifest,
+    /// The pads that hold something.
+    pub clips: Vec<LoadedClip>,
 }
 
 /// A directory holding up to one session per pad.
@@ -166,6 +199,51 @@ impl SessionStore {
                 source,
             }
         })
+    }
+
+    /// Reads a session back.
+    ///
+    /// The audio comes back in freshly allocated storage, which the caller owns. Frame
+    /// counts only mean the same thing at the rate they were written at, so a session
+    /// recorded for a different setup is refused rather than played wrong.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError`] if the session is missing, malformed, or was recorded at a
+    /// different sample rate or channel count.
+    pub fn load(
+        &self,
+        addr: SlotAddr,
+        sample_rate: u32,
+        channels: u16,
+    ) -> Result<LoadedSession, SessionError> {
+        let manifest = self.manifest(addr)?;
+        if manifest.sample_rate != sample_rate {
+            return Err(SessionError::Mismatch {
+                what: "Hz",
+                wanted: sample_rate,
+                found: manifest.sample_rate,
+            });
+        }
+        if manifest.channels != channels {
+            return Err(SessionError::Mismatch {
+                what: "channels",
+                wanted: u32::from(channels),
+                found: u32::from(manifest.channels),
+            });
+        }
+
+        let dir = self.dir(addr);
+        let mut clips = Vec::with_capacity(manifest.clips.len());
+        for entry in &manifest.clips {
+            clips.push(LoadedClip {
+                addr: entry.addr()?,
+                playing: entry.playing,
+                clip: read_wav(&dir.join(&entry.file), entry, channels)?,
+            });
+        }
+
+        Ok(LoadedSession { manifest, clips })
     }
 
     /// Deletes a pad's session.
@@ -273,6 +351,43 @@ fn write_wav(
         path: path.display().to_string(),
         source,
     })
+}
+
+/// Reads one clip back into storage the caller owns.
+fn read_wav(path: &Path, entry: &ClipEntry, channels: u16) -> Result<Clip, SessionError> {
+    let mut reader = hound::WavReader::open(path).map_err(|source| SessionError::Wav {
+        path: path.display().to_string(),
+        source,
+    })?;
+
+    let channels = usize::from(channels);
+    let frames = entry.len_frames;
+    let segments = usize::try_from(frames.div_ceil(SEGMENT_FRAMES as u64)).unwrap_or(1);
+    let mut pool = SegmentPool::new(segments.max(1), channels);
+    let mut buffer = AudioBuffer::new(segments.max(1), channels);
+
+    let mut chunk = Vec::with_capacity(SEGMENT_FRAMES * channels);
+    let mut written = 0_u64;
+
+    for sample in reader.samples::<f32>() {
+        chunk.push(sample.map_err(|source| SessionError::Wav {
+            path: path.display().to_string(),
+            source,
+        })?);
+
+        if chunk.len() == chunk.capacity() {
+            written += buffer.write(written, &chunk, &mut pool) as u64;
+            chunk.clear();
+        }
+    }
+    if !chunk.is_empty() {
+        buffer.write(written, &chunk, &mut pool);
+    }
+
+    let mut clip = Clip::new(buffer, Frames(frames), Frames(entry.phase_frames), channels);
+    clip.set_capture_offset(Frames(entry.capture_offset_frames));
+    clip.set_borrowed(true);
+    Ok(clip)
 }
 
 #[cfg(test)]
@@ -533,6 +648,94 @@ mod tests {
         store.remove(addr(4, 4)).unwrap();
         assert!(!store.exists(addr(4, 4)));
         store.remove(addr(4, 4)).unwrap();
+    }
+
+    #[test]
+    fn a_saved_session_reads_back_with_its_audio() {
+        let dir = TempDir::new("roundtrip");
+        let store = SessionStore::new(&dir.0);
+        let audio = clip(200, 3_000);
+        let under = addr(1, 2);
+
+        store
+            .save(
+                under,
+                &data(vec![SavedClip {
+                    addr: addr(4, 5),
+                    playing: true,
+                    clip: &audio,
+                }]),
+            )
+            .unwrap();
+
+        let loaded = store.load(under, 48_000, CH).unwrap();
+        assert_eq!(loaded.clips.len(), 1);
+
+        let read = &loaded.clips[0];
+        assert_eq!(read.addr, addr(4, 5));
+        assert!(read.playing);
+        assert_eq!(read.clip.len(), Frames(200));
+        assert_eq!(read.clip.recorded_at(), Frames(3_000 % 200));
+        assert_eq!(read.clip.capture_offset(), Frames(64));
+        assert!(read.clip.is_borrowed(), "the caller owns the storage");
+
+        let mut out = vec![0.0_f32; 200 * usize::from(CH)];
+        read.clip.mix_into(read.clip.recorded_at(), &mut out);
+        let expected: Vec<f32> = (0..200 * usize::from(CH))
+            .map(|i| i as f32 / 1000.0)
+            .collect();
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn a_clip_longer_than_one_chunk_reads_back_whole() {
+        let dir = TempDir::new("longread");
+        let store = SessionStore::new(&dir.0);
+        let frames = SEGMENT_FRAMES + 777;
+        let audio = clip(frames, 0);
+
+        store
+            .save(
+                addr(0, 0),
+                &data(vec![SavedClip {
+                    addr: addr(0, 0),
+                    playing: false,
+                    clip: &audio,
+                }]),
+            )
+            .unwrap();
+
+        let loaded = store.load(addr(0, 0), 48_000, CH).unwrap();
+        assert_eq!(loaded.clips[0].clip.len(), Frames(frames as u64));
+
+        // The tail is the part a chunking bug would lose.
+        let mut out = vec![0.0_f32; 4 * usize::from(CH)];
+        loaded.clips[0]
+            .clip
+            .mix_into(Frames(frames as u64 - 4), &mut out);
+        let base = (frames - 4) * usize::from(CH);
+        let expected: Vec<f32> = (base..base + 4 * usize::from(CH))
+            .map(|i| i as f32 / 1000.0)
+            .collect();
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn a_session_recorded_for_another_setup_is_refused() {
+        let dir = TempDir::new("mismatch");
+        let store = SessionStore::new(&dir.0);
+        store.save(addr(0, 0), &data(Vec::new())).unwrap();
+
+        assert!(store.load(addr(0, 0), 44_100, CH).is_err());
+        assert!(store.load(addr(0, 0), 48_000, 1).is_err());
+        assert!(store.load(addr(0, 0), 48_000, CH).is_ok());
+    }
+
+    #[test]
+    fn loading_a_pad_with_no_session_is_an_error() {
+        let dir = TempDir::new("missing");
+        let store = SessionStore::new(&dir.0);
+        assert!(store.load(addr(6, 6), 48_000, CH).is_err());
     }
 
     #[test]

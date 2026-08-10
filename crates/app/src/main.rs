@@ -20,7 +20,7 @@ use free_loop::config::{self, Config};
 use free_loop::control::{Controller, Request};
 use free_loop_audio::{AudioIo, Negotiated, open};
 use free_loop_core::{Command, Event};
-use free_loop_engine::{Engine, Housekeeping, Snapshot};
+use free_loop_engine::{Engine, Housekeeping, LoadMessage, Loader, Snapshot};
 use free_loop_session::{SavedClip, SessionData, SessionStore};
 use free_loop_surface::{ControlSurface, LaunchpadX, MockSurface, SurfaceError, SurfaceEvent};
 
@@ -187,16 +187,37 @@ fn run(s: Session<'_>) {
         // Returns clips the engine finished with while something else was reading them.
         housekeeping.recycler.run();
 
-        for request in controller.drain_requests() {
-            let Request::SaveSession(addr) = request;
-            // The audio lives in the engine, so ask for it and save once it arrives.
-            pending_save = Some(addr);
-            snapshots.clear();
-            if io.send(Command::Snapshot).is_err() {
-                eprintln!("could not ask for a snapshot");
-                pending_save = None;
+        // Collected first: acting on a request touches the controller again.
+        let requests: Vec<Request> = controller.drain_requests().collect();
+        for request in requests {
+            match request {
+                Request::SaveSession(addr) => {
+                    // The audio lives in the engine, so ask for it and save once it
+                    // arrives.
+                    pending_save = Some(addr);
+                    snapshots.clear();
+                    if io.send(Command::Snapshot).is_err() {
+                        eprintln!("could not ask for a snapshot");
+                        pending_save = None;
+                    }
+                }
+                Request::LoadSession(addr) => {
+                    match load(store, addr, &mut housekeeping.loader, &negotiated) {
+                        Ok(()) => {
+                            println!("loaded session {}{}", addr.track.index(), addr.slot.index());
+                            controller.session_loaded(addr, true);
+                        }
+                        Err(error) => {
+                            eprintln!("load failed: {error}");
+                            controller.cancel_picker();
+                        }
+                    }
+                }
             }
         }
+
+        // Storage the engine has finished with comes back here to be dropped.
+        drop(housekeeping.recycler.take_borrowed().collect::<Vec<_>>());
 
         for command in controller.drain_commands() {
             if io.send(command).is_err() {
@@ -278,6 +299,32 @@ fn save(
             clips,
         },
     )
+}
+
+/// Reads a session off disk and hands it to the engine.
+fn load(
+    store: &SessionStore,
+    addr: free_loop_core::SlotAddr,
+    loader: &mut Loader,
+    negotiated: &Negotiated,
+) -> Result<(), Box<dyn Error>> {
+    let channels = u16::try_from(negotiated.channels).unwrap_or(2);
+    let session = store.load(addr, negotiated.sample_rate, channels)?;
+    let tempo = free_loop_core::Tempo::new(session.manifest.tempo)?;
+
+    if !loader.ready() {
+        return Err("the audio thread has not drained the load queue".into());
+    }
+    loader.send(LoadMessage::Begin { tempo })?;
+    for loaded in session.clips {
+        loader.send(LoadMessage::Clip {
+            addr: loaded.addr,
+            clip: std::sync::Arc::new(loaded.clip),
+            playing: loaded.playing,
+        })?;
+    }
+    loader.send(LoadMessage::End)?;
+    Ok(())
 }
 
 /// Connects a Launchpad, falling back to a surface with no hardware behind it.

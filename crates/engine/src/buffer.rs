@@ -162,6 +162,7 @@ pub struct Clip {
     recorded_at: Frames,
     channels: usize,
     capture_offset: Frames,
+    borrowed: bool,
 }
 
 impl Clip {
@@ -174,6 +175,7 @@ impl Clip {
             recorded_at,
             channels,
             capture_offset: Frames::ZERO,
+            borrowed: false,
         }
     }
 
@@ -199,6 +201,19 @@ impl Clip {
     /// Records the round trip compensated for.
     pub fn set_capture_offset(&mut self, offset: Frames) {
         self.capture_offset = offset;
+    }
+
+    /// Whether this clip's storage belongs to whoever handed it to the engine.
+    ///
+    /// The engine returns borrowed storage instead of absorbing it, so its pools stay the
+    /// size they were allocated at however many sessions are loaded.
+    pub fn is_borrowed(&self) -> bool {
+        self.borrowed
+    }
+
+    /// Marks the storage as belonging to someone else.
+    pub fn set_borrowed(&mut self, borrowed: bool) {
+        self.borrowed = borrowed;
     }
 
     /// An empty clip sized for `max_segments`, ready to be recorded into.
