@@ -21,6 +21,18 @@ use crate::load::{LoadInbox, LoadMessage, Loader};
 use crate::recycle::{Recycler, Retirement, channel};
 use crate::snapshot::{Snapshot, SnapshotReader, SnapshotWriter};
 
+/// Moves an anchor back by `shift`, wrapped into the loop rather than clamped.
+///
+/// Only `recorded_at` modulo the loop length affects playback, so wrapping keeps the
+/// phase exact. Subtracting directly would clamp at zero for anything recorded before
+/// the reference, which is the case a uniform shift exists to protect.
+fn shifted_anchor(recorded_at: Frames, len: Frames, shift: Frames) -> Frames {
+    if len.0 == 0 {
+        return Frames::ZERO;
+    }
+    Frames((recorded_at.0 % len.0 + len.0 - shift.0 % len.0) % len.0)
+}
+
 /// Saturating `u64` to `usize`.
 fn as_usize(value: u64) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
@@ -438,7 +450,7 @@ impl Engine {
             Command::StopAll => self.with_session(|session, audio| {
                 session.stop_all(&ctx, &mut |a, e| audio.apply(a, e, sink));
             }),
-            Command::Rewind => self.rewind(),
+            Command::Rewind => self.rewind(sink),
             Command::Snapshot => self.publish_snapshot(sink),
             Command::SetPaused(paused) => self.set_paused(paused, sink),
             Command::SetClickEnabled(enabled) => self.click.set_enabled(enabled),
@@ -454,27 +466,56 @@ impl Engine {
         apply(session, audio);
     }
 
-    /// Sends the transport back to the start with every loop at its beginning.
+    /// Sends the transport back to the start, with the longest loop at its beginning.
     ///
-    /// Loops are normally anchored to the grid position they were played at, which is
-    /// what keeps them in step with each other. Restarting means re-anchoring them all
-    /// to the same instant so they begin together.
-    fn rewind(&mut self) {
+    /// Every anchor moves by the same amount rather than to zero. Zeroing them would put
+    /// each loop at its own beginning, which shifts loops against each other: a four bar
+    /// take recorded while a two bar one was halfway through is meant to stay halfway
+    /// through. A uniform shift keeps every one of those relationships and only decides
+    /// where the ensemble starts.
+    ///
+    /// The longest loop is the reference, since it is the one that sets the phrase.
+    fn rewind(&mut self, sink: &mut impl EventSink) {
+        let shift = self.reference_anchor();
+
+        // A take spanning a rewind would splice two moments together, and its start would
+        // sit ahead of the transport.
+        let ctx = self.ctx();
+        self.with_session(|session, audio| {
+            session.cancel_recordings(&ctx, &mut |a, e| audio.apply(a, e, sink));
+        });
+
         self.position = Frames::ZERO;
         self.last_boundary = None;
         self.resync_clock();
+
+        // Anything waiting on a bar line was scheduled against the old position, which is
+        // now far ahead. Retargeting fires it at the start instead of stranding it.
+        self.session.retarget_pending(Frames::ZERO);
 
         for addr in SlotAddr::all() {
             let Some(clip) = self.audio.clips[addr.track.index()][addr.slot.index()].as_mut()
             else {
                 continue;
             };
+            let moved = shifted_anchor(clip.recorded_at(), clip.len(), shift);
             // A clip somebody is reading keeps its old anchor. Rare, and the next rewind
             // catches it.
             if let Some(inner) = Arc::get_mut(clip) {
-                inner.set_recorded_at(Frames::ZERO);
+                inner.set_recorded_at(moved);
             }
         }
+    }
+
+    /// The anchor everything is measured against when rewinding.
+    ///
+    /// The longest loop, and the earliest of those if several share a length, so the
+    /// choice does not wander between rewinds.
+    fn reference_anchor(&self) -> Frames {
+        SlotAddr::all()
+            .filter_map(|addr| self.audio.clip(addr))
+            .min_by_key(|clip| (core::cmp::Reverse(clip.len()), clip.recorded_at()))
+            .map_or(Frames::ZERO, |clip| clip.recorded_at())
     }
 
     /// Installs anything the loader has queued.
@@ -534,7 +575,7 @@ impl Engine {
             self.paused = true;
             // Starting a loaded session part way through its loops is never what was
             // wanted, so it begins at the beginning.
-            self.rewind();
+            self.rewind(sink);
         }
         self.emit_changes(&before, sink);
     }
@@ -754,6 +795,49 @@ impl Engine {
             if before.state(addr) != state {
                 sink.event(Event::SlotChanged { addr, state });
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, reason = "tests should fail loudly")]
+
+    use super::*;
+
+    #[test]
+    fn an_anchor_before_the_reference_wraps_rather_than_clamping() {
+        let len = Frames(1_000);
+
+        // Recorded 300 frames before the reference. Clamping would put it at zero and
+        // lose the relationship.
+        let moved = shifted_anchor(Frames(700), len, Frames(1_000));
+        assert_eq!(moved, Frames(700));
+
+        let reference = shifted_anchor(Frames(1_000), len, Frames(1_000));
+        assert_eq!(reference, Frames::ZERO);
+    }
+
+    #[test]
+    fn a_uniform_shift_keeps_every_gap() {
+        let len = Frames(1_000);
+        let shift = Frames(2_345);
+
+        let gap = |a: u64, b: u64| {
+            let one = shifted_anchor(Frames(a), len, shift).0;
+            let two = shifted_anchor(Frames(b), len, shift).0;
+            (one + len.0 - two) % len.0
+        };
+
+        assert_eq!(gap(700, 400), 300);
+        assert_eq!(gap(400, 700), 700);
+    }
+
+    #[test]
+    fn a_shifted_anchor_stays_inside_the_loop() {
+        for recorded_at in [0, 1, 999, 1_000, 123_456] {
+            let moved = shifted_anchor(Frames(recorded_at), Frames(1_000), Frames(7_777));
+            assert!(moved.0 < 1_000);
         }
     }
 }
