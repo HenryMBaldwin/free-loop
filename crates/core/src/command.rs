@@ -14,6 +14,8 @@ pub enum Command {
     StopTrack(TrackId),
     /// Stop everything, immediately. Recordings in progress are discarded.
     StopAll,
+    /// Publish a reference to every pad that holds a clip.
+    Snapshot,
     /// Freeze or resume the transport.
     ///
     /// A frozen transport holds its position, so loops keep their phase and pick up

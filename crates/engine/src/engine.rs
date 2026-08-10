@@ -18,6 +18,7 @@ use std::sync::Arc;
 use crate::buffer::{Clip, SEGMENT_FRAMES, SegmentPool};
 use crate::click::{Click, ClickConfig};
 use crate::recycle::{Recycler, Retirement, channel};
+use crate::snapshot::{Snapshot, SnapshotReader, SnapshotWriter};
 
 /// Saturating `u64` to `usize`.
 fn as_usize(value: u64) -> usize {
@@ -131,6 +132,7 @@ struct Audio {
     shells: Vec<Arc<Clip>>,
     segments: SegmentPool,
     retirement: Retirement,
+    snapshots: SnapshotWriter,
     next_clip_id: ClipId,
     /// Copy of [`Engine::capture_offset`], since effects are applied from here.
     capture_offset: Frames,
@@ -235,6 +237,15 @@ impl Audio {
     }
 }
 
+/// The half of the engine that runs off the audio thread.
+#[derive(Debug)]
+pub struct Housekeeping {
+    /// Returns clips that were being read when the engine finished with them.
+    pub recycler: Recycler,
+    /// Receives clips the engine publishes on [`Command::Snapshot`].
+    pub snapshots: SnapshotReader,
+}
+
 /// The realtime engine.
 #[derive(Debug)]
 pub struct Engine {
@@ -256,14 +267,12 @@ pub struct Engine {
 impl Engine {
     /// Builds an engine and allocates its pools.
     ///
-    /// The [`Recycler`] returns clips that were being read elsewhere when the engine
-    /// finished with them. Run it off the audio thread; clips nobody else holds never
-    /// reach it.
+    /// [`Housekeeping`] is the off-thread half. Run it anywhere except the audio thread.
     ///
     /// # Errors
     ///
     /// [`EngineError`] if the configuration is not usable.
-    pub fn new(config: EngineConfig) -> Result<(Self, Recycler), EngineError> {
+    pub fn new(config: EngineConfig) -> Result<(Self, Housekeeping), EngineError> {
         if config.channels == 0 {
             return Err(EngineError::ZeroChannels);
         }
@@ -287,6 +296,7 @@ impl Engine {
         let max_segments = as_usize(longest.div_ceil(as_u64(SEGMENT_FRAMES))).max(1);
 
         let (retirement, recycler) = channel();
+        let (snapshots, snapshot_reader) = crate::snapshot::channel();
         let shells = (0..TRACK_COUNT * SLOT_COUNT)
             .map(|_| Arc::new(Clip::empty(max_segments, config.channels)))
             .collect();
@@ -301,6 +311,7 @@ impl Engine {
                 shells,
                 segments: SegmentPool::new(config.segment_pool, config.channels),
                 retirement,
+                snapshots,
                 next_clip_id: ClipId(0),
                 capture_offset: config.capture_offset,
             },
@@ -313,7 +324,13 @@ impl Engine {
             sample_rate: config.sample_rate,
             time_signature: config.time_signature,
         };
-        Ok((engine, recycler))
+        Ok((
+            engine,
+            Housekeeping {
+                recycler,
+                snapshots: snapshot_reader,
+            },
+        ))
     }
 
     /// The transport position, in frames from the origin.
@@ -391,6 +408,7 @@ impl Engine {
             Command::StopAll => self.with_session(|session, audio| {
                 session.stop_all(&ctx, &mut |a, e| audio.apply(a, e, sink));
             }),
+            Command::Snapshot => self.publish_snapshot(sink),
             Command::SetPaused(paused) => self.set_paused(paused, sink),
             Command::SetClickEnabled(enabled) => self.click.set_enabled(enabled),
             Command::SetClickLevel(level) => self.click.set_level(level),
@@ -403,6 +421,29 @@ impl Engine {
     fn with_session(&mut self, apply: impl FnOnce(&mut SessionModel, &mut Audio)) {
         let Self { session, audio, .. } = self;
         apply(session, audio);
+    }
+
+    /// Publishes a reference to every pad that holds a clip.
+    fn publish_snapshot(&mut self, sink: &mut impl EventSink) {
+        let mut published = 0;
+        for addr in SlotAddr::all() {
+            let state = self.session.state(addr);
+            // A pad still recording has no finished audio to publish.
+            if state.is_recording() {
+                continue;
+            }
+            let Some(clip) = self.audio.clip(addr) else {
+                continue;
+            };
+            let snapshot = Snapshot {
+                addr,
+                state,
+                clip: Arc::clone(clip),
+            };
+            self.audio.snapshots.publish(snapshot);
+            published += 1;
+        }
+        sink.event(Event::SnapshotComplete { clips: published });
     }
 
     fn set_paused(&mut self, paused: bool, sink: &mut impl EventSink) {

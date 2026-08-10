@@ -53,4 +53,12 @@ pub enum Event {
     },
     /// A tempo change was refused because clips already exist.
     TempoRejected,
+    /// Every pad holding a clip has been published.
+    ///
+    /// Sent even when nothing was, so a reader can tell an empty session from a request
+    /// that has not been answered yet.
+    SnapshotComplete {
+        /// How many pads were published.
+        clips: u32,
+    },
 }

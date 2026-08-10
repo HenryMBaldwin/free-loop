@@ -3,7 +3,7 @@
 //! The one place the looper's colour scheme is decided. Pure, so the whole scheme is
 //! testable without a device.
 
-use free_loop_core::{SessionModel, SlotAddr, SlotState};
+use free_loop_core::{SLOT_COUNT, SessionModel, SlotAddr, SlotState};
 
 use crate::event::Control;
 use crate::led::{BEAT_LEDS, FIRST_BEAT_LED, Led, LedColor, LedFrame};
@@ -97,6 +97,40 @@ pub fn beat_indicator(frame: &mut LedFrame, chrome: Chrome) {
         Led::solid(LedColor::Blue)
     };
     frame.set_control(FIRST_BEAT_LED + beat, led);
+}
+
+/// Paints the session picker over the grid.
+///
+/// `existing` has a bit set per pad that holds a session, indexed track-major. `current`
+/// is the session in use, shown differently so an overwrite is deliberate. `active` is
+/// the button that opened the picker, flashed so the mode is obvious.
+pub fn picker(
+    existing: u64,
+    current: Option<SlotAddr>,
+    chrome: Chrome,
+    active: Control,
+) -> LedFrame {
+    let mut frame = LedFrame::new();
+
+    for addr in SlotAddr::all() {
+        let bit = 1_u64 << (addr.track.index() * SLOT_COUNT + addr.slot.index());
+        let led = if current == Some(addr) {
+            Led::solid(LedColor::Green)
+        } else if existing & bit != 0 {
+            Led::dim(LedColor::White)
+        } else {
+            Led::OFF
+        };
+        frame.set_pad(addr, led);
+    }
+
+    for button in Control::all() {
+        frame.set_control(button.index(), control(button, chrome));
+    }
+    frame.set_control(active.index(), Led::flash(LedColor::White));
+    frame.set_side(PAUSE_SIDE, pause_button(chrome));
+
+    frame
 }
 
 /// Paints the whole surface.
@@ -321,6 +355,48 @@ mod tests {
         let painted = frame(&session, Chrome::default());
         assert_eq!(painted.pad(addr(2, 3)), Led::flash(LedColor::Red));
         assert_eq!(painted.pad(addr(3, 2)), Led::OFF);
+    }
+
+    #[test]
+    fn the_picker_marks_saved_pads_and_the_current_one() {
+        let saved = addr(0, 1);
+        let current = addr(2, 3);
+        let bit = |a: SlotAddr| 1_u64 << (a.track.index() * SLOT_COUNT + a.slot.index());
+
+        let painted = picker(
+            bit(saved) | bit(current),
+            Some(current),
+            Chrome::default(),
+            Control::SaveSession,
+        );
+
+        assert_eq!(painted.pad(saved), Led::dim(LedColor::White));
+        assert_eq!(painted.pad(current), Led::solid(LedColor::Green));
+        assert_ne!(
+            painted.pad(current),
+            painted.pad(saved),
+            "an overwrite of the session in use must look different"
+        );
+        assert_eq!(painted.pad(addr(7, 7)), Led::OFF);
+    }
+
+    #[test]
+    fn the_picker_flashes_the_button_that_opened_it() {
+        let painted = picker(0, None, Chrome::default(), Control::SaveSession);
+        assert_eq!(
+            painted.control(Control::SaveSession.index()),
+            Led::flash(LedColor::White)
+        );
+        assert_ne!(
+            painted.control(Control::LoadSession.index()),
+            Led::flash(LedColor::White)
+        );
+    }
+
+    #[test]
+    fn the_picker_keeps_the_transport_button() {
+        let painted = picker(0, None, Chrome::default(), Control::LoadSession);
+        assert!(painted.side(PAUSE_SIDE).is_lit());
     }
 
     #[test]
