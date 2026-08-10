@@ -4,9 +4,9 @@
 //! device or a MIDI port: [`Engine::process`] takes an input slice and fills an output
 //! slice, so it can be driven by a device callback or by a test at any block size.
 //!
-//! - [`buffer`] — pooled audio storage for recorded clips.
-//! - [`click`] — the metronome.
-//! - [`recycle`] — returning retired clips to the pools without dropping them on the
+//! - [`buffer`]: pooled audio storage for recorded clips.
+//! - [`click`]: the metronome.
+//! - [`recycle`]: returning retired clips to the pools without dropping them on the
 //!   audio thread.
 
 pub mod buffer;

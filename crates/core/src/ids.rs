@@ -84,9 +84,9 @@ impl SlotId {
 /// A cell on the grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SlotAddr {
-    /// Which track — the grid column.
+    /// Which track. The grid row.
     pub track: TrackId,
-    /// Which slot on that track — the grid row.
+    /// Which slot on that track. The grid column.
     pub slot: SlotId,
 }
 

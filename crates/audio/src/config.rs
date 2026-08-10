@@ -106,11 +106,10 @@ fn format_rank(format: SampleFormat) -> Option<u8> {
 
 /// How far a rate misses.
 ///
-/// With no request, ranking by position in [`PREFERRED_RATES`] is what actually makes
-/// the preference bite: `CoreAudio` reports each discrete rate as its own single-rate
-/// range, so preferring 48 kHz *within* a range never gets the chance to choose between
-/// them. Rates outside the list rank below every rate in it, closest to the top
-/// preference first.
+/// With no request, rates are ranked by position in [`PREFERRED_RATES`]. `CoreAudio`
+/// reports each discrete rate as its own single-rate range, so preferring 48 kHz within a
+/// range never gets to choose between them. Rates outside the list rank below every rate
+/// in it, closest to the top preference first.
 fn rate_penalty(rate: u32, wanted: Option<u32>) -> u32 {
     if let Some(wanted) = wanted {
         return wanted.abs_diff(rate);
@@ -141,8 +140,8 @@ fn pick_rate(range: &SupportedStreamConfigRange, wanted: Option<u32>) -> u32 {
     max
 }
 
-/// How badly a channel count misses. Extra channels are usable — the mapper takes the
-/// first few — so missing channels is the far worse outcome.
+/// How badly a channel count misses. Extra channels are usable, since the mapper takes
+/// the first few, so missing channels is the far worse outcome.
 fn channel_penalty(have: u16, want: u16) -> u32 {
     if have >= want {
         u32::from(have - want)

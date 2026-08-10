@@ -151,12 +151,12 @@ impl TimeSignature {
         })
     }
 
-    /// Beats in one bar — the numerator.
+    /// Beats in one bar. The numerator.
     pub fn beats_per_bar(self) -> u32 {
         self.beats_per_bar
     }
 
-    /// Note value that gets the beat — the denominator.
+    /// Note value that gets the beat. The denominator.
     pub fn beat_unit(self) -> u32 {
         self.beat_unit
     }
@@ -319,7 +319,7 @@ impl BarGrid {
     ///
     /// Rounds back to the bar line that just passed, so a take is whatever whole bars
     /// were finished before the press. A bar in progress is discarded rather than
-    /// completed — press after the bar you want, not during it.
+    /// completed. Press after the bar you want, not during it.
     ///
     /// Result is at least one bar. `start` must be on a boundary.
     pub fn quantize_record_end(self, start: Frames, pressed_at: Frames) -> Frames {

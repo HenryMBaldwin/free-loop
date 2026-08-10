@@ -6,9 +6,9 @@
 //! clock, so the ring level is stable and the cushion between them is a fixed, known
 //! latency.
 //!
-//! - [`config`] — picking a configuration from what a device offers.
-//! - [`ring`] — the capture ring and channel mapping.
-//! - [`stream`] — opening devices and driving the engine.
+//! - [`config`]: picking a configuration from what a device offers.
+//! - [`ring`]: the capture ring and channel mapping.
+//! - [`stream`]: opening devices and driving the engine.
 
 pub mod config;
 pub mod error;
