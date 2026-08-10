@@ -482,12 +482,12 @@ fn watch_devices(
     pause_on_disconnect: bool,
 ) {
     match io.tick(now) {
-        Some(DeviceChange::Lost) => {
+        Some(DeviceChange::Lost(loss)) => {
             if pause_on_disconnect {
                 controller.pause();
-                eprintln!("audio: device gone. paused");
+                eprintln!("audio: device gone ({loss}). paused");
             } else {
-                eprintln!("audio: device gone. the set is held where it stopped");
+                eprintln!("audio: device gone ({loss}). held where it stopped");
             }
         }
         Some(DeviceChange::Back) => println!("audio: device back"),
