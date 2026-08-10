@@ -129,6 +129,13 @@ impl SessionModel {
         }
     }
 
+    /// Empties every pad.
+    pub fn clear_all(&mut self, ctx: &Ctx, sink: &mut impl FnMut(SlotAddr, Effect)) {
+        for addr in SlotAddr::all() {
+            self.apply(addr, SlotInput::Clear, ctx, sink);
+        }
+    }
+
     /// Stops everything immediately. Recordings in progress are discarded.
     pub fn stop_all(&mut self, ctx: &Ctx, sink: &mut impl FnMut(SlotAddr, Effect)) {
         for addr in SlotAddr::all() {
@@ -435,6 +442,24 @@ mod tests {
             SlotState::Playing { clip: ClipId(0) },
             "a playing clip must survive the freeze"
         );
+    }
+
+    #[test]
+    fn clearing_everything_leaves_an_empty_grid() {
+        let mut model = SessionModel::new();
+        record(&mut model, addr(0, 0), 1, 1, 0);
+        record(&mut model, addr(1, 0), 3, 1, 1);
+
+        let mut released = 0;
+        model.clear_all(&ctx(5 * BAR, 2), &mut |_, effect| {
+            if matches!(effect, Effect::ReleaseClip { .. }) {
+                released += 1;
+            }
+        });
+
+        assert_eq!(released, 2);
+        assert!(SlotAddr::all().all(|a| model.state(a) == SlotState::Empty));
+        assert!(!model.has_any_clip());
     }
 
     #[test]

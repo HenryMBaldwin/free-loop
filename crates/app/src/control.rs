@@ -14,8 +14,8 @@ use free_loop_core::{
     column_mask, pad_bit, row_mask,
 };
 use free_loop_surface::{
-    Axis, Chrome, Control, Led, LedColor, LedFrame, MUTE_SIDE, PAUSE_SIDE, SELECTED, SOLO_SIDE,
-    SurfaceEvent, paint,
+    Axis, Chrome, Control, Led, LedColor, LedFrame, MUTE_SIDE, NEW_SIDE, PAUSE_SIDE, SELECTED,
+    SOLO_SIDE, SurfaceEvent, paint,
 };
 
 /// Beats per minute one press of the tempo buttons moves.
@@ -241,6 +241,24 @@ impl Controller {
         self.dirty = true;
     }
 
+    /// Empties everything and leaves the picker on a session with no name.
+    fn start_fresh(&mut self) {
+        self.session = SessionModel::new();
+        self.chrome.muted = 0;
+        self.chrome.soloed = 0;
+        self.chrome.paused = false;
+        self.current = None;
+        self.mode = Mode::Perform;
+
+        self.commands.push(Command::ClearAll);
+        self.commands.push(Command::SetMutes {
+            muted: 0,
+            soloed: 0,
+        });
+        self.commands.push(Command::SetPaused(false));
+        self.dirty = true;
+    }
+
     /// Opens a picker, or closes it if it was already open.
     fn set_mode(&mut self, wanted: Mode) {
         self.mode = if self.mode == wanted {
@@ -330,6 +348,11 @@ impl Controller {
             SurfaceEvent::ControlPressed(Control::Axis) => {
                 self.chrome.axis = self.chrome.axis.flipped();
                 self.dirty = true;
+            }
+            SurfaceEvent::SidePressed { index }
+                if usize::from(index) == NEW_SIDE && self.mode == Mode::LoadPicker =>
+            {
+                self.start_fresh();
             }
             SurfaceEvent::SidePressed { index } if usize::from(index) == MUTE_SIDE => {
                 self.set_mode(Mode::Mute);
@@ -770,6 +793,54 @@ mod tests {
 
         controller.on_surface(side(MUTE_SIDE), T0);
         assert_eq!(controller.mode(), Mode::Perform);
+    }
+
+    #[test]
+    fn a_fresh_session_empties_everything() {
+        let mut controller = controller();
+        controller.on_engine(Event::SlotChanged {
+            addr: addr(0, 0),
+            state: SlotState::Playing { clip: ClipId(0) },
+        });
+        controller.on_surface(side(MUTE_SIDE), T0);
+        press(&mut controller, addr(0, 0), T0);
+        controller.on_surface(side(MUTE_SIDE), T0);
+        controller.session_loaded(addr(2, 2), true);
+        commands(&mut controller);
+
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        controller.on_surface(side(NEW_SIDE), T0);
+
+        assert_eq!(controller.mode(), Mode::Perform);
+        assert_eq!(controller.current_session(), None, "nothing to save over");
+        assert!(!controller.paused(), "ready to record straight away");
+
+        let sent = commands(&mut controller);
+        assert!(sent.contains(&Command::ClearAll));
+        assert!(sent.contains(&Command::SetMutes {
+            muted: 0,
+            soloed: 0,
+        }));
+
+        let frame = controller.take_frame().unwrap();
+        assert!(
+            SlotAddr::all().all(|a| !frame.pad(a).is_lit()),
+            "an empty grid"
+        );
+    }
+
+    #[test]
+    fn a_fresh_session_is_only_offered_from_the_load_picker() {
+        let mut controller = controller();
+        controller.on_surface(side(NEW_SIDE), T0);
+        assert!(commands(&mut controller).is_empty(), "not while playing");
+
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        controller.on_surface(side(NEW_SIDE), T0);
+        assert!(
+            commands(&mut controller).is_empty(),
+            "and not from the save picker"
+        );
     }
 
     #[test]
