@@ -1434,6 +1434,23 @@ mod declick {
     }
 
     #[test]
+    fn a_tempo_change_behind_a_clear_is_taken() {
+        let (mut harness, _, _) = playing(128);
+        let before = harness.engine.grid().bars(1);
+
+        // What a fresh session sends.
+        harness.command(Command::ClearAll);
+        harness.command(Command::SetTempo(Tempo::new(90.0).unwrap()));
+
+        let events = harness.drain_events();
+        assert!(!events.contains(&Event::TempoRejected));
+        assert!(
+            harness.engine.grid().bars(1) > before,
+            "a slower bar is longer"
+        );
+    }
+
+    #[test]
     fn a_launch_fades_in() {
         let (mut harness, pad, _) = playing(128);
         // A press on a sounding pad stops it at the next bar line, not at once.
