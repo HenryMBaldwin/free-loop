@@ -5,6 +5,7 @@
 
 use crate::ids::{SLOT_COUNT, SlotAddr, SlotId, TRACK_COUNT, TrackId};
 use crate::slot::{Ctx, Effect, SlotInput, SlotState, step};
+use crate::time::Frames;
 
 /// The state of all 64 pads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +97,23 @@ impl SessionModel {
     ) {
         for addr in Self::track_addrs(track) {
             self.apply(addr, SlotInput::Stop, ctx, sink);
+        }
+    }
+
+    /// Moves every transition still waiting on a bar line to fire at `at` instead.
+    ///
+    /// A queued transition holds the frame it is due at, so moving the transport leaves
+    /// it scheduled against a position that may now be far ahead. Retargeting keeps the
+    /// gesture rather than stranding it.
+    pub fn retarget_pending(&mut self, at: Frames) {
+        for addr in SlotAddr::all() {
+            let state = match self.state(addr) {
+                SlotState::QueuedRecord { .. } => SlotState::QueuedRecord { at },
+                SlotState::QueuedPlay { clip, .. } => SlotState::QueuedPlay { clip, at },
+                SlotState::QueuedStop { clip, .. } => SlotState::QueuedStop { clip, at },
+                other => other,
+            };
+            self.set(addr, state);
         }
     }
 
@@ -350,6 +368,49 @@ mod tests {
             SlotState::Stopped { clip: ClipId(0) }
         );
         assert_eq!(model.state(addr(2, 0)), SlotState::Empty);
+    }
+
+    #[test]
+    fn retargeting_moves_pending_transitions_without_firing_them() {
+        let mut model = SessionModel::new();
+        let playing = addr(0, 0);
+        let armed = addr(1, 0);
+
+        record(&mut model, playing, 1, 1, 0);
+        model.press(playing, &ctx(3 * BAR + 100, 1), &mut ignore);
+        model.press(armed, &ctx(3 * BAR + 100, 1), &mut ignore);
+
+        assert_eq!(
+            model.state(playing),
+            SlotState::QueuedStop {
+                clip: ClipId(0),
+                at: Frames(4 * BAR)
+            }
+        );
+
+        model.retarget_pending(Frames::ZERO);
+        assert_eq!(
+            model.state(playing),
+            SlotState::QueuedStop {
+                clip: ClipId(0),
+                at: Frames::ZERO
+            }
+        );
+        assert_eq!(
+            model.state(armed),
+            SlotState::QueuedRecord { at: Frames::ZERO }
+        );
+    }
+
+    #[test]
+    fn retargeting_leaves_settled_pads_alone() {
+        let mut model = SessionModel::new();
+        record(&mut model, addr(0, 0), 1, 1, 0);
+        let before = model.state(addr(0, 0));
+
+        model.retarget_pending(Frames::ZERO);
+        assert_eq!(model.state(addr(0, 0)), before);
+        assert_eq!(model.state(addr(5, 5)), SlotState::Empty);
     }
 
     #[test]
