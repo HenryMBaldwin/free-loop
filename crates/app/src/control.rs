@@ -34,6 +34,12 @@ pub const TEMPO_HOLD_DELAY: Duration = Duration::from_millis(400);
 /// How often a held tempo button repeats.
 pub const TEMPO_HOLD_INTERVAL: Duration = Duration::from_millis(120);
 
+/// How long the bpm stays up before the grid comes back.
+///
+/// The device scrolls text across the grid and says nothing when it finishes, so the
+/// time it needs is waited out rather than detected.
+pub const TEXT_DURATION: Duration = Duration::from_millis(1_400);
+
 /// Bit for a pad in the grid masks.
 fn bit(addr: SlotAddr) -> u64 {
     1 << (addr.track.index() * SLOT_COUNT + addr.slot.index())
@@ -113,6 +119,8 @@ pub struct Controller {
     tempo_hold: Option<TempoHold>,
     /// A display change the caller has not picked up yet.
     text: Option<TextUpdate>,
+    /// When the grid comes back, while text has it.
+    text_until: Option<Duration>,
     mode: Mode,
     /// A bit per pad that holds a session.
     sessions: u64,
@@ -144,6 +152,7 @@ impl Controller {
             requests: Vec::new(),
             tempo_hold: None,
             text: None,
+            text_until: None,
             mode: Mode::Perform,
             sessions: 0,
             current: None,
@@ -264,7 +273,7 @@ impl Controller {
             SurfaceEvent::ControlPressed(Control::TempoDown) => self.press_tempo(-1.0, now),
             SurfaceEvent::ControlPressed(Control::TempoUp) => self.press_tempo(1.0, now),
             SurfaceEvent::ControlReleased(Control::TempoDown | Control::TempoUp) => {
-                self.release_tempo();
+                self.release_tempo(now);
             }
             SurfaceEvent::ControlPressed(Control::StopAll) => self.commands.push(Command::StopAll),
             SurfaceEvent::ControlPressed(Control::SaveSession) => {
@@ -292,6 +301,12 @@ impl Controller {
     /// else happens to arrive.
     pub fn tick(&mut self, now: Duration) {
         self.repeat_tempo(now);
+
+        if self.text_until.is_some_and(|until| now >= until) {
+            self.text_until = None;
+            self.text = Some(TextUpdate::Stop);
+            self.dirty = true;
+        }
 
         let mut warning = 0;
 
@@ -327,23 +342,28 @@ impl Controller {
         });
     }
 
-    /// Stops the repeat and puts the grid back.
-    fn release_tempo(&mut self) {
-        // Only take the display back if the hold actually got as far as showing it.
-        if self
+    /// Stops the repeat and reports where the tempo landed.
+    ///
+    /// The number is shown here rather than during the hold because each update restarts
+    /// the scroll from the edge, so one sent every repeat never gets anywhere.
+    fn release_tempo(&mut self, now: Duration) {
+        let repeated = self
             .tempo_hold
             .take()
-            .is_some_and(|hold| hold.last > hold.since)
-        {
-            self.text = Some(TextUpdate::Stop);
-            self.dirty = true;
+            .is_some_and(|hold| hold.last > hold.since);
+        if !repeated {
+            return;
         }
+
+        let bpm = self.tempo.round();
+        #[expect(clippy::cast_possible_truncation, reason = "tempo is under 300")]
+        let shown = bpm as i32;
+
+        self.text = Some(TextUpdate::Show(shown.to_string()));
+        self.text_until = Some(now + TEXT_DURATION);
     }
 
     /// Moves the tempo again while a button stays down.
-    ///
-    /// The number is invisible on the grid, so a repeat that moves five at a time shows
-    /// it. A single tap does not, since the text takes the grid over to say it.
     fn repeat_tempo(&mut self, now: Duration) {
         let Some(hold) = self.tempo_hold else {
             return;
@@ -356,11 +376,6 @@ impl Controller {
 
         self.nudge_tempo(hold.delta);
         self.tempo_hold = Some(TempoHold { last: now, ..hold });
-
-        let bpm = self.tempo.round();
-        #[expect(clippy::cast_possible_truncation, reason = "tempo is under 300")]
-        let shown = bpm as i32;
-        self.text = Some(TextUpdate::Show(shown.to_string()));
     }
 
     fn nudge_tempo(&mut self, delta: f64) {
@@ -413,7 +428,8 @@ impl Controller {
 
     /// The frame to show, if anything changed since it was last taken.
     pub fn take_frame(&mut self) -> Option<&LedFrame> {
-        if !self.dirty {
+        // Text has the grid, and a frame sent now would cut it off part way.
+        if !self.dirty || self.text_until.is_some() {
             return None;
         }
 
@@ -766,18 +782,46 @@ mod tests {
     }
 
     #[test]
-    fn a_repeat_shows_the_bpm_and_gives_the_grid_back() {
+    fn a_repeat_says_nothing_until_the_button_is_let_go() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
+
+        for at in (400..1_000).step_by(20) {
+            controller.tick(millis(at));
+            assert_eq!(
+                controller.take_text(),
+                None,
+                "an update every repeat restarts the scroll and it never finishes"
+            );
+        }
+
+        controller.on_surface(
+            SurfaceEvent::ControlReleased(Control::TempoUp),
+            millis(1_000),
+        );
+        assert_eq!(
+            controller.take_text(),
+            Some(TextUpdate::Show(controller.tempo().to_string()))
+        );
+    }
+
+    #[test]
+    fn the_grid_comes_back_after_the_bpm_has_been_read() {
         let mut controller = controller();
         controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
         controller.tick(millis(400));
+        controller.on_surface(SurfaceEvent::ControlReleased(Control::TempoUp), millis(500));
+        controller.take_text();
 
-        assert_eq!(
-            controller.take_text(),
-            Some(TextUpdate::Show("126".to_owned()))
+        controller.tick(millis(600));
+        assert!(
+            controller.take_frame().is_none(),
+            "a frame now would cut the number off part way"
         );
 
-        controller.on_surface(SurfaceEvent::ControlReleased(Control::TempoUp), millis(500));
+        controller.tick(millis(500) + TEXT_DURATION);
         assert_eq!(controller.take_text(), Some(TextUpdate::Stop));
+        assert!(controller.take_frame().is_some(), "and the grid comes back");
     }
 
     #[test]
