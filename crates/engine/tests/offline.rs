@@ -829,3 +829,46 @@ fn the_tempo_locks_once_a_clip_exists() {
     assert!(harness.drain_events().contains(&Event::TempoRejected));
     assert_eq!(harness.engine.grid().tempo().bpm(), 140.0);
 }
+#[test]
+fn playback_survives_the_apps_loop_shape() {
+    let mut harness = Harness::new(128);
+    let pad = addr(0, 0);
+
+    // The app runs the recycler every pass, which the other tests never do.
+    harness.command(Command::Press(pad));
+    harness.run_to(BAR);
+    harness.housekeeping.recycler.run();
+    harness.run_to(3 * BAR);
+    harness.command(Command::Press(pad));
+    harness.housekeeping.recycler.run();
+    harness.run_to(3 * BAR + 1);
+    harness.housekeeping.recycler.run();
+
+    assert!(matches!(
+        harness.engine.state(pad),
+        SlotState::Playing { .. }
+    ));
+
+    let out = harness.run_to(harness.position() + BAR);
+    assert!(out.iter().any(|s| *s != 0.0), "the loop should be sounding");
+}
+
+#[test]
+fn recording_after_a_snapshot_still_captures() {
+    let mut harness = Harness::new(128);
+    let first = addr(0, 0);
+    record(&mut harness, first, 0, 1);
+
+    // A save holds a snapshot while the next take is recorded.
+    harness.command(Command::Snapshot);
+    let mut held = Vec::new();
+    harness.housekeeping.snapshots.drain(|s| held.push(s));
+
+    let second = addr(1, 0);
+    let at = harness.position();
+    record(&mut harness, second, at, 1);
+
+    let out = harness.run_to(harness.position() + BAR);
+    assert!(out.iter().any(|s| *s != 0.0), "both loops should sound");
+    drop(held);
+}
