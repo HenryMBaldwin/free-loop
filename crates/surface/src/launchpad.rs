@@ -17,6 +17,9 @@ use crate::led::{CONTROL_COUNT, Led, LedColor, LedFrame, LedStyle, SIDE_COUNT};
 use crate::surface::{ControlSurface, SurfaceError};
 
 /// Buttons the device accepts in one update.
+/// Name the port probe registers under. Never connects, so nothing sees it.
+const PROBE_NAME: &str = "free-loop probe";
+
 const MAX_BUTTONS: usize = 80;
 
 /// Scroll speed the device accepts, 0 to 127. Fast enough to read a three digit number
@@ -124,6 +127,8 @@ pub struct LaunchpadX {
     /// Set when something other than a render has touched the device, so the next one
     /// sends every button rather than trusting `shown`.
     stale: bool,
+    /// Lists ports to check the device is still there. Connects to nothing.
+    probe: Option<midir::MidiOutput>,
     changes: Vec<(x::Button, x::ButtonStyle)>,
 }
 
@@ -133,7 +138,21 @@ impl core::fmt::Debug for LaunchpadX {
     }
 }
 
+/// Every MIDI output port the host can see, for working out why none matched.
+pub fn output_ports() -> Vec<String> {
+    let Ok(midi) = midir::MidiOutput::new(PROBE_NAME) else {
+        return Vec::new();
+    };
+    midi.ports()
+        .iter()
+        .filter_map(|port| midi.port_name(port).ok())
+        .collect()
+}
+
 impl LaunchpadX {
+    /// The name fragment a port has to contain to be taken for a Launchpad X.
+    pub const PORT_KEYWORD: &'static str = x::Output::MIDI_DEVICE_KEYWORD;
+
     /// Finds a Launchpad X, puts it in Programmer layout and darkens it.
     ///
     /// # Errors
@@ -154,8 +173,25 @@ impl LaunchpadX {
             input,
             shown: LedFrame::new(),
             stale: false,
+            probe: midir::MidiOutput::new(PROBE_NAME).ok(),
             changes: Vec::with_capacity(MAX_BUTTONS),
         })
+    }
+
+    /// Whether a Launchpad X port is listed.
+    ///
+    /// Ports are enumerated on each call and nothing is opened, so this is safe while
+    /// connected. Reports present if the probe could not be built, since a host that
+    /// cannot be asked is not evidence the device has gone.
+    fn port_listed(&self) -> bool {
+        let Some(probe) = self.probe.as_ref() else {
+            return true;
+        };
+        probe
+            .ports()
+            .iter()
+            .filter_map(|port| probe.port_name(port).ok())
+            .any(|name| name.contains(Self::PORT_KEYWORD))
     }
 
     fn collect_changes(&mut self, frame: &LedFrame) {
@@ -196,6 +232,10 @@ fn diff(
 }
 
 impl ControlSurface for LaunchpadX {
+    fn is_present(&self) -> bool {
+        self.port_listed()
+    }
+
     fn poll(&mut self, events: &mut Vec<SurfaceEvent>) {
         while let Some(message) = self.input.try_recv() {
             let (button, pressed, velocity) = match message {
@@ -389,5 +429,11 @@ mod tests {
         assert_eq!(dim_channel(0), 0);
         let full = dim_channel(255);
         assert!(full > 0 && full < u8::try_from(RGB_MAX).unwrap());
+    }
+
+    #[test]
+    fn listing_ports_works_wherever_it_runs() {
+        // A host with no midi at all must be a value, not a panic.
+        println!("midi outputs: {:?}", output_ports());
     }
 }

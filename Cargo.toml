@@ -27,6 +27,7 @@ free-loop-session = { path = "crates/session", version = "0.1.0" }
 free-loop-surface = { path = "crates/surface", version = "0.1.0" }
 hound = "3.5"
 launchy = { git = "https://github.com/HenryMBaldwin/launchy", rev = "c88be0f13197e8cf098e99f9e766335488e83329" }
+midir = "0.11"
 rtrb = "0.3"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"

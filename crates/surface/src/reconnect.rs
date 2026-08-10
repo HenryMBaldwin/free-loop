@@ -9,7 +9,8 @@ use crate::event::SurfaceEvent;
 use crate::led::LedFrame;
 use crate::surface::{ControlSurface, SurfaceError};
 
-/// How long to wait between attempts to find a device.
+/// How long to wait between attempts to find a device, and between checks that the one
+/// in use is still there.
 pub const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 /// A surface that reopens its device whenever one is available.
@@ -22,6 +23,8 @@ pub struct Reconnecting<S, F> {
     last: LedFrame,
     /// Time of the next attempt, or `None` while a device is working.
     retry_at: Option<Duration>,
+    /// Time of the next check that the device in use is still attached.
+    check_at: Duration,
     now: Duration,
 }
 
@@ -45,6 +48,7 @@ impl<S: ControlSurface, F: FnMut() -> Result<S, SurfaceError>> Reconnecting<S, F
             device,
             open,
             last: LedFrame::new(),
+            check_at: RETRY_INTERVAL,
             now: Duration::ZERO,
         }
     }
@@ -73,8 +77,17 @@ impl<S: ControlSurface, F: FnMut() -> Result<S, SurfaceError>> ControlSurface
 {
     fn tick(&mut self, now: Duration) {
         self.now = now;
+
         if let Some(device) = self.device.as_mut() {
             device.tick(now);
+            if now < self.check_at {
+                return;
+            }
+            self.check_at = now + RETRY_INTERVAL;
+            // Listing ports costs a little, so it is not done every pass.
+            if !device.is_present() {
+                self.lost();
+            }
             return;
         }
 
@@ -91,6 +104,7 @@ impl<S: ControlSurface, F: FnMut() -> Result<S, SurfaceError>> ControlSurface
                 }
                 self.device = Some(device);
                 self.retry_at = None;
+                self.check_at = now + RETRY_INTERVAL;
             }
             Err(_) => self.retry_at = Some(now + RETRY_INTERVAL),
         }
@@ -150,9 +164,15 @@ mod tests {
     struct Flaky {
         inner: MockSurface,
         dead: Rc<RefCell<bool>>,
+        /// Whether the port is still listed, which `dead` does not have to affect.
+        present: Rc<RefCell<bool>>,
     }
 
     impl ControlSurface for Flaky {
+        fn is_present(&self) -> bool {
+            *self.present.borrow()
+        }
+
         fn poll(&mut self, events: &mut Vec<SurfaceEvent>) {
             self.inner.poll(events);
         }
@@ -161,6 +181,32 @@ mod tests {
             if *self.dead.borrow() {
                 return Err(SurfaceError::NotFound);
             }
+            self.inner.render(frame)
+        }
+
+        fn clear(&mut self) -> Result<(), SurfaceError> {
+            self.inner.clear()
+        }
+    }
+
+    /// A surface that counts how often it is asked whether it is still there.
+    #[derive(Debug)]
+    struct Counting {
+        inner: MockSurface,
+        checks: Rc<RefCell<u32>>,
+    }
+
+    impl ControlSurface for Counting {
+        fn is_present(&self) -> bool {
+            *self.checks.borrow_mut() += 1;
+            true
+        }
+
+        fn poll(&mut self, events: &mut Vec<SurfaceEvent>) {
+            self.inner.poll(events);
+        }
+
+        fn render(&mut self, frame: &LedFrame) -> Result<(), SurfaceError> {
             self.inner.render(frame)
         }
 
@@ -231,6 +277,7 @@ mod tests {
             Ok(Flaky {
                 inner: MockSurface::new(),
                 dead: Rc::clone(&flag),
+                present: Rc::new(RefCell::new(true)),
             })
         });
         assert!(surface.is_connected());
@@ -255,6 +302,7 @@ mod tests {
             Ok(Flaky {
                 inner: MockSurface::new(),
                 dead: Rc::clone(&flag),
+                present: Rc::new(RefCell::new(true)),
             })
         });
 
@@ -270,6 +318,42 @@ mod tests {
             Some(&frame()),
             "the device was reopened onto the frame it should be showing"
         );
+    }
+
+    #[test]
+    fn a_device_whose_port_has_gone_is_dropped_without_writing() {
+        let present = Rc::new(RefCell::new(true));
+        let listed = Rc::clone(&present);
+        let mut surface = Reconnecting::new(move || {
+            Ok(Flaky {
+                inner: MockSurface::new(),
+                dead: Rc::new(RefCell::new(false)),
+                present: Rc::clone(&listed),
+            })
+        });
+        assert!(surface.is_connected());
+
+        // Nothing is written, which is the case a failed send cannot catch.
+        *present.borrow_mut() = false;
+        surface.tick(RETRY_INTERVAL);
+        assert!(!surface.is_connected());
+    }
+
+    #[test]
+    fn presence_is_not_checked_every_pass() {
+        let checks = Rc::new(RefCell::new(0));
+        let counter = Rc::clone(&checks);
+        let mut surface = Reconnecting::new(move || {
+            Ok(Counting {
+                inner: MockSurface::new(),
+                checks: Rc::clone(&counter),
+            })
+        });
+
+        for millis in 0..2_500 {
+            surface.tick(Duration::from_millis(millis));
+        }
+        assert_eq!(*checks.borrow(), 2, "once per interval, not once per pass");
     }
 
     #[test]
