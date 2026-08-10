@@ -30,6 +30,8 @@ pub struct Chrome {
     pub muted: PadMask,
     /// Pads that sound to the exclusion of the rest.
     pub soloed: PadMask,
+    /// How loud each track plays, as a step on the gain ladder.
+    pub gains: [u8; TRACK_COUNT],
 }
 
 /// How mute and solo group the grid.
@@ -89,6 +91,7 @@ impl Default for Chrome {
             axis: Axis::Row,
             muted: 0,
             soloed: 0,
+            gains: [UNITY_STEP; TRACK_COUNT],
         }
     }
 }
@@ -242,17 +245,17 @@ pub fn tempo_gauge(tempo: f64, chrome: Chrome) -> LedFrame {
 ///
 /// Pads up to the level are lit and the level itself is solid. The step a take plays at
 /// the level it was recorded is marked separately when it is not the current one.
-pub fn volumes(gains: [u8; TRACK_COUNT], chrome: Chrome) -> LedFrame {
+pub fn volumes(chrome: Chrome) -> LedFrame {
     let mut frame = LedFrame::new();
 
     for addr in SlotAddr::all() {
-        let level = usize::from(gains[addr.track.index()]);
+        let level = usize::from(chrome.gains[addr.track.index()]);
         let step = addr.slot.index();
 
         let led = match (step.cmp(&level), step == usize::from(UNITY_STEP)) {
-            (Ordering::Equal, _) => Led::solid(LedColor::Green),
-            (Ordering::Less, _) => Led::dim(LedColor::Green),
-            (Ordering::Greater, true) => Led::dim(LedColor::White),
+            (Ordering::Equal, _) => Led::solid(LedColor::White),
+            (Ordering::Less, _) => Led::dim(LedColor::White),
+            (Ordering::Greater, true) => Led::dim(LedColor::Amber),
             (Ordering::Greater, false) => Led::OFF,
         };
         frame.set_pad(addr, led);
@@ -326,6 +329,15 @@ pub fn frame(session: &SessionModel, chrome: Chrome) -> LedFrame {
 
 /// Paints the right-hand column.
 fn side_buttons(frame: &mut LedFrame, chrome: Chrome) {
+    let levelled = chrome.gains.iter().any(|step| *step != UNITY_STEP);
+    frame.set_side(
+        VOLUME_SIDE,
+        if levelled {
+            Led::solid(LedColor::Amber)
+        } else {
+            Led::dim(LedColor::Amber)
+        },
+    );
     frame.set_side(PAUSE_SIDE, pause_button(chrome));
     frame.set_side(
         MUTE_SIDE,
@@ -752,6 +764,42 @@ mod tests {
     }
 
     #[test]
+    fn the_volume_button_is_lit_before_anything_is_touched() {
+        let untouched = frame(&SessionModel::new(), Chrome::default());
+        assert_eq!(untouched.side(VOLUME_SIDE), Led::dim(LedColor::Amber));
+
+        let mut gains = [UNITY_STEP; TRACK_COUNT];
+        gains[3] = 1;
+        let levelled = frame(
+            &SessionModel::new(),
+            Chrome {
+                gains,
+                ..Chrome::default()
+            },
+        );
+        assert_eq!(levelled.side(VOLUME_SIDE), Led::solid(LedColor::Amber));
+    }
+
+    #[test]
+    fn a_level_bar_is_grey_and_marks_where_unity_sits() {
+        let mut gains = [UNITY_STEP; TRACK_COUNT];
+        gains[0] = 2;
+        let painted = volumes(Chrome {
+            gains,
+            ..Chrome::default()
+        });
+
+        assert_eq!(painted.pad(addr(0, 1)), Led::dim(LedColor::White));
+        assert_eq!(painted.pad(addr(0, 2)), Led::solid(LedColor::White));
+        assert_eq!(
+            painted.pad(addr(0, UNITY_STEP)),
+            Led::dim(LedColor::Amber),
+            "the level a take was recorded at stays findable"
+        );
+        assert_eq!(painted.pad(addr(0, 7)), Led::OFF);
+    }
+
+    #[test]
     fn the_side_buttons_show_whether_anything_is_set() {
         let quiet = frame(&SessionModel::new(), Chrome::default());
         let active = frame(
@@ -815,7 +863,7 @@ mod tests {
         use crate::led::SIDE_COUNT;
 
         let painted = frame(&SessionModel::new(), Chrome::default());
-        let bound = [PAUSE_SIDE, MUTE_SIDE, SOLO_SIDE];
+        let bound = [VOLUME_SIDE, PAUSE_SIDE, MUTE_SIDE, SOLO_SIDE];
         assert!(
             (0..SIDE_COUNT)
                 .filter(|i| !bound.contains(i))
