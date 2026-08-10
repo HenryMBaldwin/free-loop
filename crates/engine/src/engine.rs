@@ -913,8 +913,13 @@ impl Engine {
 
         // Frames the device did not deliver stay unwritten, which reads back as silence,
         // while the write position still advances so the loop keeps its length.
+        //
+        // A device that delivers nothing at all leaves `input` empty, so the range can
+        // start past its end.
         let available = input_frames.saturating_sub(offset).min(run);
-        let captured = &input[offset * self.channels..(offset + available) * self.channels];
+        let captured = input
+            .get(offset * self.channels..(offset + available) * self.channels)
+            .unwrap_or(&[]);
 
         for addr in SlotAddr::all() {
             let Audio {
