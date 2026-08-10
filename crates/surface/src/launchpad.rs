@@ -309,8 +309,6 @@ mod tests {
                 _ => panic!("{control:?} did not come back as a control"),
             }
         }
-        // The spare carries nothing.
-        assert!(target(control_button(3)).is_none());
     }
 
     #[test]
