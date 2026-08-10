@@ -782,7 +782,9 @@ impl Engine {
     }
 
     fn set_tempo(&mut self, tempo: Tempo, sink: &mut impl EventSink) {
-        if self.session.has_any_clip() {
+        // A clear already committed takes every clip with it, so it locks nothing.
+        let clearing = self.pending == Some(Deferred::ClearAll);
+        if !clearing && self.session.has_any_clip() {
             sink.event(Event::TempoRejected);
             return;
         }
