@@ -141,8 +141,6 @@ pub struct Controller {
     mode: Mode,
     /// A bit per pad that holds a session.
     sessions: u64,
-    /// How loud each track plays, as a step on the gain ladder.
-    gains: [u8; TRACK_COUNT],
     /// The session in use, if one was loaded or saved this run.
     current: Option<SlotAddr>,
     frame: LedFrame,
@@ -160,6 +158,7 @@ impl Controller {
             axis: Axis::Row,
             muted: 0,
             soloed: 0,
+            gains: [UNITY_STEP; TRACK_COUNT],
         };
         let session = SessionModel::new();
         Self {
@@ -179,7 +178,6 @@ impl Controller {
             text_running: false,
             mode: Mode::Perform,
             sessions: 0,
-            gains: [UNITY_STEP; TRACK_COUNT],
             current: None,
             dirty: true,
         }
@@ -223,20 +221,20 @@ impl Controller {
 
     /// The level each track plays at.
     pub fn gains(&self) -> [u8; TRACK_COUNT] {
-        self.gains
+        self.chrome.gains
     }
 
     /// Sets a track's level, taken from the column pressed.
     fn set_level(&mut self, addr: SlotAddr) {
         let step = u8::try_from(addr.slot.index()).unwrap_or(UNITY_STEP);
-        self.gains[addr.track.index()] = step;
-        self.commands.push(Command::SetGains(self.gains));
+        self.chrome.gains[addr.track.index()] = step;
+        self.commands.push(Command::SetGains(self.chrome.gains));
         self.dirty = true;
     }
 
     /// Takes the levels a loaded session came with.
     pub fn set_gains(&mut self, gains: [u8; TRACK_COUNT]) {
-        self.gains = gains;
+        self.chrome.gains = gains;
         self.commands.push(Command::SetGains(gains));
         self.dirty = true;
     }
@@ -280,8 +278,8 @@ impl Controller {
         self.current = None;
         self.mode = Mode::Perform;
 
-        self.gains = [UNITY_STEP; TRACK_COUNT];
-        self.commands.push(Command::SetGains(self.gains));
+        self.chrome.gains = [UNITY_STEP; TRACK_COUNT];
+        self.commands.push(Command::SetGains(self.chrome.gains));
         self.commands.push(Command::ClearAll);
         self.commands.push(Command::SetMutes {
             muted: 0,
@@ -632,7 +630,7 @@ impl Controller {
         }
 
         self.frame = if self.mode == Mode::Volume {
-            paint::volumes(self.gains, self.chrome)
+            paint::volumes(self.chrome)
         } else if self.tempo_repeating() {
             // A number cannot track a tempo that is still moving, so the grid shows it
             // instead until the button is let go.
