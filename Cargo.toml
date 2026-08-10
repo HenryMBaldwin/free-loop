@@ -18,6 +18,7 @@ keywords = ["looper", "launchpad", "audio", "midi", "dawless"]
 categories = ["multimedia::audio"]
 
 [workspace.dependencies]
+core-foundation = "0.10"
 cpal = "0.18"
 ctrlc = "3"
 free-loop-audio = { path = "crates/audio", version = "0.1.0" }

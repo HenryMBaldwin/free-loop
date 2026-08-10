@@ -15,5 +15,8 @@ launchy.workspace = true
 midir.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation.workspace = true
+
 [lints]
 workspace = true

@@ -294,6 +294,7 @@ dependencies = [
 name = "free-loop-surface"
 version = "0.1.0"
 dependencies = [
+ "core-foundation",
  "free-loop-core",
  "launchy",
  "midir",

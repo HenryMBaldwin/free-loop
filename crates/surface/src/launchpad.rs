@@ -8,6 +8,8 @@
 //! The device must be in Programmer layout for the full 9×9 grid to address, which
 //! [`LaunchpadX::connect`] sets.
 
+use core::time::Duration;
+
 use free_loop_core::{SlotAddr, SlotId, TrackId};
 use launchy::x;
 use launchy::{InputDevice as _, MsgPollingWrapper as _, OutputDevice as _};
@@ -20,6 +22,18 @@ use crate::surface::{ControlSurface, SurfaceError};
 /// Name the port probe registers under. Never connects, so nothing sees it.
 const PROBE_NAME: &str = "free-loop probe";
 
+/// Name the connections register under.
+const CLIENT_NAME: &str = "free-loop";
+
+/// How long a device gets to answer the inquiry sent when opening it.
+const HANDSHAKE: Duration = Duration::from_millis(300);
+
+/// How often the device is asked to identify itself once open.
+const HEARTBEAT: Duration = Duration::from_millis(500);
+
+/// Unanswered inquiries before the device counts as gone.
+const MISSES_ALLOWED: u32 = 3;
+
 const MAX_BUTTONS: usize = 80;
 
 /// Scroll speed the device accepts, 0 to 127. Fast enough to read a three digit number
@@ -31,6 +45,11 @@ const DIM_DIVISOR: u16 = 4;
 
 /// Highest value a Launchpad X RGB channel takes.
 const RGB_MAX: u16 = 127;
+
+/// Anything the host refused, other than there being nothing to connect to.
+fn device(error: impl core::fmt::Display) -> SurfaceError {
+    SurfaceError::Device(error.to_string())
+}
 
 fn convert(error: launchy::MidiError) -> SurfaceError {
     match error {
@@ -127,8 +146,12 @@ pub struct LaunchpadX {
     /// Set when something other than a render has touched the device, so the next one
     /// sends every button rather than trusting `shown`.
     stale: bool,
-    /// Lists ports to check the device is still there. Connects to nothing.
-    probe: Option<midir::MidiOutput>,
+    /// Gestures taken off the input while looking for a reply.
+    pending: Vec<x::Message>,
+    /// Inquiries sent with no answer yet. Reset by any reply.
+    unanswered: u32,
+    /// When to ask again.
+    next_ask: Duration,
     changes: Vec<(x::Button, x::ButtonStyle)>,
 }
 
@@ -136,6 +159,26 @@ impl core::fmt::Debug for LaunchpadX {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("LaunchpadX").finish_non_exhaustive()
     }
+}
+
+/// Every listed port whose name marks it as a Launchpad X, in the order listed.
+fn matching_outputs(midi: &midir::MidiOutput) -> Vec<midir::MidiOutputPort> {
+    midi.ports()
+        .into_iter()
+        .filter(|port| matches_keyword(midi.port_name(port).ok().as_deref()))
+        .collect()
+}
+
+/// The input counterpart of [`matching_outputs`].
+fn matching_inputs(midi: &midir::MidiInput) -> Vec<midir::MidiInputPort> {
+    midi.ports()
+        .into_iter()
+        .filter(|port| matches_keyword(midi.port_name(port).ok().as_deref()))
+        .collect()
+}
+
+fn matches_keyword(name: Option<&str>) -> bool {
+    name.is_some_and(|name| name.contains(LaunchpadX::PORT_KEYWORD))
 }
 
 /// Every MIDI output port the host can see, for working out why none matched.
@@ -160,38 +203,100 @@ impl LaunchpadX {
     /// [`SurfaceError::NotFound`] if no device is attached, [`SurfaceError::Device`] if
     /// one is but will not talk.
     pub fn connect() -> Result<Self, SurfaceError> {
-        let mut output = x::Output::guess().map_err(convert)?;
-        output
-            .change_layout(x::Layout::Programmer)
-            .map_err(convert)?;
-        output.clear().map_err(convert)?;
+        let midi_out = midir::MidiOutput::new(CLIENT_NAME).map_err(device)?;
+        let midi_in = midir::MidiInput::new(CLIENT_NAME).map_err(device)?;
+        let outputs = matching_outputs(&midi_out);
+        let inputs = matching_inputs(&midi_in);
 
-        let input = x::Input::guess_polling().map_err(convert)?;
+        if outputs.is_empty() || inputs.is_empty() {
+            return Err(SurfaceError::NotFound);
+        }
 
-        Ok(Self {
-            output,
-            input,
-            shown: LedFrame::new(),
-            stale: false,
-            probe: midir::MidiOutput::new(PROBE_NAME).ok(),
-            changes: Vec::with_capacity(MAX_BUTTONS),
-        })
+        // Newest first: a port left behind by a host that exited without disposing it
+        // stays listed and accepts writes, so the only way past one is to ask.
+        let mut last = SurfaceError::NotFound;
+        for (out_port, in_port) in outputs.iter().zip(&inputs).rev() {
+            match Self::open(out_port, in_port) {
+                Ok(device) => return Ok(device),
+                Err(error) => last = error,
+            }
+        }
+        Err(last)
     }
 
-    /// Whether a Launchpad X port is listed.
-    ///
-    /// Ports are enumerated on each call and nothing is opened, so this is safe while
-    /// connected. Reports present if the probe could not be built, since a host that
-    /// cannot be asked is not evidence the device has gone.
-    fn port_listed(&self) -> bool {
-        let Some(probe) = self.probe.as_ref() else {
-            return true;
+    /// Opens one port pair and requires the device to identify itself.
+    fn open(
+        out_port: &midir::MidiOutputPort,
+        in_port: &midir::MidiInputPort,
+    ) -> Result<Self, SurfaceError> {
+        let midi_out = midir::MidiOutput::new(CLIENT_NAME).map_err(device)?;
+        let midi_in = midir::MidiInput::new(CLIENT_NAME).map_err(device)?;
+
+        let connection = midi_out.connect(out_port, CLIENT_NAME).map_err(device)?;
+        let output = x::Output::from_connection(connection).map_err(convert)?;
+        let input = x::Input::from_port_polling(midi_in, in_port).map_err(convert)?;
+
+        let mut opened = Self {
+            output,
+            input,
+            pending: Vec::new(),
+            unanswered: 0,
+            next_ask: Duration::ZERO,
+            shown: LedFrame::new(),
+            stale: false,
+            changes: Vec::with_capacity(MAX_BUTTONS),
         };
-        probe
-            .ports()
-            .iter()
-            .filter_map(|port| probe.port_name(port).ok())
-            .any(|name| name.contains(Self::PORT_KEYWORD))
+        opened.handshake()?;
+
+        opened
+            .output
+            .change_layout(x::Layout::Programmer)
+            .map_err(convert)?;
+        opened.output.clear().map_err(convert)?;
+        Ok(opened)
+    }
+
+    /// Asks the device to identify itself and waits for the answer.
+    ///
+    /// A port whose host has gone accepts the question without error and never answers, so
+    /// this is what separates a device from one that is only still listed.
+    fn handshake(&mut self) -> Result<(), SurfaceError> {
+        self.output
+            .request_device_inquiry(x::DeviceIdQuery::Any)
+            .map_err(convert)?;
+
+        let deadline = std::time::Instant::now() + HANDSHAKE;
+        while std::time::Instant::now() < deadline {
+            if self.take_replies() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Err(SurfaceError::NotFound)
+    }
+
+    /// Drains the input, reporting whether the device identified itself.
+    ///
+    /// Gestures are kept for the next [`ControlSurface::poll`].
+    fn take_replies(&mut self) -> bool {
+        let mut answered = false;
+        while let Some(message) = self.input.try_recv() {
+            match message {
+                x::Message::ApplicationVersion(_) | x::Message::BootloaderVersion(_) => {
+                    answered = true;
+                }
+                other => self.pending.push(other),
+            }
+        }
+        if answered {
+            self.unanswered = 0;
+        }
+        answered
+    }
+
+    /// Whether the device has answered recently enough.
+    fn answering(&self) -> bool {
+        self.unanswered < MISSES_ALLOWED
     }
 
     fn collect_changes(&mut self, frame: &LedFrame) {
@@ -232,12 +337,32 @@ fn diff(
 }
 
 impl ControlSurface for LaunchpadX {
+    fn tick(&mut self, now: Duration) {
+        self.take_replies();
+        if now < self.next_ask {
+            return;
+        }
+        self.next_ask = now + HEARTBEAT;
+
+        // A send that fails is its own answer.
+        if self
+            .output
+            .request_device_inquiry(x::DeviceIdQuery::Any)
+            .is_err()
+        {
+            self.unanswered = MISSES_ALLOWED;
+            return;
+        }
+        self.unanswered += 1;
+    }
+
     fn is_present(&self) -> bool {
-        self.port_listed()
+        self.answering()
     }
 
     fn poll(&mut self, events: &mut Vec<SurfaceEvent>) {
-        while let Some(message) = self.input.try_recv() {
+        self.take_replies();
+        for message in core::mem::take(&mut self.pending) {
             let (button, pressed, velocity) = match message {
                 x::Message::Press { button, velocity } => (button, true, velocity),
                 x::Message::Release { button } => (button, false, 0),
@@ -435,5 +560,19 @@ mod tests {
     fn listing_ports_works_wherever_it_runs() {
         // A host with no midi at all must be a value, not a panic.
         println!("midi outputs: {:?}", output_ports());
+    }
+
+    #[test]
+    fn repeated_connects() {
+        for i in 0..5 {
+            match LaunchpadX::connect() {
+                Ok(device) => {
+                    println!("{i}: ok, present={}", device.answering());
+                    drop(device);
+                }
+                Err(error) => println!("{i}: FAILED {error}"),
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
     }
 }
