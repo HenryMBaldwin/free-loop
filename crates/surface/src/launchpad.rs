@@ -103,7 +103,7 @@ fn style(led: Led) -> x::ButtonStyle {
         LedStyle::Flash => x::ButtonStyle::flash(palette(led.color)),
         LedStyle::Pulse => x::ButtonStyle::pulse(palette(led.color)),
         // The device only flashes and pulses palette entries, so dimming has to go
-        // through RGB, where brightness is ours to pick.
+        // through RGB, where brightness can be set directly.
         LedStyle::Dim => {
             let (r, g, b) = led.color.rgb();
             x::ButtonStyle::rgb(x::RgbColor::new(
@@ -165,8 +165,8 @@ impl LaunchpadX {
 
 /// Collects the buttons that need sending.
 ///
-/// `stale` sends every button, which is what darkens anything left behind by something
-/// that wrote to the device outside a render.
+/// `stale` sends every button, which darkens anything left behind by a write outside a
+/// render.
 fn diff(
     shown: &LedFrame,
     frame: &LedFrame,

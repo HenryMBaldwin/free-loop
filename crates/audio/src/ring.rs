@@ -20,8 +20,7 @@ pub enum InputSource {
     /// One device channel spread across every engine channel.
     ///
     /// An interface with several inputs reports them all whether or not anything is
-    /// plugged in, so a single instrument on input 2 arrives as silence-left. Naming the
-    /// channel is the only way to know which one carries the signal.
+    /// plugged in, so a single instrument on input 2 arrives as silence-left.
     Mono(usize),
 }
 
@@ -104,7 +103,7 @@ impl CaptureWriter {
     /// Converts, maps and pushes one device buffer.
     ///
     /// Returns the frames that did not fit, which happens when the output callback has
-    /// stalled. Dropping is the only option: blocking would take the device down.
+    /// stalled.
     pub fn write<T>(&mut self, device_samples: &[T]) -> usize
     where
         T: Copy,
@@ -152,7 +151,7 @@ impl CaptureReader {
     /// Fills as much of `dst` as the ring holds, in whole frames.
     ///
     /// Returns zero until the cushion has built up. After that a short read means the
-    /// device under-delivered, which the engine reports as an xrun.
+    /// device under-delivered.
     pub fn read(&mut self, dst: &mut [f32]) -> usize {
         if self.channels == 0 {
             return 0;

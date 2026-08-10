@@ -90,8 +90,8 @@ pub enum SurfaceEvent {
     },
     /// A right-hand column button was pressed.
     ///
-    /// The 8×8 grid is the only grid; this column is a plain strip of eight buttons with
-    /// their own printed labels, not an extension of the tracks.
+    /// A plain strip of eight buttons with their own printed labels, not an extension of
+    /// the tracks.
     SidePressed {
         /// Which button, top to bottom.
         index: u8,

@@ -24,10 +24,7 @@ pub enum Command {
     SetGains([u8; TRACK_COUNT]),
     /// Publish a reference to every pad that holds a clip.
     Snapshot,
-    /// Set which pads are silenced and which are soloed.
-    ///
-    /// Sent whole rather than as toggles, so the engine never holds a different picture
-    /// from the surface showing it.
+    /// Set which pads are silenced and which are soloed. Sent whole, not as toggles.
     SetMutes {
         /// Pads that do not sound.
         muted: PadMask,
@@ -38,8 +35,7 @@ pub enum Command {
     Rewind,
     /// Freeze or resume the transport.
     ///
-    /// A frozen transport holds its position, so loops keep their phase and pick up
-    /// exactly where they stopped.
+    /// A frozen transport holds its position, so loops keep their phase.
     SetPaused(bool),
     /// Turn the click on or off.
     SetClickEnabled(bool),

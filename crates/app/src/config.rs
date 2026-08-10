@@ -51,15 +51,14 @@ pub struct Audio {
     pub channels: Option<u16>,
     /// Device input channel carrying the instrument.
     ///
-    /// Empty takes channels in order, which is right for a genuine stereo source. Set it
-    /// when one instrument is in one jack of a multi-input interface, or the loop comes
-    /// back on one side only.
+    /// Empty takes channels in order. Set it when one instrument is in one jack of a
+    /// multi-input interface, or the loop comes back on one side only.
     pub input_channel: Option<usize>,
     /// Blocks of capture buffered before the output starts consuming.
     pub cushion_blocks: u32,
     /// Round-trip latency to compensate for, in frames.
     ///
-    /// Empty measures it from the driver, which is right for almost every rig.
+    /// Empty measures it from the driver.
     pub capture_offset_frames: Option<u32>,
 }
 
@@ -160,7 +159,7 @@ pub struct Config {
 impl Config {
     /// Reads a config file, falling back to defaults when it is not there.
     ///
-    /// A missing file means every default suits this rig. A malformed one is an error.
+    /// A missing file is not an error; a malformed one is.
     ///
     /// # Errors
     ///
