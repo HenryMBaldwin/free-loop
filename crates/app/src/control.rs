@@ -118,6 +118,8 @@ pub struct Controller {
     session: SessionModel,
     chrome: Chrome,
     tempo: f64,
+    /// What the config asked for, which a fresh session goes back to.
+    default_tempo: f64,
     /// Tempo to fall back to if the engine turns a change down.
     tempo_before_request: f64,
     /// When each held pad went down.
@@ -159,6 +161,7 @@ impl Controller {
             session,
             chrome,
             tempo,
+            default_tempo: tempo,
             tempo_before_request: tempo,
             held: [[None; SLOT_COUNT]; TRACK_COUNT],
             warning: 0,
@@ -256,6 +259,14 @@ impl Controller {
             soloed: 0,
         });
         self.commands.push(Command::SetPaused(false));
+
+        // After the clear, so the engine is no longer holding clips to protect and takes
+        // the change rather than refusing it.
+        self.tempo = self.default_tempo;
+        self.tempo_before_request = self.default_tempo;
+        if let Ok(tempo) = Tempo::new(self.default_tempo) {
+            self.commands.push(Command::SetTempo(tempo));
+        }
         self.dirty = true;
     }
 
@@ -832,6 +843,28 @@ mod tests {
         assert!(
             SlotAddr::all().all(|a| !frame.pad(a).is_lit()),
             "an empty grid"
+        );
+    }
+
+    #[test]
+    fn a_fresh_session_goes_back_to_the_configured_tempo() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
+        controller.on_surface(SurfaceEvent::ControlReleased(Control::TempoUp), millis(50));
+        assert_eq!(controller.tempo(), 121.0);
+        commands(&mut controller);
+
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        controller.on_surface(side(NEW_SIDE), T0);
+
+        assert_eq!(controller.tempo(), 120.0);
+
+        let sent = commands(&mut controller);
+        let clear = sent.iter().position(|c| *c == Command::ClearAll);
+        let tempo = sent.iter().position(|c| matches!(c, Command::SetTempo(_)));
+        assert!(
+            clear < tempo,
+            "the tempo is locked until the clips are gone"
         );
     }
 
