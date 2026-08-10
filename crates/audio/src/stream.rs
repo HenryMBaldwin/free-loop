@@ -174,6 +174,16 @@ impl Opened {
         self.negotiated
     }
 
+    /// The name of the device being captured from.
+    pub fn input_name(&self) -> String {
+        device_name(&self.input)
+    }
+
+    /// The name of the device being played to.
+    pub fn output_name(&self) -> String {
+        device_name(&self.output)
+    }
+
     /// Starts both streams, moving `engine` into the output callback.
     ///
     /// # Errors
