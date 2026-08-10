@@ -12,6 +12,7 @@
 //! - [`launchpad`]: the Launchpad X.
 
 pub mod event;
+pub mod host;
 pub mod launchpad;
 pub mod led;
 pub mod mock;
@@ -20,6 +21,7 @@ pub mod reconnect;
 pub mod surface;
 
 pub use event::{Control, SurfaceEvent};
+pub use host::HostWatch;
 pub use launchpad::{LaunchpadX, output_ports};
 pub use led::{
     BEAT_LEDS, CONTROL_COUNT, FIRST_BEAT_LED, Led, LedColor, LedFrame, LedStyle, SIDE_COUNT,
