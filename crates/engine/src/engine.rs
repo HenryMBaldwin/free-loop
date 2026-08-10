@@ -438,6 +438,7 @@ impl Engine {
             Command::StopAll => self.with_session(|session, audio| {
                 session.stop_all(&ctx, &mut |a, e| audio.apply(a, e, sink));
             }),
+            Command::Rewind => self.rewind(),
             Command::Snapshot => self.publish_snapshot(sink),
             Command::SetPaused(paused) => self.set_paused(paused, sink),
             Command::SetClickEnabled(enabled) => self.click.set_enabled(enabled),
@@ -451,6 +452,29 @@ impl Engine {
     fn with_session(&mut self, apply: impl FnOnce(&mut SessionModel, &mut Audio)) {
         let Self { session, audio, .. } = self;
         apply(session, audio);
+    }
+
+    /// Sends the transport back to the start with every loop at its beginning.
+    ///
+    /// Loops are normally anchored to the grid position they were played at, which is
+    /// what keeps them in step with each other. Restarting means re-anchoring them all
+    /// to the same instant so they begin together.
+    fn rewind(&mut self) {
+        self.position = Frames::ZERO;
+        self.last_boundary = None;
+        self.resync_clock();
+
+        for addr in SlotAddr::all() {
+            let Some(clip) = self.audio.clips[addr.track.index()][addr.slot.index()].as_mut()
+            else {
+                continue;
+            };
+            // A clip somebody is reading keeps its old anchor. Rare, and the next rewind
+            // catches it.
+            if let Some(inner) = Arc::get_mut(clip) {
+                inner.set_recorded_at(Frames::ZERO);
+            }
+        }
     }
 
     /// Installs anything the loader has queued.
@@ -508,6 +532,9 @@ impl Engine {
         }
         if pause {
             self.paused = true;
+            // Starting a loaded session part way through its loops is never what was
+            // wanted, so it begins at the beginning.
+            self.rewind();
         }
         self.emit_changes(&before, sink);
     }

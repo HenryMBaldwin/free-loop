@@ -13,6 +13,8 @@ pub enum Control {
     TempoUp,
     /// Slow down.
     TempoDown,
+    /// Send the transport back to the start.
+    Rewind,
     /// Open the session picker to load.
     LoadSession,
     /// Turn the click on or off.
@@ -29,6 +31,7 @@ impl Control {
         match self {
             Self::TempoUp => 0,
             Self::TempoDown => 1,
+            Self::Rewind => 2,
             Self::LoadSession => 4,
             Self::ClickToggle => 5,
             Self::StopAll => 6,
@@ -41,6 +44,7 @@ impl Control {
         match index {
             0 => Some(Self::TempoUp),
             1 => Some(Self::TempoDown),
+            2 => Some(Self::Rewind),
             4 => Some(Self::LoadSession),
             5 => Some(Self::ClickToggle),
             6 => Some(Self::StopAll),
@@ -54,6 +58,7 @@ impl Control {
         [
             Self::TempoUp,
             Self::TempoDown,
+            Self::Rewind,
             Self::LoadSession,
             Self::ClickToggle,
             Self::StopAll,
@@ -110,7 +115,7 @@ mod tests {
 
     #[test]
     fn the_spare_buttons_carry_no_control() {
-        for index in [2, 3, 99] {
+        for index in [3, 99] {
             assert_eq!(Control::from_index(index), None);
         }
     }

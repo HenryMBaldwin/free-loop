@@ -62,6 +62,7 @@ pub fn control(control: Control, chrome: Chrome) -> Led {
         }
         Control::TempoDown | Control::TempoUp => Led::dim(LedColor::Blue),
         Control::StopAll => Led::dim(LedColor::Red),
+        Control::Rewind => Led::dim(LedColor::Green),
         Control::LoadSession | Control::SaveSession => Led::dim(LedColor::White),
     }
 }

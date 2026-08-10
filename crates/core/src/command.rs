@@ -16,6 +16,8 @@ pub enum Command {
     StopAll,
     /// Publish a reference to every pad that holds a clip.
     Snapshot,
+    /// Send the transport back to the start, with every loop at its beginning.
+    Rewind,
     /// Freeze or resume the transport.
     ///
     /// A frozen transport holds its position, so loops keep their phase and pick up

@@ -278,6 +278,7 @@ impl Controller {
                 self.release_tempo(now);
             }
             SurfaceEvent::ControlPressed(Control::StopAll) => self.commands.push(Command::StopAll),
+            SurfaceEvent::ControlPressed(Control::Rewind) => self.commands.push(Command::Rewind),
             SurfaceEvent::ControlPressed(Control::SaveSession) => {
                 self.set_mode(Mode::SavePicker);
             }
@@ -547,6 +548,13 @@ mod tests {
 
         controller.on_surface(SurfaceEvent::PadReleased { addr: pad }, millis(80));
         assert_eq!(commands(&mut controller), vec![Command::Press(pad)]);
+    }
+
+    #[test]
+    fn the_rewind_button_sends_the_transport_back() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Rewind), T0);
+        assert_eq!(commands(&mut controller), vec![Command::Rewind]);
     }
 
     #[test]

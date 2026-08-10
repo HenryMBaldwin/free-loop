@@ -916,13 +916,38 @@ fn recording_onto_a_loaded_session_captures_audio() {
 }
 
 #[test]
-fn a_session_loaded_at_the_start_of_a_run_plays_cleanly() {
+fn rewinding_starts_every_loop_at_its_beginning() {
+    let mut harness = Harness::new(128);
+    let short = addr(0, 0);
+    let long = addr(1, 0);
+
+    // Different tracks, so both play at once.
+    record(&mut harness, short, 0, 1);
+    let after = harness.position();
+    record(&mut harness, long, after, 2);
+
+    harness.command(Command::Rewind);
+    assert_eq!(harness.engine.position(), Frames::ZERO);
+
+    let out = harness.run_frames(64);
+    let expected: Vec<f32> = (0..64 * CHANNELS)
+        .map(|i| {
+            let frame = (i / CHANNELS) as u64;
+            let channel = i % CHANNELS;
+            // Each loop begins together, contributing its own first frames.
+            signal(frame, channel) + signal(2 * BAR + frame, channel)
+        })
+        .collect();
+    assert_eq!(out, expected);
+}
+
+#[test]
+fn a_loaded_session_starts_at_the_beginning() {
     let mut harness = Harness::new(128);
     let pad = addr(0, 0);
     let len = 4_096;
+    harness.run_to(3 * BAR + 777);
 
-    // A phase near the end of the loop, against a transport that has barely started.
-    let phase = len - 64;
     harness
         .housekeeping
         .loader
@@ -935,21 +960,37 @@ fn a_session_loaded_at_the_start_of_a_run_plays_cleanly() {
         .loader
         .send(LoadMessage::Clip {
             addr: pad,
-            clip: lent_clip(len, phase),
+            clip: lent_clip(len, len - 64),
             playing: true,
         })
         .unwrap();
     harness.housekeeping.loader.send(LoadMessage::End).unwrap();
     harness.run_frames(128);
 
-    harness.command(Command::SetPaused(false));
-    let from = harness.position();
-    let out = harness.run_to(from + 2 * len);
+    assert_eq!(harness.engine.position(), Frames::ZERO);
 
+    harness.command(Command::SetPaused(false));
+    let out = harness.run_frames(64);
     for (i, sample) in out.iter().enumerate() {
-        let frame = from + (i / CHANNELS) as u64;
+        let frame = (i / CHANNELS) as u64;
         let channel = i % CHANNELS;
-        let want = signal((frame + len - phase) % len, channel);
-        assert_eq!(*sample, want, "frame {frame} replayed the wrong phase");
+        assert_eq!(*sample, signal(frame, channel), "frame {frame} of the loop");
+    }
+}
+
+#[test]
+fn rewinding_works_while_playing() {
+    let mut harness = Harness::new(128);
+    let pad = addr(0, 0);
+    record(&mut harness, pad, 0, 1);
+
+    harness.run_to(harness.position() + BAR / 3);
+    harness.command(Command::Rewind);
+
+    let out = harness.run_frames(32);
+    for (i, sample) in out.iter().enumerate() {
+        let frame = (i / CHANNELS) as u64;
+        let channel = i % CHANNELS;
+        assert_eq!(*sample, signal(frame, channel));
     }
 }
