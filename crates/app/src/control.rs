@@ -11,11 +11,11 @@ use core::time::Duration;
 
 use free_loop_core::{
     Command, Event, MAX_BPM, MIN_BPM, SLOT_COUNT, SessionModel, SlotAddr, TRACK_COUNT, Tempo,
-    column_mask, pad_bit, row_mask,
+    UNITY_STEP, column_mask, pad_bit, row_mask,
 };
 use free_loop_surface::{
     Axis, Chrome, Control, Led, LedColor, LedFrame, MUTE_SIDE, NEW_SIDE, PAUSE_SIDE, SELECTED,
-    SOLO_SIDE, SurfaceEvent, paint,
+    SOLO_SIDE, SurfaceEvent, VOLUME_SIDE, paint,
 };
 
 /// Beats per minute one press of the tempo buttons moves.
@@ -60,6 +60,8 @@ pub enum Mode {
     Mute,
     /// Which pads are soloed.
     Solo,
+    /// How loud each track plays.
+    Volume,
 }
 
 impl Mode {
@@ -69,7 +71,7 @@ impl Mode {
             Self::SavePicker => Some(Control::SaveSession),
             Self::LoadPicker => Some(Control::LoadSession),
             // Mute and solo open from the side column, not the top row.
-            Self::Perform | Self::Mute | Self::Solo => None,
+            Self::Perform | Self::Mute | Self::Solo | Self::Volume => None,
         }
     }
 }
@@ -139,6 +141,8 @@ pub struct Controller {
     mode: Mode,
     /// A bit per pad that holds a session.
     sessions: u64,
+    /// How loud each track plays, as a step on the gain ladder.
+    gains: [u8; TRACK_COUNT],
     /// The session in use, if one was loaded or saved this run.
     current: Option<SlotAddr>,
     frame: LedFrame,
@@ -175,6 +179,7 @@ impl Controller {
             text_running: false,
             mode: Mode::Perform,
             sessions: 0,
+            gains: [UNITY_STEP; TRACK_COUNT],
             current: None,
             dirty: true,
         }
@@ -213,6 +218,26 @@ impl Controller {
     /// Tells the controller which pads hold sessions.
     pub fn set_sessions(&mut self, sessions: impl IntoIterator<Item = SlotAddr>) {
         self.sessions = sessions.into_iter().map(bit).fold(0, |mask, b| mask | b);
+        self.dirty = true;
+    }
+
+    /// The level each track plays at.
+    pub fn gains(&self) -> [u8; TRACK_COUNT] {
+        self.gains
+    }
+
+    /// Sets a track's level, taken from the column pressed.
+    fn set_level(&mut self, addr: SlotAddr) {
+        let step = u8::try_from(addr.slot.index()).unwrap_or(UNITY_STEP);
+        self.gains[addr.track.index()] = step;
+        self.commands.push(Command::SetGains(self.gains));
+        self.dirty = true;
+    }
+
+    /// Takes the levels a loaded session came with.
+    pub fn set_gains(&mut self, gains: [u8; TRACK_COUNT]) {
+        self.gains = gains;
+        self.commands.push(Command::SetGains(gains));
         self.dirty = true;
     }
 
@@ -255,6 +280,8 @@ impl Controller {
         self.current = None;
         self.mode = Mode::Perform;
 
+        self.gains = [UNITY_STEP; TRACK_COUNT];
+        self.commands.push(Command::SetGains(self.gains));
         self.commands.push(Command::ClearAll);
         self.commands.push(Command::SetMutes {
             muted: 0,
@@ -327,6 +354,9 @@ impl Controller {
             {
                 self.toggle_group(addr);
             }
+            SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::Volume => {
+                self.set_level(addr);
+            }
             SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::LoadPicker => {
                 // Nothing to load from a pad that holds nothing.
                 if self.sessions & bit(addr) != 0 {
@@ -368,6 +398,9 @@ impl Controller {
                 if usize::from(index) == NEW_SIDE && self.mode == Mode::LoadPicker =>
             {
                 self.start_fresh();
+            }
+            SurfaceEvent::SidePressed { index } if usize::from(index) == VOLUME_SIDE => {
+                self.set_mode(Mode::Volume);
             }
             SurfaceEvent::SidePressed { index } if usize::from(index) == MUTE_SIDE => {
                 self.set_mode(Mode::Mute);
@@ -565,6 +598,7 @@ impl Controller {
     /// the grid happens to be.
     fn overlay(&mut self) {
         match self.mode {
+            Mode::Volume => self.frame.set_side(VOLUME_SIDE, Led::flash(SELECTED)),
             Mode::Mute => self.frame.set_side(MUTE_SIDE, Led::flash(SELECTED)),
             Mode::Solo => self.frame.set_side(SOLO_SIDE, Led::flash(SELECTED)),
             _ => {}
@@ -597,7 +631,9 @@ impl Controller {
             return None;
         }
 
-        self.frame = if self.tempo_repeating() {
+        self.frame = if self.mode == Mode::Volume {
+            paint::volumes(self.gains, self.chrome)
+        } else if self.tempo_repeating() {
             // A number cannot track a tempo that is still moving, so the grid shows it
             // instead until the button is let go.
             paint::tempo_gauge(self.tempo, self.chrome)
@@ -815,6 +851,68 @@ mod tests {
 
         controller.on_surface(side(MUTE_SIDE), T0);
         assert_eq!(controller.mode(), Mode::Perform);
+    }
+
+    #[test]
+    fn a_column_sets_the_level_for_its_row() {
+        let mut controller = controller();
+        controller.on_surface(side(VOLUME_SIDE), T0);
+        press(&mut controller, addr(2, 6), T0);
+
+        let mut expected = [UNITY_STEP; TRACK_COUNT];
+        expected[2] = 6;
+        assert_eq!(controller.gains(), expected);
+        assert_eq!(commands(&mut controller), vec![Command::SetGains(expected)]);
+    }
+
+    #[test]
+    fn a_level_press_does_not_launch_the_pad() {
+        let mut controller = controller();
+        controller.on_surface(side(VOLUME_SIDE), T0);
+        press(&mut controller, addr(0, 0), T0);
+
+        let sent = commands(&mut controller);
+        assert!(!sent.iter().any(|c| matches!(c, Command::Press(_))));
+
+        controller.tick(millis(2_000));
+        assert!(commands(&mut controller).is_empty(), "and cannot empty it");
+    }
+
+    #[test]
+    fn the_levels_show_as_a_bar_per_row() {
+        let mut controller = controller();
+        controller.on_surface(side(VOLUME_SIDE), T0);
+        press(&mut controller, addr(1, 5), T0);
+
+        let frame = controller.take_frame().unwrap();
+        assert!(frame.pad(addr(1, 0)).is_lit(), "the bottom of the bar");
+        assert!(frame.pad(addr(1, 5)).is_lit(), "up to the level");
+        assert!(!frame.pad(addr(1, 6)).is_lit(), "and no further");
+    }
+
+    #[test]
+    fn a_fresh_session_puts_every_level_back() {
+        let mut controller = controller();
+        controller.on_surface(side(VOLUME_SIDE), T0);
+        press(&mut controller, addr(0, 1), T0);
+        controller.on_surface(side(VOLUME_SIDE), T0);
+        commands(&mut controller);
+
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        controller.on_surface(side(NEW_SIDE), T0);
+
+        assert_eq!(controller.gains(), [UNITY_STEP; TRACK_COUNT]);
+    }
+
+    #[test]
+    fn a_loaded_session_brings_its_levels() {
+        let mut controller = controller();
+        let mut gains = [UNITY_STEP; TRACK_COUNT];
+        gains[4] = 1;
+
+        controller.set_gains(gains);
+        assert_eq!(controller.gains(), gains);
+        assert_eq!(commands(&mut controller), vec![Command::SetGains(gains)]);
     }
 
     #[test]

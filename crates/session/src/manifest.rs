@@ -1,7 +1,12 @@
 //! What a session records besides its audio.
 
-use free_loop_core::{IndexOutOfRange, SlotAddr, SlotId, TrackId};
+use free_loop_core::{IndexOutOfRange, SlotAddr, SlotId, TrackId, UNITY_STEP};
 use serde::{Deserialize, Serialize};
+
+/// Level for a clip saved before levels were recorded.
+fn unity() -> u8 {
+    UNITY_STEP
+}
 
 /// The file inside a session directory.
 pub const MANIFEST: &str = "session.toml";
@@ -24,6 +29,12 @@ pub struct ClipEntry {
     pub phase_frames: u64,
     /// Whether the pad was sounding.
     pub playing: bool,
+    /// The step on the gain ladder its track was playing at.
+    ///
+    /// Stored per clip although volume is set per track, so a clip keeps its level even
+    /// if it ends up on another track.
+    #[serde(default = "unity")]
+    pub gain_step: u8,
     /// The round trip compensated for when the take was sealed.
     ///
     /// Already folded into `phase_frames`. Recorded so the alignment is visible rather
@@ -96,6 +107,7 @@ mod tests {
                 phase_frames: 1_234,
                 playing: true,
                 capture_offset_frames: 2_348,
+                gain_step: 2,
             }],
         }
     }
@@ -139,6 +151,7 @@ mod tests {
         );
         let read: Manifest = toml::from_str(text).unwrap();
         assert_eq!(read.clips[0].capture_offset_frames, 0);
+        assert_eq!(read.clips[0].gain_step, UNITY_STEP, "and plays untouched");
     }
 
     #[test]
