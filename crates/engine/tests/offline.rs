@@ -872,3 +872,45 @@ fn recording_after_a_snapshot_still_captures() {
     assert!(out.iter().any(|s| *s != 0.0), "both loops should sound");
     drop(held);
 }
+
+#[test]
+fn recording_onto_a_loaded_session_captures_audio() {
+    let mut harness = Harness::new(128);
+    let loaded = addr(0, 0);
+    let fresh = addr(1, 0);
+
+    harness
+        .housekeeping
+        .loader
+        .send(LoadMessage::Begin {
+            tempo: Tempo::new(120.0).unwrap(),
+        })
+        .unwrap();
+    harness
+        .housekeeping
+        .loader
+        .send(LoadMessage::Clip {
+            addr: loaded,
+            clip: lent_clip(BAR, 0),
+            playing: true,
+        })
+        .unwrap();
+    harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+    harness.run_frames(128);
+
+    harness.command(Command::SetPaused(false));
+    let at = harness.position();
+    record(&mut harness, fresh, at, 1);
+
+    assert!(matches!(
+        harness.engine.state(fresh),
+        SlotState::Playing { .. }
+    ));
+
+    let from = harness.position();
+    let out = harness.run_to(from + BAR);
+    assert!(
+        out.iter().any(|s| *s != 0.0),
+        "the take recorded onto a loaded session should sound"
+    );
+}
