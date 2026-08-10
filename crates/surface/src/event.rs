@@ -15,6 +15,8 @@ pub enum Control {
     TempoDown,
     /// Send the transport back to the start.
     Rewind,
+    /// Switch mute and solo between rows and columns.
+    Axis,
     /// Open the session picker to load.
     LoadSession,
     /// Turn the click on or off.
@@ -32,6 +34,7 @@ impl Control {
             Self::TempoUp => 0,
             Self::TempoDown => 1,
             Self::Rewind => 2,
+            Self::Axis => 3,
             Self::LoadSession => 4,
             Self::ClickToggle => 5,
             Self::StopAll => 6,
@@ -45,6 +48,7 @@ impl Control {
             0 => Some(Self::TempoUp),
             1 => Some(Self::TempoDown),
             2 => Some(Self::Rewind),
+            3 => Some(Self::Axis),
             4 => Some(Self::LoadSession),
             5 => Some(Self::ClickToggle),
             6 => Some(Self::StopAll),
@@ -59,6 +63,7 @@ impl Control {
             Self::TempoUp,
             Self::TempoDown,
             Self::Rewind,
+            Self::Axis,
             Self::LoadSession,
             Self::ClickToggle,
             Self::StopAll,
@@ -114,10 +119,11 @@ mod tests {
     }
 
     #[test]
-    fn the_spare_buttons_carry_no_control() {
-        for index in [3, 99] {
-            assert_eq!(Control::from_index(index), None);
+    fn the_top_row_is_fully_bound() {
+        for index in 0..8 {
+            assert!(Control::from_index(index).is_some(), "button {index}");
         }
+        assert_eq!(Control::from_index(99), None);
     }
 
     #[test]

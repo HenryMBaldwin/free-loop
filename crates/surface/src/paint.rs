@@ -11,6 +11,10 @@ use crate::event::Control;
 use crate::led::{BEAT_LEDS, FIRST_BEAT_LED, Led, LedColor, LedFrame};
 
 /// Surface state that does not come from the session.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is a separate thing the surface shows, not a mode to fold together"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Chrome {
     /// Beat within the bar, zero-based.
@@ -21,6 +25,41 @@ pub struct Chrome {
     pub click_enabled: bool,
     /// Whether the transport is frozen.
     pub paused: bool,
+    /// Which way mute and solo group the grid.
+    pub axis: Axis,
+    /// Whether anything is silenced.
+    pub any_muted: bool,
+    /// Whether anything is soloed.
+    pub any_soloed: bool,
+}
+
+/// How mute and solo group the grid.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Axis {
+    /// A row at a time, so one track.
+    #[default]
+    Row,
+    /// A column at a time, so one slot across every track.
+    Column,
+}
+
+impl Axis {
+    /// The other one.
+    #[must_use]
+    pub fn flipped(self) -> Self {
+        match self {
+            Self::Row => Self::Column,
+            Self::Column => Self::Row,
+        }
+    }
+
+    /// The colour that stands for this grouping wherever it is shown.
+    pub fn color(self) -> LedColor {
+        match self {
+            Self::Row => LedColor::Amber,
+            Self::Column => LedColor::Blue,
+        }
+    }
 }
 
 impl Default for Chrome {
@@ -30,6 +69,9 @@ impl Default for Chrome {
             beats_per_bar: 4,
             click_enabled: true,
             paused: false,
+            axis: Axis::Row,
+            any_muted: false,
+            any_soloed: false,
         }
     }
 }
@@ -63,12 +105,20 @@ pub fn control(control: Control, chrome: Chrome) -> Led {
         Control::TempoDown | Control::TempoUp => Led::dim(LedColor::Blue),
         Control::StopAll => Led::dim(LedColor::Red),
         Control::Rewind => Led::dim(LedColor::Green),
+        // Carries the grouping colour, so the axis is readable without pressing anything.
+        Control::Axis => Led::solid(chrome.axis.color()),
         Control::LoadSession | Control::SaveSession => Led::dim(LedColor::White),
     }
 }
 
 /// The right-hand column button that runs the transport.
 pub const PAUSE_SIDE: usize = 4;
+
+/// The right-hand column button that opens the silenced pads.
+pub const MUTE_SIDE: usize = 5;
+
+/// The right-hand column button that opens the soloed pads.
+pub const SOLO_SIDE: usize = 6;
 
 /// How the transport button looks.
 pub fn pause_button(chrome: Chrome) -> Led {
@@ -135,7 +185,7 @@ pub fn tempo_gauge(tempo: f64, chrome: Chrome) -> LedFrame {
         frame.set_control(button.index(), control(button, chrome));
     }
     beat_indicator(&mut frame, chrome);
-    frame.set_side(PAUSE_SIDE, pause_button(chrome));
+    side_buttons(&mut frame, chrome);
 
     frame
 }
@@ -169,7 +219,7 @@ pub fn picker(
         frame.set_control(button.index(), control(button, chrome));
     }
     frame.set_control(active.index(), Led::flash(LedColor::White));
-    frame.set_side(PAUSE_SIDE, pause_button(chrome));
+    side_buttons(&mut frame, chrome);
 
     frame
 }
@@ -185,9 +235,61 @@ pub fn frame(session: &SessionModel, chrome: Chrome) -> LedFrame {
         frame.set_control(button.index(), control(button, chrome));
     }
     beat_indicator(&mut frame, chrome);
-    frame.set_side(PAUSE_SIDE, pause_button(chrome));
+    side_buttons(&mut frame, chrome);
 
-    // The other side buttons are unbound, so they stay dark.
+    frame
+}
+
+/// Paints the right-hand column.
+fn side_buttons(frame: &mut LedFrame, chrome: Chrome) {
+    frame.set_side(PAUSE_SIDE, pause_button(chrome));
+    frame.set_side(
+        MUTE_SIDE,
+        if chrome.any_muted {
+            Led::solid(LedColor::Red)
+        } else {
+            Led::dim(LedColor::Red)
+        },
+    );
+    frame.set_side(
+        SOLO_SIDE,
+        if chrome.any_soloed {
+            Led::solid(LedColor::Blue)
+        } else {
+            Led::dim(LedColor::Blue)
+        },
+    );
+}
+
+/// Paints which pads are silenced or soloed.
+///
+/// `holds` marks pads with a clip, so an empty pad is not offered as something to
+/// silence. `marked` is what is already set. The grouping colour carries through from
+/// the axis button, so row and column mode never look alike.
+pub fn mutes(holds: u64, marked: u64, chrome: Chrome, soloing: bool) -> LedFrame {
+    let mut frame = LedFrame::new();
+    let group = chrome.axis.color();
+
+    for addr in SlotAddr::all() {
+        let bit = 1_u64 << (addr.track.index() * SLOT_COUNT + addr.slot.index());
+        let led = match (holds & bit != 0, marked & bit != 0) {
+            (_, true) if soloing => Led::solid(group),
+            (_, true) => Led::flash(LedColor::Red),
+            (true, false) => Led::dim(LedColor::White),
+            (false, false) => Led::OFF,
+        };
+        frame.set_pad(addr, led);
+    }
+
+    for button in Control::all() {
+        frame.set_control(button.index(), control(button, chrome));
+    }
+    beat_indicator(&mut frame, chrome);
+    side_buttons(&mut frame, chrome);
+
+    let opened = if soloing { SOLO_SIDE } else { MUTE_SIDE };
+    frame.set_side(opened, Led::flash(group));
+
     frame
 }
 
@@ -199,6 +301,10 @@ mod tests {
     use free_loop_core::{ClipId, Frames, SlotId, TrackId};
 
     use crate::led::LedStyle;
+
+    fn bit(addr: SlotAddr) -> u64 {
+        1 << (addr.track.index() * SLOT_COUNT + addr.slot.index())
+    }
 
     fn addr(track: u8, slot: u8) -> SlotAddr {
         SlotAddr::new(TrackId::new(track).unwrap(), SlotId::new(slot).unwrap())
@@ -459,6 +565,85 @@ mod tests {
     }
 
     #[test]
+    fn the_axis_button_carries_the_grouping_colour() {
+        let rows = frame(&SessionModel::new(), Chrome::default());
+        let columns = frame(
+            &SessionModel::new(),
+            Chrome {
+                axis: Axis::Column,
+                ..Chrome::default()
+            },
+        );
+
+        let button = Control::Axis.index();
+        assert_ne!(rows.control(button), columns.control(button));
+        assert_eq!(rows.control(button).color, Axis::Row.color());
+        assert_eq!(columns.control(button).color, Axis::Column.color());
+    }
+
+    #[test]
+    fn an_axis_flips_and_comes_back() {
+        assert_eq!(Axis::Row.flipped(), Axis::Column);
+        assert_eq!(Axis::Row.flipped().flipped(), Axis::Row);
+        assert_ne!(Axis::Row.color(), Axis::Column.color());
+    }
+
+    #[test]
+    fn the_mute_screen_marks_what_is_silenced() {
+        let holds = bit(addr(0, 0)) | bit(addr(1, 1));
+        let painted = mutes(holds, bit(addr(0, 0)), Chrome::default(), false);
+
+        assert_eq!(painted.pad(addr(0, 0)), Led::flash(LedColor::Red));
+        assert_eq!(painted.pad(addr(1, 1)), Led::dim(LedColor::White));
+        assert_eq!(painted.pad(addr(7, 7)), Led::OFF, "nothing to silence");
+    }
+
+    #[test]
+    fn the_solo_screen_uses_the_grouping_colour() {
+        let holds = bit(addr(0, 0));
+        let rows = mutes(holds, holds, Chrome::default(), true);
+        let columns = mutes(
+            holds,
+            holds,
+            Chrome {
+                axis: Axis::Column,
+                ..Chrome::default()
+            },
+            true,
+        );
+
+        assert_eq!(rows.pad(addr(0, 0)), Led::solid(Axis::Row.color()));
+        assert_ne!(rows.pad(addr(0, 0)), columns.pad(addr(0, 0)));
+    }
+
+    #[test]
+    fn the_screen_flashes_the_button_that_opened_it() {
+        let muting = mutes(0, 0, Chrome::default(), false);
+        let soloing = mutes(0, 0, Chrome::default(), true);
+
+        assert_eq!(muting.side(MUTE_SIDE).style, LedStyle::Flash);
+        assert_eq!(soloing.side(SOLO_SIDE).style, LedStyle::Flash);
+        assert_ne!(muting.side(SOLO_SIDE).style, LedStyle::Flash);
+    }
+
+    #[test]
+    fn the_side_buttons_show_whether_anything_is_set() {
+        let quiet = frame(&SessionModel::new(), Chrome::default());
+        let active = frame(
+            &SessionModel::new(),
+            Chrome {
+                any_muted: true,
+                any_soloed: true,
+                ..Chrome::default()
+            },
+        );
+
+        assert_eq!(quiet.side(MUTE_SIDE).style, LedStyle::Dim);
+        assert_eq!(active.side(MUTE_SIDE).style, LedStyle::Solid);
+        assert_eq!(active.side(SOLO_SIDE).style, LedStyle::Solid);
+    }
+
+    #[test]
     fn the_picker_marks_saved_pads_and_the_current_one() {
         let saved = addr(0, 1);
         let current = addr(2, 3);
@@ -505,9 +690,10 @@ mod tests {
         use crate::led::SIDE_COUNT;
 
         let painted = frame(&SessionModel::new(), Chrome::default());
+        let bound = [PAUSE_SIDE, MUTE_SIDE, SOLO_SIDE];
         assert!(
             (0..SIDE_COUNT)
-                .filter(|i| *i != PAUSE_SIDE)
+                .filter(|i| !bound.contains(i))
                 .all(|i| !painted.side(i).is_lit())
         );
     }
