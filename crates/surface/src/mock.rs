@@ -15,6 +15,7 @@ pub struct MockSurface {
     pending: VecDeque<SurfaceEvent>,
     frames: Vec<LedFrame>,
     texts: Vec<Option<String>>,
+    clock: u32,
     fail_next_render: bool,
 }
 
@@ -44,6 +45,11 @@ impl MockSurface {
         &self.texts
     }
 
+    /// MIDI clock ticks passed on so far.
+    pub fn clock(&self) -> u32 {
+        self.clock
+    }
+
     /// Makes the next render fail, to exercise the caller's error path.
     pub fn fail_next_render(&mut self) {
         self.fail_next_render = true;
@@ -65,6 +71,11 @@ impl ControlSurface for MockSurface {
 
     fn clear(&mut self) -> Result<(), SurfaceError> {
         self.frames.push(LedFrame::new());
+        Ok(())
+    }
+
+    fn send_clock(&mut self, ticks: u32) -> Result<(), SurfaceError> {
+        self.clock += ticks;
         Ok(())
     }
 

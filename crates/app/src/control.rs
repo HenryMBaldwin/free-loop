@@ -445,7 +445,9 @@ impl Controller {
             | Event::ClipReleased { .. }
             | Event::RecordBufferLow { .. }
             | Event::Xrun { .. }
-            | Event::SnapshotComplete { .. } => {}
+            | Event::SnapshotComplete { .. }
+            // The clock goes straight to the surface rather than through the grid.
+            | Event::Clock { .. } => {}
         }
     }
 
@@ -1062,8 +1064,8 @@ mod tests {
         let frame = controller.take_frame().unwrap();
         assert_eq!(
             frame.control(FIRST_BEAT_LED + 2),
-            Led::solid(LedColor::Blue),
-            "the current beat"
+            Led::dim(LedColor::Blue),
+            "the current beat, off the backbeat"
         );
         // Beat one shares the tempo up button, which keeps its own colour meanwhile.
         assert_ne!(frame.control(FIRST_BEAT_LED), Led::solid(LedColor::White));

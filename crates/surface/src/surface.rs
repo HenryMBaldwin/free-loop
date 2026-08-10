@@ -54,6 +54,18 @@ pub trait ControlSurface {
         Ok(())
     }
 
+    /// Passes on MIDI clock ticks, if the device uses them.
+    ///
+    /// Devices that animate to their own clock ignore them.
+    ///
+    /// # Errors
+    ///
+    /// [`SurfaceError`] if the device rejected the update.
+    fn send_clock(&mut self, ticks: u32) -> Result<(), SurfaceError> {
+        let _ = ticks;
+        Ok(())
+    }
+
     /// Stops any text and gives the grid back.
     ///
     /// # Errors
