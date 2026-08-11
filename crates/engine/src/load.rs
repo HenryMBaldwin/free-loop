@@ -75,9 +75,17 @@ pub struct LoadInbox {
 impl LoadInbox {
     /// Takes everything queued.
     pub fn drain(&mut self, mut take: impl FnMut(LoadMessage)) {
-        while let Ok(message) = self.inbox.pop() {
+        while let Some(message) = self.pop() {
             take(message);
         }
+    }
+
+    /// Takes the next message, if there is one.
+    ///
+    /// For a reader that has to stop part way, such as one applying a load before it starts
+    /// receiving the next.
+    pub fn pop(&mut self) -> Option<LoadMessage> {
+        self.inbox.pop().ok()
     }
 }
 
