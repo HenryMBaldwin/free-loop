@@ -787,6 +787,7 @@ fn report(event: Event) {
             );
         }
         Event::TempoRejected => eprintln!("tempo is locked while clips exist"),
+        Event::Tempo { bpm } => println!("transport is at {bpm:.1} bpm"),
         // Clipping and short capture report per block, too often to print. `ClipReport`
         // and `XrunReport` throttle them.
         Event::Clipped { .. }
