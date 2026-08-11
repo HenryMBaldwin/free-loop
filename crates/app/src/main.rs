@@ -112,6 +112,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let store = SessionStore::new(path.parent().unwrap_or(Path::new(".")).join("sessions"));
     controller.set_sessions(store.index());
+    controller.set_input_count(negotiated.channels);
+    controller.set_inputs([config.track_input(); free_loop_core::TRACK_COUNT]);
 
     println!(
         "transport: {:.1} bpm, {}/{}",

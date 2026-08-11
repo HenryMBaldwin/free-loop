@@ -6,7 +6,7 @@ use core::cmp::Ordering;
 
 use free_loop_core::{
     MAX_BPM, MIN_BPM, PadMask, SLOT_COUNT, SessionModel, SlotAddr, SlotState, TRACK_COUNT,
-    UNITY_STEP, pad_bit,
+    TrackInput, UNITY_STEP, pad_bit,
 };
 
 use crate::event::Control;
@@ -31,6 +31,10 @@ pub struct Chrome {
     pub soloed: PadMask,
     /// How loud each track plays, as a step on the gain ladder.
     pub gains: [u8; TRACK_COUNT],
+    /// Which input each track records.
+    pub inputs: [TrackInput; TRACK_COUNT],
+    /// Input channels the device offers.
+    pub input_count: usize,
 }
 
 /// How mute and solo group the grid.
@@ -89,6 +93,8 @@ impl Default for Chrome {
             muted: 0,
             soloed: 0,
             gains: [UNITY_STEP; TRACK_COUNT],
+            inputs: [TrackInput::Stereo; TRACK_COUNT],
+            input_count: 2,
         }
     }
 }
@@ -148,6 +154,9 @@ pub fn control(control: Control, chrome: Chrome) -> Led {
 /// Colour a button takes while it is waiting for the press that follows it.
 pub const SELECTED: LedColor = LedColor::Pink;
 
+/// Colour the input selection is shown in, matching its side button.
+pub const INPUT: LedColor = LedColor::Green;
+
 /// Colour a silenced group takes, matching its side button.
 pub const MUTED: LedColor = LedColor::Red;
 
@@ -156,6 +165,9 @@ pub const SOLOED: LedColor = LedColor::Blue;
 
 /// The right-hand column button that opens the track levels.
 pub const VOLUME_SIDE: usize = 0;
+
+/// The right-hand column button that opens the track inputs.
+pub const INPUT_SIDE: usize = 1;
 
 /// The right-hand column button that runs the transport.
 pub const PAUSE_SIDE: usize = 4;
@@ -266,6 +278,35 @@ pub fn volumes(chrome: Chrome) -> LedFrame {
     frame
 }
 
+/// Paints each row as the input its track records.
+///
+/// Column zero is the stereo pair. The columns after it are one input each, as many as the
+/// device offers. The rest are unlit.
+pub fn inputs(chrome: Chrome) -> LedFrame {
+    let mut frame = LedFrame::new();
+
+    for addr in SlotAddr::all() {
+        let chosen = chrome.inputs[addr.track.index()].column();
+        let column = addr.slot.index();
+        let led = if column > chrome.input_count {
+            Led::OFF
+        } else if column == chosen {
+            Led::solid(INPUT)
+        } else {
+            Led::dim(INPUT)
+        };
+        frame.set_pad(addr, led);
+    }
+
+    for button in Control::all() {
+        frame.set_control(button.index(), control(button, chrome));
+    }
+    beat_indicator(&mut frame, chrome);
+    side_buttons(&mut frame, chrome);
+
+    frame
+}
+
 /// Paints the session picker over the grid.
 ///
 /// `existing` has a bit set per pad that holds a session, indexed track-major. `current`
@@ -332,6 +373,18 @@ fn side_buttons(frame: &mut LedFrame, chrome: Chrome) {
             Led::solid(LedColor::Amber)
         } else {
             Led::dim(LedColor::Amber)
+        },
+    );
+    let picked = chrome
+        .inputs
+        .iter()
+        .any(|input| *input != TrackInput::Stereo);
+    frame.set_side(
+        INPUT_SIDE,
+        if picked {
+            Led::solid(INPUT)
+        } else {
+            Led::dim(INPUT)
         },
     );
     frame.set_side(PAUSE_SIDE, pause_button(chrome));
@@ -855,11 +908,45 @@ mod tests {
     }
 
     #[test]
+    fn an_input_row_lights_the_column_its_track_records() {
+        let mut chrome = Chrome::default();
+        chrome.inputs[2] = TrackInput::Mono(1);
+        let painted = inputs(chrome);
+
+        let row = TrackId::new(2).unwrap();
+        let chosen = SlotAddr::new(row, SlotId::new(2).unwrap());
+        let other = SlotAddr::new(row, SlotId::new(0).unwrap());
+        assert_eq!(
+            painted.pad(chosen),
+            Led::solid(INPUT),
+            "input 1 is column 2"
+        );
+        assert_eq!(painted.pad(other), Led::dim(INPUT), "stereo is offered");
+    }
+
+    #[test]
+    fn columns_past_the_devices_inputs_stay_dark() {
+        let chrome = Chrome {
+            input_count: 2,
+            ..Chrome::default()
+        };
+        let painted = inputs(chrome);
+        let row = TrackId::new(0).unwrap();
+
+        for column in 0..=2 {
+            let addr = SlotAddr::new(row, SlotId::new(column).unwrap());
+            assert!(painted.pad(addr).is_lit(), "column {column} is offered");
+        }
+        let past = SlotAddr::new(row, SlotId::new(3).unwrap());
+        assert!(!painted.pad(past).is_lit(), "the device has no third input");
+    }
+
+    #[test]
     fn the_unbound_side_buttons_stay_dark() {
         use crate::led::SIDE_COUNT;
 
         let painted = frame(&SessionModel::new(), Chrome::default());
-        let bound = [VOLUME_SIDE, PAUSE_SIDE, MUTE_SIDE, SOLO_SIDE];
+        let bound = [VOLUME_SIDE, INPUT_SIDE, PAUSE_SIDE, MUTE_SIDE, SOLO_SIDE];
         assert!(
             (0..SIDE_COUNT)
                 .filter(|i| !bound.contains(i))
