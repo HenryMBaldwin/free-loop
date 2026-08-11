@@ -409,6 +409,7 @@ fn save(
                 free_loop_core::SlotState::Playing { .. }
                     | free_loop_core::SlotState::QueuedStop { .. }
             ),
+            launch_anchor: snapshot.launch_anchor,
             clip: &snapshot.clip,
         })
         .collect();
@@ -473,6 +474,7 @@ fn load(
             addr: loaded.addr,
             clip: std::sync::Arc::new(loaded.clip),
             playing: loaded.playing,
+            launch_anchor: loaded.launch_anchor,
         })?;
     }
     loader.send(LoadMessage::End)?;

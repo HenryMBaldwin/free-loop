@@ -65,6 +65,8 @@ pub struct SavedClip<'a> {
     pub playing: bool,
     /// The step on the gain ladder its track was playing at.
     pub gain_step: u8,
+    /// Where the launch that is playing it put it, if the track restarts its clips.
+    pub launch_anchor: Option<Frames>,
     /// The audio.
     pub clip: &'a Clip,
 }
@@ -106,6 +108,8 @@ pub struct LoadedClip {
     pub playing: bool,
     /// The step on the gain ladder its track should play at.
     pub gain_step: u8,
+    /// Where the launch that was playing it put it, if there was one.
+    pub launch_anchor: Option<Frames>,
     /// The audio, with storage owned by the caller.
     pub clip: Clip,
 }
@@ -218,6 +222,9 @@ impl SessionStore {
                 file,
                 len_frames: len.0,
                 phase_frames: phase_of(saved.clip),
+                launch_phase_frames: saved
+                    .launch_anchor
+                    .map(|anchor| phase_in(anchor, saved.clip.len())),
                 playing: saved.playing,
                 capture_offset_frames: saved.clip.capture_offset().0,
                 gain_step: saved.gain_step,
@@ -292,6 +299,7 @@ impl SessionStore {
                 addr: entry.addr()?,
                 playing: entry.playing,
                 gain_step: entry.gain_step,
+                launch_anchor: entry.launch_phase_frames.map(Frames),
                 clip: read_wav(&dir.join(&entry.file), entry, channels)?,
             });
         }
@@ -324,12 +332,12 @@ fn index_as_u8(index: usize) -> u8 {
 
 /// How far into a bar the loop starts, which is what survives a restart.
 fn phase_of(clip: &Clip) -> u64 {
-    let len = clip.len().0;
-    if len == 0 {
-        0
-    } else {
-        clip.recorded_at().0 % len
-    }
+    phase_in(clip.recorded_at(), clip.len())
+}
+
+/// Where `anchor` sits inside a loop of `len`.
+fn phase_in(anchor: Frames, len: Frames) -> u64 {
+    if len.0 == 0 { 0 } else { anchor.0 % len.0 }
 }
 
 fn create_dir(dir: &Path) -> Result<(), SessionError> {
@@ -521,6 +529,58 @@ mod tests {
     }
 
     #[test]
+    fn a_launched_anchor_survives_a_round_trip() {
+        let dir = TempDir::new("launch-anchor");
+        let store = SessionStore::new(&dir.0);
+        let clip = clip(128, 300);
+
+        store
+            .save(
+                addr(0, 0),
+                &data(vec![SavedClip {
+                    addr: addr(0, 0),
+                    playing: true,
+                    gain_step: UNITY_STEP,
+                    // A launch put it a bar off the phase it was recorded at.
+                    launch_anchor: Some(Frames(365)),
+                    clip: &clip,
+                }]),
+            )
+            .unwrap();
+
+        let read = store.load(addr(0, 0), 48_000, 2).unwrap();
+        assert_eq!(
+            read.clips[0].launch_anchor,
+            Some(Frames(365 % 128)),
+            "where the launch put it, not where it was recorded"
+        );
+    }
+
+    #[test]
+    fn a_clip_with_no_launch_anchor_plays_where_it_was_recorded() {
+        let dir = TempDir::new("no-launch-anchor");
+        let store = SessionStore::new(&dir.0);
+        let clip = clip(128, 300);
+
+        store
+            .save(
+                addr(0, 0),
+                &data(vec![SavedClip {
+                    addr: addr(0, 0),
+                    playing: true,
+                    gain_step: UNITY_STEP,
+                    launch_anchor: None,
+                    clip: &clip,
+                }]),
+            )
+            .unwrap();
+
+        let read = store.load(addr(0, 0), 48_000, 2).unwrap();
+        assert_eq!(read.clips[0].launch_anchor, None);
+        assert_eq!(read.clips[0].clip.recorded_at(), Frames(300 % 128));
+    }
+
+    #[test]
     fn a_session_that_says_nothing_about_a_track_defaults_it() {
         let loaded = LoadedSession {
             manifest: Manifest {
@@ -588,6 +648,7 @@ mod tests {
                     addr: addr(1, 0),
                     playing: true,
                     gain_step: 2,
+                    launch_anchor: None,
                     clip: &audio,
                 }]),
             )
@@ -626,6 +687,7 @@ mod tests {
                     addr: addr(0, 0),
                     playing: false,
                     gain_step: UNITY_STEP,
+                    launch_anchor: None,
                     clip: &audio,
                 }]),
             )
@@ -657,6 +719,7 @@ mod tests {
                     addr: addr(0, 0),
                     playing: false,
                     gain_step: UNITY_STEP,
+                    launch_anchor: None,
                     clip: &audio,
                 }]),
             )
@@ -682,12 +745,14 @@ mod tests {
                         addr: addr(0, 0),
                         playing: false,
                         gain_step: UNITY_STEP,
+                        launch_anchor: None,
                         clip: &audio,
                     },
                     SavedClip {
                         addr: addr(1, 1),
                         playing: false,
                         gain_step: UNITY_STEP,
+                        launch_anchor: None,
                         clip: &audio,
                     },
                 ]),
@@ -702,6 +767,7 @@ mod tests {
                     addr: addr(0, 0),
                     playing: false,
                     gain_step: UNITY_STEP,
+                    launch_anchor: None,
                     clip: &audio,
                 }]),
             )
@@ -738,6 +804,7 @@ mod tests {
                         addr: addr(0, 0),
                         playing: false,
                         gain_step: UNITY_STEP,
+                        launch_anchor: None,
                         clip: &audio,
                     }]),
                 )
@@ -774,6 +841,7 @@ mod tests {
                     addr: addr(4, 5),
                     playing: true,
                     gain_step: UNITY_STEP,
+                    launch_anchor: None,
                     clip: &audio,
                 }]),
             )
@@ -813,6 +881,7 @@ mod tests {
                     addr: addr(0, 0),
                     playing: false,
                     gain_step: UNITY_STEP,
+                    launch_anchor: None,
                     clip: &audio,
                 }]),
             )
@@ -848,6 +917,7 @@ mod tests {
                     addr: addr(0, 0),
                     playing: false,
                     gain_step: UNITY_STEP,
+                    launch_anchor: None,
                     clip: &audio,
                 }]),
             )
@@ -885,12 +955,14 @@ mod tests {
                         addr: addr(1, 0),
                         playing: false,
                         gain_step: 2,
+                        launch_anchor: None,
                         clip: &audio,
                     },
                     SavedClip {
                         addr: addr(3, 0),
                         playing: false,
                         gain_step: 6,
+                        launch_anchor: None,
                         clip: &audio,
                     },
                 ]),
