@@ -240,6 +240,11 @@ fn run(s: Session<'_>) {
         // Storage the engine has finished with comes back here to be dropped.
         housekeeping.recycler.take_borrowed().for_each(drop);
 
+        // Ahead of the commands, and never refused: the slot holds one value, so there is
+        // nothing to drop.
+        if let Some(settings) = controller.take_settings() {
+            io.publish_settings(settings);
+        }
         for command in controller.drain_commands() {
             if io.send(command).is_err() {
                 eprintln!("audio thread is not keeping up; dropped {command:?}");

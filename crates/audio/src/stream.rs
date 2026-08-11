@@ -9,7 +9,7 @@ use cpal::{
     Device, FromSample, Host, InputCallbackInfo, OutputCallbackInfo, SampleFormat, SizedSample,
     Stream, StreamConfig,
 };
-use free_loop_core::{Command, Event, Frames};
+use free_loop_core::{Command, Event, Frames, Settings};
 use free_loop_engine::{Engine, EventSink};
 use rtrb::{Consumer, Producer, RingBuffer};
 
@@ -18,6 +18,12 @@ use crate::config::{
 };
 use crate::error::AudioError;
 use crate::ring::{CaptureReader, CaptureWriter, ChannelMap, MAX_BLOCK_FRAMES, capture_ring};
+
+/// Where the latest whole-state settings wait for the engine.
+///
+/// The audio thread only tries the lock, and takes the settings on a later block if the
+/// control thread is holding it.
+type SettingsSlot = Arc<Mutex<Option<Settings>>>;
 
 /// Commands the control thread can queue before the audio thread drains them.
 const COMMAND_SLOTS: usize = 256;
@@ -215,11 +221,13 @@ impl Opened {
         };
         let input_latency = Arc::new(AtomicU32::new(0));
         let capture_offset = Arc::new(AtomicU32::new(0));
+        let settings = Arc::new(Mutex::new(None));
 
         let shared = Arc::new(Mutex::new(Shared {
             engine,
             commands: command_rx,
             events: event_tx,
+            settings: Arc::clone(&settings),
             reader: None,
             captured: vec![0.0; MAX_BLOCK_FRAMES * negotiated.channels],
             rendered: vec![0.0; MAX_BLOCK_FRAMES * negotiated.channels],
@@ -232,6 +240,7 @@ impl Opened {
             shared,
             commands,
             events,
+            settings,
             negotiated,
             config: self.config.clone(),
             health,
@@ -290,6 +299,8 @@ pub struct AudioIo {
     shared: Arc<Mutex<Shared>>,
     commands: Producer<Command>,
     events: Consumer<Event>,
+    /// The latest settings, waiting for the engine to take them.
+    settings: SettingsSlot,
     negotiated: Negotiated,
     /// What was asked for, so the same request can be made again.
     config: AudioConfig,
@@ -357,7 +368,7 @@ impl AudioIo {
 
         // Nothing is draining the command ring, so it would otherwise fill and start
         // refusing presses.
-        self.locked().drain_commands();
+        self.locked().drain_control();
 
         if self.retry_at.is_some_and(|at| now < at) {
             return None;
@@ -487,6 +498,14 @@ impl AudioIo {
             .map_err(|rtrb::PushError::Full(c)| c)
     }
 
+    /// Leaves the settings for the engine to take, replacing any it has not taken yet.
+    pub fn publish_settings(&self, settings: Settings) {
+        *self
+            .settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(settings);
+    }
+
     /// Hands every queued report to `handler`.
     pub fn drain_events(&mut self, mut handler: impl FnMut(Event)) {
         while let Ok(event) = self.events.pop() {
@@ -562,6 +581,8 @@ struct Shared {
     engine: Engine,
     commands: Consumer<Command>,
     events: Producer<Event>,
+    /// Shared with [`AudioIo`], holding whatever the control thread last set.
+    settings: SettingsSlot,
     /// Set when a stream starts. Without one there is no capture, so input reads silent.
     reader: Option<CaptureReader>,
     captured: Vec<f32>,
@@ -625,15 +646,24 @@ impl Render {
 }
 
 impl Shared {
-    /// Applies everything the control thread has queued.
-    fn drain_commands(&mut self) {
+    /// Applies the latest settings, then everything the control thread has queued.
+    ///
+    /// Settings first, so a pad pressed in the same pass records the input just chosen.
+    fn drain_control(&mut self) {
         let Self {
             engine,
             commands,
             events,
+            settings,
             dropped_events,
             ..
         } = self;
+
+        if let Ok(mut slot) = settings.try_lock()
+            && let Some(settings) = slot.take()
+        {
+            engine.apply_settings(settings);
+        }
 
         let mut sink = RingSink {
             events,
@@ -651,7 +681,7 @@ impl Shared {
 
     /// Renders one block, returning how many frames of capture it had to work with.
     fn fill<T: FromSample<f32> + Copy>(&mut self, out: &mut [T]) -> usize {
-        self.drain_commands();
+        self.drain_control();
 
         let Self {
             engine,
