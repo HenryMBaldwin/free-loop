@@ -45,6 +45,11 @@ pub enum Event {
         /// The clip that was let go.
         clip: ClipId,
     },
+    /// A recording could not start because no storage was free. The pad is left empty.
+    RecordingRefused {
+        /// Which pad was armed.
+        addr: SlotAddr,
+    },
     /// A recording is running out of preallocated buffer. Capture stops early unless
     /// more is supplied.
     RecordBufferLow {

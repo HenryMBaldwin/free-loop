@@ -685,6 +685,7 @@ impl Controller {
             | Event::ClipRecorded { .. }
             | Event::ClipReleased { .. }
             | Event::RecordBufferLow { .. }
+            | Event::RecordingRefused { .. }
             | Event::Xrun { .. }
             | Event::Clipped { .. }
             | Event::SnapshotComplete { .. }
