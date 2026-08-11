@@ -222,7 +222,7 @@ fn run(s: Session<'_>) {
                 Request::SaveSession(addr) => {
                     next_request = next_request.wrapping_add(1);
                     snapshots.clear();
-                    pending_save = ask_for_snapshot(io, next_request, addr, controller);
+                    pending_save = ask_for_snapshot(io, next_request, addr, controller, now);
                 }
                 Request::LoadSession(addr) => {
                     load_session(
@@ -264,6 +264,15 @@ fn run(s: Session<'_>) {
         {
             eprintln!("surface: {error}");
         }
+        if let Some(save) = pending_save.take_if(|save| now >= save.deadline) {
+            eprintln!(
+                "save to {}{} never completed; nothing was written",
+                save.addr.track.index(),
+                save.addr.slot.index()
+            );
+            controller.cancel_picker();
+            snapshots.clear();
+        }
         collect_snapshots(
             &mut housekeeping.snapshots,
             pending_save.as_ref(),
@@ -283,6 +292,9 @@ fn run(s: Session<'_>) {
 }
 
 /// How long to gather clipping before saying anything.
+/// How long a save waits for the engine to publish its clips before giving up.
+const SAVE_TIMEOUT: Duration = Duration::from_secs(2);
+
 const XRUN_REPORT_EVERY: Duration = Duration::from_secs(2);
 
 const CLIP_REPORT_EVERY: Duration = Duration::from_secs(2);
@@ -388,12 +400,14 @@ fn ask_for_snapshot(
     request: u32,
     addr: free_loop_core::SlotAddr,
     controller: &Controller,
+    now: Duration,
 ) -> Option<PendingSave> {
     if io.send(Command::Snapshot { request }).is_err() {
         eprintln!("could not ask for a snapshot");
         return None;
     }
     Some(PendingSave {
+        deadline: now + SAVE_TIMEOUT,
         request,
         addr,
         settings: settings(controller),
@@ -466,6 +480,11 @@ fn settle_save(
 
 /// A save waiting on the engine to publish its clips.
 struct PendingSave {
+    /// When the answer stops being expected.
+    ///
+    /// A completion is a reply, not a state, so a lost one cannot be replayed. The save is
+    /// abandoned instead of waiting for something that is not coming.
+    deadline: Duration,
     /// The request the engine will tag its answer with.
     request: u32,
     /// Where the session goes.
