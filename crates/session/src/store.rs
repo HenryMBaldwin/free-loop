@@ -117,6 +117,92 @@ pub struct LoadedClip {
     pub clip: Clip,
 }
 
+/// A session's manifest, read and structurally sound, with its audio still on disk.
+#[derive(Debug)]
+pub struct Inspected {
+    manifest: Manifest,
+    dir: PathBuf,
+}
+
+impl Inspected {
+    /// What the file says.
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
+    /// Whether this session can be played on the device described, within `budget`.
+    ///
+    /// Checks every audio file's header as well as the manifest, so a session is refused
+    /// before any of it is allocated rather than part way through.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError`] if the session was recorded for another device, asks for more audio
+    /// than `budget` allows, or its files do not hold what it claims.
+    pub fn accepts(
+        &self,
+        sample_rate: u32,
+        channels: u16,
+        budget: Frames,
+    ) -> Result<(), SessionError> {
+        if self.manifest.sample_rate != sample_rate {
+            return Err(SessionError::Mismatch {
+                what: "Hz",
+                wanted: sample_rate,
+                found: self.manifest.sample_rate,
+            });
+        }
+        if self.manifest.channels != channels {
+            return Err(SessionError::Mismatch {
+                what: "channels",
+                wanted: u32::from(channels),
+                found: u32::from(self.manifest.channels),
+            });
+        }
+        self.manifest
+            .validate(budget.0)
+            .map_err(SessionError::Invalid)?;
+
+        for entry in &self.manifest.clips {
+            let pad = entry.addr()?;
+            check_wav(
+                &self.dir.join(Manifest::file_name(pad)),
+                entry,
+                channels,
+                sample_rate,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Reads the audio in, into storage the caller owns.
+    ///
+    /// The second half of a load. Call [`Inspected::accepts`] first.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError`] if a file cannot be read.
+    pub fn materialise(self, channels: u16) -> Result<LoadedSession, SessionError> {
+        let mut clips = Vec::with_capacity(self.manifest.clips.len());
+        for entry in &self.manifest.clips {
+            let pad = entry.addr()?;
+            clips.push(LoadedClip {
+                addr: pad,
+                playing: entry.playing,
+                gain_step: entry.gain_step,
+                launch_anchor: entry.launch_phase_frames.map(Frames),
+                // Generated from the pad rather than taken from the file, which could name
+                // anything, including a path out of the session directory.
+                clip: read_wav(&self.dir.join(Manifest::file_name(pad)), entry, channels)?,
+            });
+        }
+        Ok(LoadedSession {
+            manifest: self.manifest,
+            clips,
+        })
+    }
+}
+
 /// A session read back off disk.
 #[derive(Debug)]
 pub struct LoadedSession {
@@ -361,45 +447,24 @@ impl SessionStore {
         channels: u16,
         budget: Frames,
     ) -> Result<LoadedSession, SessionError> {
-        let manifest = self.manifest(addr)?;
-        if manifest.sample_rate != sample_rate {
-            return Err(SessionError::Mismatch {
-                what: "Hz",
-                wanted: sample_rate,
-                found: manifest.sample_rate,
-            });
-        }
-        if manifest.channels != channels {
-            return Err(SessionError::Mismatch {
-                what: "channels",
-                wanted: u32::from(channels),
-                found: u32::from(manifest.channels),
-            });
-        }
+        let checked = self.inspect(addr)?;
+        checked.accepts(sample_rate, channels, budget)?;
+        checked.materialise(channels)
+    }
 
-        manifest.validate(budget.0).map_err(SessionError::Invalid)?;
-
-        let dir = self.dir(addr);
-        let mut clips = Vec::with_capacity(manifest.clips.len());
-        for entry in &manifest.clips {
-            let pad = entry.addr()?;
-            clips.push(LoadedClip {
-                addr: pad,
-                playing: entry.playing,
-                gain_step: entry.gain_step,
-                launch_anchor: entry.launch_phase_frames.map(Frames),
-                // Generated from the pad rather than taken from the file, which could name
-                // anything, including a path out of the session directory.
-                clip: read_wav(
-                    &dir.join(Manifest::file_name(pad)),
-                    entry,
-                    channels,
-                    sample_rate,
-                )?,
-            });
-        }
-
-        Ok(LoadedSession { manifest, clips })
+    /// Reads and checks a pad's manifest without touching its audio.
+    ///
+    /// The first half of a load. Everything a session can be refused for is decided from
+    /// here, before any storage is allocated.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError`] if the manifest is missing, malformed or self-contradictory.
+    pub fn inspect(&self, addr: SlotAddr) -> Result<Inspected, SessionError> {
+        Ok(Inspected {
+            manifest: self.manifest(addr)?,
+            dir: self.dir(addr),
+        })
     }
 
     /// Deletes a pad's session.
@@ -510,21 +575,21 @@ fn write_wav(
     })
 }
 
-/// Reads one clip back into storage the caller owns.
-fn read_wav(
+/// Whether an audio file holds what its manifest entry says, opening nothing else.
+///
+/// Separate from reading so every file can be checked before any storage is allocated.
+fn check_wav(
     path: &Path,
     entry: &ClipEntry,
     channels: u16,
     sample_rate: u32,
-) -> Result<Clip, SessionError> {
-    let mut reader = hound::WavReader::open(path).map_err(|source| SessionError::Wav {
+) -> Result<(), SessionError> {
+    let reader = hound::WavReader::open(path).map_err(|source| SessionError::Wav {
         path: path.display().to_string(),
         source,
     })?;
-
-    // The manifest is checked against the device before this, so an audio file that
-    // disagrees with the manifest would be read into the wrong shape.
     let spec = reader.spec();
+
     if spec.channels != channels {
         return Err(SessionError::Mismatch {
             what: "channels in an audio file",
@@ -553,6 +618,15 @@ fn read_wav(
             found: held,
         });
     }
+    Ok(())
+}
+
+/// Reads one clip back into storage the caller owns.
+fn read_wav(path: &Path, entry: &ClipEntry, channels: u16) -> Result<Clip, SessionError> {
+    let mut reader = hound::WavReader::open(path).map_err(|source| SessionError::Wav {
+        path: path.display().to_string(),
+        source,
+    })?;
 
     let channels = usize::from(channels);
     let frames = entry.len_frames;
@@ -730,6 +804,58 @@ mod tests {
             )
             .unwrap();
         (store, addr(0, 0))
+    }
+
+    #[test]
+    fn a_refusal_reads_no_audio() {
+        let dir = TempDir::new("no-audio-read");
+        let (store, pad) = saved_one(&dir);
+        // Nothing to read at all: a refusal must not get as far as noticing.
+        std::fs::remove_file(store.dir(pad).join(Manifest::file_name(pad))).unwrap();
+
+        let checked = store.inspect(pad).unwrap();
+        let refused = checked.accepts(44_100, CH, BUDGET);
+        assert!(
+            matches!(refused, Err(SessionError::Mismatch { what: "Hz", .. })),
+            "refused on the manifest, not on the missing file"
+        );
+    }
+
+    #[test]
+    fn every_audio_file_is_checked_before_any_is_read() {
+        let dir = TempDir::new("all-headers");
+        let store = SessionStore::new(&dir.0);
+        let held = clip(128, 0);
+        store
+            .save(
+                addr(0, 0),
+                &data(vec![
+                    SavedClip {
+                        addr: addr(0, 0),
+                        playing: true,
+                        gain_step: UNITY_STEP,
+                        launch_anchor: None,
+                        clip: &held,
+                    },
+                    SavedClip {
+                        addr: addr(1, 0),
+                        playing: true,
+                        gain_step: UNITY_STEP,
+                        launch_anchor: None,
+                        clip: &held,
+                    },
+                ]),
+            )
+            .unwrap();
+
+        // The second pad's audio disagrees with the manifest; the first is fine.
+        overwrite_audio(&store.dir(addr(0, 0)), addr(1, 0), 64, float_spec(CH));
+
+        let checked = store.inspect(addr(0, 0)).unwrap();
+        assert!(
+            checked.accepts(48_000, CH, BUDGET).is_err(),
+            "a later file's header is caught before the earlier one is allocated"
+        );
     }
 
     #[test]
