@@ -10,13 +10,11 @@
     reason = "tests should fail loudly, and compare exact sample values"
 )]
 
+use free_loop_clip::{AudioBuffer, Clip, SegmentPool};
 use free_loop_core::{
     ClipId, Command, Event, Frames, Settings, SlotAddr, SlotId, SlotState, Tempo, TrackId,
 };
-use free_loop_engine::{
-    ClickConfig, Engine, EngineConfig, Housekeeping, LoadMessage, Snapshot,
-    buffer::{AudioBuffer, Clip, SegmentPool},
-};
+use free_loop_engine::{ClickConfig, Engine, EngineConfig, Housekeeping, LoadMessage, Snapshot};
 use std::sync::Arc;
 
 const CHANNELS: usize = 2;

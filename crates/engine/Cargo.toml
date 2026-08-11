@@ -10,6 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+free-loop-clip.workspace = true
 free-loop-core.workspace = true
 rtrb.workspace = true
 thiserror.workspace = true

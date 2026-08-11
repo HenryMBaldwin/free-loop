@@ -9,7 +9,7 @@ use std::sync::Arc;
 use free_loop_core::{Frames, SlotAddr, Tempo};
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 
-use crate::buffer::Clip;
+use free_loop_clip::Clip;
 
 /// Messages in flight before the engine drains any. One per pad plus the two markers.
 const SLOTS: usize = 80;
@@ -100,7 +100,7 @@ mod tests {
     #![allow(clippy::unwrap_used, reason = "tests should fail loudly")]
 
     use super::*;
-    use crate::buffer::AudioBuffer;
+    use free_loop_clip::AudioBuffer;
     use free_loop_core::{Frames, SlotId, TrackId};
 
     fn clip() -> Arc<Clip> {

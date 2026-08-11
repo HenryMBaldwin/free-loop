@@ -1,7 +1,7 @@
 [package]
-name = "free-loop-session"
+name = "free-loop-clip"
 version = "0.1.0"
-description = "Saving and loading Free Loop sessions"
+description = "Pooled audio storage for Free Loop clips"
 edition.workspace = true
 license.workspace = true
 readme.workspace = true
@@ -10,12 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-free-loop-clip.workspace = true
 free-loop-core.workspace = true
-hound.workspace = true
-serde.workspace = true
-thiserror.workspace = true
-toml.workspace = true
 
 [lints]
 workspace = true
