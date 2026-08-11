@@ -615,6 +615,7 @@ fn a_loaded_session_lands_on_the_grid_frozen() {
             addr: pad,
             clip: lent_clip(1_000, 0),
             playing: true,
+            launch_anchor: None,
         })
         .unwrap();
     harness.housekeeping.loader.send(LoadMessage::End).unwrap();
@@ -656,6 +657,7 @@ fn loading_replaces_what_was_on_the_grid() {
             addr: loaded,
             clip: lent_clip(500, 0),
             playing: false,
+            launch_anchor: None,
         })
         .unwrap();
     harness.housekeeping.loader.send(LoadMessage::End).unwrap();
@@ -688,6 +690,7 @@ fn lent_storage_comes_back_rather_than_joining_the_pool() {
             addr: pad,
             clip: lent_clip(1_000, 0),
             playing: false,
+            launch_anchor: None,
         })
         .unwrap();
     harness.housekeeping.loader.send(LoadMessage::End).unwrap();
@@ -732,6 +735,7 @@ fn a_loaded_loop_plays_what_was_saved() {
             addr: pad,
             clip: lent_clip(len, 0),
             playing: true,
+            launch_anchor: None,
         })
         .unwrap();
     harness.housekeeping.loader.send(LoadMessage::End).unwrap();
@@ -925,6 +929,7 @@ fn recording_onto_a_loaded_session_captures_audio() {
             addr: loaded,
             clip: lent_clip(BAR, 0),
             playing: true,
+            launch_anchor: None,
         })
         .unwrap();
     harness.housekeeping.loader.send(LoadMessage::End).unwrap();
@@ -995,6 +1000,7 @@ fn a_loaded_session_starts_at_the_beginning() {
             addr: pad,
             clip: lent_clip(len, len - 64),
             playing: true,
+            launch_anchor: None,
         })
         .unwrap();
     harness.housekeeping.loader.send(LoadMessage::End).unwrap();

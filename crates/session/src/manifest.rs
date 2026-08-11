@@ -31,6 +31,12 @@ pub struct ClipEntry {
     /// Stored per clip although volume is set per track.
     #[serde(default = "unity")]
     pub gain_step: u8,
+    /// Where the clip was anchored by the launch that is playing it, if any.
+    ///
+    /// Only set for a pad on a track that restarts its clips and that was sounding. Absent
+    /// means the clip plays from where it was recorded.
+    #[serde(default)]
+    pub launch_phase_frames: Option<u64>,
     /// The round trip compensated for when the take was sealed.
     ///
     /// Already folded into `phase_frames`.
@@ -123,6 +129,7 @@ mod tests {
                 playing: true,
                 capture_offset_frames: 2_348,
                 gain_step: 2,
+                launch_phase_frames: Some(48),
             }],
         }
     }

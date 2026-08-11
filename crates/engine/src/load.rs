@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use free_loop_core::{SlotAddr, Tempo};
+use free_loop_core::{Frames, SlotAddr, Tempo};
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 
 use crate::buffer::Clip;
@@ -30,6 +30,8 @@ pub enum LoadMessage {
         clip: Arc<Clip>,
         /// Whether the pad was sounding when the session was saved.
         playing: bool,
+        /// Where the launch that was playing it put it, if there was one.
+        launch_anchor: Option<Frames>,
     },
     /// Nothing more is coming. Freezes the transport.
     End,
@@ -114,6 +116,7 @@ mod tests {
                 addr: addr(1, 2),
                 clip: clip(),
                 playing: true,
+                launch_anchor: None,
             })
             .unwrap();
         loader.send(LoadMessage::End).unwrap();
