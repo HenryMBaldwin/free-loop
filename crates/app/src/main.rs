@@ -264,22 +264,23 @@ fn run(s: Session<'_>) {
         {
             eprintln!("surface: {error}");
         }
-        if let Some(save) = pending_save.take_if(|save| now >= save.deadline) {
+        collect_snapshots(
+            &mut housekeeping.snapshots,
+            pending_save.as_ref(),
+            &mut snapshots,
+        );
+        // An answer that arrived wins over the deadline, even on the pass the deadline falls
+        // on: it is the result being waited for.
+        if let Some(save) = finished_save(&mut pending_save, answered) {
+            settle_save(store, &save, config, &negotiated, &snapshots, controller);
+            snapshots.clear();
+        } else if let Some(save) = pending_save.take_if(|save| now >= save.deadline) {
             eprintln!(
                 "save to {}{} never completed; nothing was written",
                 save.addr.track.index(),
                 save.addr.slot.index()
             );
             controller.cancel_picker();
-            snapshots.clear();
-        }
-        collect_snapshots(
-            &mut housekeeping.snapshots,
-            pending_save.as_ref(),
-            &mut snapshots,
-        );
-        if let Some(save) = finished_save(&mut pending_save, answered) {
-            settle_save(store, &save, config, &negotiated, &snapshots, controller);
             snapshots.clear();
         }
 
@@ -291,12 +292,13 @@ fn run(s: Session<'_>) {
     }
 }
 
-/// How long to gather clipping before saying anything.
 /// How long a save waits for the engine to publish its clips before giving up.
 const SAVE_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long to gather short capture before mentioning it.
 const XRUN_REPORT_EVERY: Duration = Duration::from_secs(2);
 
+/// How long to gather clipping before saying anything.
 const CLIP_REPORT_EVERY: Duration = Duration::from_secs(2);
 
 /// Collects short capture blocks so a dropout is one line, not one per block.

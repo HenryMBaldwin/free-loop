@@ -850,7 +850,11 @@ fn the_tempo_locks_once_a_clip_exists() {
     let mut harness = Harness::new(128);
     harness.command(Command::SetTempo(Tempo::new(140.0).unwrap()));
     assert_eq!(harness.engine.grid().tempo().bpm(), 140.0);
-    assert!(harness.drain_events().is_empty());
+    assert_eq!(
+        harness.drain_events(),
+        vec![Event::Tempo { bpm: 140.0 }],
+        "an accepted tempo reports itself, so a stale replay cannot win"
+    );
 
     let pad = addr(0, 0);
     let bar = harness.engine.grid().frames_per_bar().0;
