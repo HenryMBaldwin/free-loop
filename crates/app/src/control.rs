@@ -8,12 +8,12 @@
 use core::time::Duration;
 
 use free_loop_core::{
-    Command, Event, MAX_BPM, MIN_BPM, SLOT_COUNT, SessionModel, SlotAddr, TRACK_COUNT, Tempo,
-    TrackInput, UNITY_STEP, column_mask, pad_bit, row_mask,
+    Command, Event, LaunchMode, MAX_BPM, MIN_BPM, SLOT_COUNT, SessionModel, SlotAddr, TRACK_COUNT,
+    Tempo, TrackInput, UNITY_STEP, column_mask, pad_bit, row_mask,
 };
 use free_loop_surface::{
     Axis, Chrome, Control, INPUT_SIDE, Led, LedColor, LedFrame, MUTE_SIDE, NEW_SIDE, PAUSE_SIDE,
-    SELECTED, SOLO_SIDE, SurfaceEvent, VOLUME_SIDE, paint,
+    RESTART_COLUMN, SELECTED, SETTINGS_SIDE, SOLO_SIDE, SurfaceEvent, VOLUME_SIDE, paint,
 };
 
 /// Beats per minute one press of the tempo buttons moves.
@@ -61,6 +61,8 @@ pub enum Mode {
     Volume,
     /// Which input each track records.
     Input,
+    /// One row of settings per track.
+    Settings,
 }
 
 impl Mode {
@@ -70,7 +72,12 @@ impl Mode {
             Self::SavePicker => Some(Control::SaveSession),
             Self::LoadPicker => Some(Control::LoadSession),
             // Mute and solo open from the side column, not the top row.
-            Self::Perform | Self::Mute | Self::Solo | Self::Volume | Self::Input => None,
+            Self::Perform
+            | Self::Mute
+            | Self::Solo
+            | Self::Volume
+            | Self::Input
+            | Self::Settings => None,
         }
     }
 }
@@ -149,6 +156,7 @@ impl Controller {
     pub fn new(tempo: f64, beats_per_bar: u32, click_enabled: bool) -> Self {
         let chrome = Chrome {
             inputs: [TrackInput::Stereo; TRACK_COUNT],
+            launch_modes: [LaunchMode::Follow; TRACK_COUNT],
             input_count: 2,
             beat: 0,
             beats_per_bar,
@@ -249,6 +257,30 @@ impl Controller {
         }
         self.chrome.inputs[addr.track.index()] = TrackInput::from_column(column);
         self.commands.push(Command::SetInputs(self.chrome.inputs));
+        self.dirty = true;
+    }
+
+    /// Flips the setting the pad's column stands for.
+    fn toggle_setting(&mut self, addr: SlotAddr) {
+        if addr.slot.index() != RESTART_COLUMN {
+            return;
+        }
+        let track = addr.track.index();
+        self.chrome.launch_modes[track] = self.chrome.launch_modes[track].toggled();
+        self.commands
+            .push(Command::SetLaunchModes(self.chrome.launch_modes));
+        self.dirty = true;
+    }
+
+    /// Where each track's clips are anchored when launched.
+    pub fn launch_modes(&self) -> [LaunchMode; TRACK_COUNT] {
+        self.chrome.launch_modes
+    }
+
+    /// Takes the modes a loaded session came with.
+    pub fn set_launch_modes(&mut self, modes: [LaunchMode; TRACK_COUNT]) {
+        self.chrome.launch_modes = modes;
+        self.commands.push(Command::SetLaunchModes(modes));
         self.dirty = true;
     }
 
@@ -393,6 +425,9 @@ impl Controller {
             SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::Input => {
                 self.set_input(addr);
             }
+            SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::Settings => {
+                self.toggle_setting(addr);
+            }
             SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::LoadPicker => {
                 // Nothing to load from a pad that holds nothing.
                 if self.sessions & bit(addr) != 0 {
@@ -440,6 +475,9 @@ impl Controller {
             }
             SurfaceEvent::SidePressed { index } if usize::from(index) == INPUT_SIDE => {
                 self.set_mode(Mode::Input);
+            }
+            SurfaceEvent::SidePressed { index } if usize::from(index) == SETTINGS_SIDE => {
+                self.set_mode(Mode::Settings);
             }
             SurfaceEvent::SidePressed { index } if usize::from(index) == MUTE_SIDE => {
                 self.set_mode(Mode::Mute);
@@ -637,6 +675,7 @@ impl Controller {
         match self.mode {
             Mode::Volume => self.frame.set_side(VOLUME_SIDE, Led::flash(SELECTED)),
             Mode::Input => self.frame.set_side(INPUT_SIDE, Led::flash(SELECTED)),
+            Mode::Settings => self.frame.set_side(SETTINGS_SIDE, Led::flash(SELECTED)),
             Mode::Mute => self.frame.set_side(MUTE_SIDE, Led::flash(SELECTED)),
             Mode::Solo => self.frame.set_side(SOLO_SIDE, Led::flash(SELECTED)),
             _ => {}
@@ -673,6 +712,8 @@ impl Controller {
             paint::volumes(self.chrome)
         } else if self.mode == Mode::Input {
             paint::inputs(self.chrome)
+        } else if self.mode == Mode::Settings {
+            paint::settings(self.chrome)
         } else if self.tempo_repeating() {
             // A number cannot track a tempo that is still moving, so the grid shows it
             // instead until the button is let go.
@@ -1464,6 +1505,49 @@ mod tests {
             commands(&mut controller).is_empty(),
             "no second pause to send"
         );
+    }
+
+    #[test]
+    fn the_settings_button_toggles_a_track_between_the_modes() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::SidePressed { index: 3 }, T0);
+        let _ = commands(&mut controller);
+
+        let pad = SlotAddr::new(TrackId::new(2).unwrap(), SlotId::new(0).unwrap());
+        let press = SurfaceEvent::PadPressed {
+            addr: pad,
+            velocity: 127,
+        };
+        controller.on_surface(press, T0);
+
+        let mut wanted = [LaunchMode::Follow; TRACK_COUNT];
+        wanted[2] = LaunchMode::Restart;
+        assert_eq!(controller.launch_modes(), wanted);
+        assert!(commands(&mut controller).contains(&Command::SetLaunchModes(wanted)));
+
+        controller.on_surface(press, T0);
+        assert_eq!(
+            controller.launch_modes(),
+            [LaunchMode::Follow; TRACK_COUNT],
+            "and back again"
+        );
+    }
+
+    #[test]
+    fn a_settings_column_that_does_nothing_yet_is_ignored() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::SidePressed { index: 3 }, T0);
+        let _ = commands(&mut controller);
+
+        let pad = SlotAddr::new(TrackId::new(0).unwrap(), SlotId::new(4).unwrap());
+        controller.on_surface(
+            SurfaceEvent::PadPressed {
+                addr: pad,
+                velocity: 127,
+            },
+            T0,
+        );
+        assert!(commands(&mut controller).is_empty());
     }
 
     #[test]

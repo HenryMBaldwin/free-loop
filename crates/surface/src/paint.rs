@@ -5,8 +5,8 @@
 use core::cmp::Ordering;
 
 use free_loop_core::{
-    MAX_BPM, MIN_BPM, PadMask, SLOT_COUNT, SessionModel, SlotAddr, SlotState, TRACK_COUNT,
-    TrackInput, UNITY_STEP, pad_bit,
+    LaunchMode, MAX_BPM, MIN_BPM, PadMask, SLOT_COUNT, SessionModel, SlotAddr, SlotState,
+    TRACK_COUNT, TrackInput, UNITY_STEP, pad_bit,
 };
 
 use crate::event::Control;
@@ -33,6 +33,8 @@ pub struct Chrome {
     pub gains: [u8; TRACK_COUNT],
     /// Which input each track records.
     pub inputs: [TrackInput; TRACK_COUNT],
+    /// Where each track's clips are anchored when launched.
+    pub launch_modes: [LaunchMode; TRACK_COUNT],
     /// Input channels the device offers.
     pub input_count: usize,
 }
@@ -94,6 +96,7 @@ impl Default for Chrome {
             soloed: 0,
             gains: [UNITY_STEP; TRACK_COUNT],
             inputs: [TrackInput::Stereo; TRACK_COUNT],
+            launch_modes: [LaunchMode::Follow; TRACK_COUNT],
             input_count: 2,
         }
     }
@@ -159,6 +162,9 @@ pub const SELECTED: LedColor = LedColor::Pink;
 /// Not green: that is a playing clip, a queued one, and the session in use.
 pub const INPUT: LedColor = LedColor::Purple;
 
+/// Colour the per-track settings are shown in, matching their side button.
+pub const SETTING: LedColor = LedColor::Amber;
+
 /// Colour a silenced group takes, matching its side button.
 pub const MUTED: LedColor = LedColor::Red;
 
@@ -170,6 +176,12 @@ pub const VOLUME_SIDE: usize = 0;
 
 /// The right-hand column button that opens the track inputs.
 pub const INPUT_SIDE: usize = 2;
+
+/// The right-hand column button that opens the per-track settings.
+pub const SETTINGS_SIDE: usize = 3;
+
+/// The settings column holding whether a launch restarts a clip.
+pub const RESTART_COLUMN: usize = 0;
 
 /// The right-hand column button that runs the transport.
 pub const PAUSE_SIDE: usize = 4;
@@ -309,6 +321,33 @@ pub fn inputs(chrome: Chrome) -> LedFrame {
     frame
 }
 
+/// Paints each row as one track's settings, one setting per column.
+///
+/// Column zero is whether launching a clip restarts it. The rest are unused for now.
+pub fn settings(chrome: Chrome) -> LedFrame {
+    let mut frame = LedFrame::new();
+
+    for addr in SlotAddr::all() {
+        if addr.slot.index() != RESTART_COLUMN {
+            continue;
+        }
+        let led = if chrome.launch_modes[addr.track.index()].restarts() {
+            Led::solid(SETTING)
+        } else {
+            Led::dim(SETTING)
+        };
+        frame.set_pad(addr, led);
+    }
+
+    for button in Control::all() {
+        frame.set_control(button.index(), control(button, chrome));
+    }
+    beat_indicator(&mut frame, chrome);
+    side_buttons(&mut frame, chrome);
+
+    frame
+}
+
 /// Paints the session picker over the grid.
 ///
 /// `existing` has a bit set per pad that holds a session, indexed track-major. `current`
@@ -387,6 +426,15 @@ fn side_buttons(frame: &mut LedFrame, chrome: Chrome) {
             Led::solid(INPUT)
         } else {
             Led::dim(INPUT)
+        },
+    );
+    let restarting = chrome.launch_modes.iter().any(|mode| mode.restarts());
+    frame.set_side(
+        SETTINGS_SIDE,
+        if restarting {
+            Led::solid(SETTING)
+        } else {
+            Led::dim(SETTING)
         },
     );
     frame.set_side(PAUSE_SIDE, pause_button(chrome));
@@ -944,11 +992,43 @@ mod tests {
     }
 
     #[test]
+    fn a_settings_row_lights_the_column_for_a_restarting_track() {
+        let mut chrome = Chrome::default();
+        chrome.launch_modes[1] = LaunchMode::Restart;
+        let painted = settings(chrome);
+
+        let on = SlotAddr::new(TrackId::new(1).unwrap(), SlotId::new(0).unwrap());
+        let off = SlotAddr::new(TrackId::new(0).unwrap(), SlotId::new(0).unwrap());
+        assert_eq!(painted.pad(on), Led::solid(SETTING));
+        assert_eq!(painted.pad(off), Led::dim(SETTING), "offered, not taken");
+    }
+
+    #[test]
+    fn the_settings_grid_holds_one_column_for_now() {
+        let painted = settings(Chrome::default());
+        let row = TrackId::new(0).unwrap();
+        for column in 1..u8::try_from(SLOT_COUNT).unwrap() {
+            let addr = SlotAddr::new(row, SlotId::new(column).unwrap());
+            assert!(
+                !painted.pad(addr).is_lit(),
+                "column {column} does nothing yet"
+            );
+        }
+    }
+
+    #[test]
     fn the_unbound_side_buttons_stay_dark() {
         use crate::led::SIDE_COUNT;
 
         let painted = frame(&SessionModel::new(), Chrome::default());
-        let bound = [VOLUME_SIDE, INPUT_SIDE, PAUSE_SIDE, MUTE_SIDE, SOLO_SIDE];
+        let bound = [
+            VOLUME_SIDE,
+            INPUT_SIDE,
+            SETTINGS_SIDE,
+            PAUSE_SIDE,
+            MUTE_SIDE,
+            SOLO_SIDE,
+        ];
         assert!(
             (0..SIDE_COUNT)
                 .filter(|i| !bound.contains(i))
