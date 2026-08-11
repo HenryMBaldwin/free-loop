@@ -19,5 +19,6 @@ pub use config::{AudioConfig, Negotiated};
 pub use error::AudioError;
 pub use ring::{CaptureReader, CaptureWriter, ChannelMap, InputSource, MAX_BLOCK_FRAMES};
 pub use stream::{
-    AudioIo, DeviceChange, DeviceList, DeviceLoss, Opened, RETRY_INTERVAL, list_devices, open,
+    AudioIo, DeviceChange, DeviceList, DeviceLoss, DroppedEvents, Opened, RETRY_INTERVAL,
+    list_devices, open,
 };

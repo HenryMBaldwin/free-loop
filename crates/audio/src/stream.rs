@@ -9,7 +9,7 @@ use cpal::{
     Device, FromSample, Host, InputCallbackInfo, OutputCallbackInfo, SampleFormat, SizedSample,
     Stream, StreamConfig,
 };
-use free_loop_core::{Command, Event, Frames, Settings};
+use free_loop_core::{Command, Event, EventKind, Frames, Settings};
 use free_loop_engine::{Engine, EventSink};
 use rtrb::{Consumer, Producer, RingBuffer};
 
@@ -18,6 +18,11 @@ use crate::config::{
 };
 use crate::error::AudioError;
 use crate::ring::{CaptureReader, CaptureWriter, ChannelMap, MAX_BLOCK_FRAMES, capture_ring};
+
+/// Reports the engine could not fit onto the event ring, counted by kind.
+///
+/// Shared with the audio thread, which only ever adds to it.
+type DropCounts = Arc<[AtomicU64; EventKind::COUNT]>;
 
 /// Where the latest whole-state settings wait for the engine.
 ///
@@ -217,7 +222,7 @@ impl Opened {
             errors: Arc::new(AtomicU64::new(0)),
             lost: Arc::new(AtomicBool::new(false)),
             starved: Arc::new(AtomicU32::new(0)),
-            dropped_events: Arc::new(AtomicU64::new(0)),
+            dropped_events: Arc::new(core::array::from_fn(|_| AtomicU64::new(0))),
         };
         let input_latency = Arc::new(AtomicU32::new(0));
         let capture_offset = Arc::new(AtomicU32::new(0));
@@ -520,11 +525,14 @@ impl AudioIo {
         self.capture_offset.load(Ordering::Relaxed)
     }
 
-    /// Reports the engine could not fit onto the event ring since the streams started.
+    /// Reports the engine could not fit onto the event ring since it was built, by kind.
     ///
-    /// A reader that sees this rise has missed something and should ask for a resync.
-    pub fn dropped_events(&self) -> u64 {
-        self.health.dropped_events.load(Ordering::Relaxed)
+    /// A reader compares this against what it saw last: a kind that has risen is one it
+    /// has missed, and [`EventKind::is_replayed`] says whether asking again puts it right.
+    pub fn dropped_events(&self) -> DroppedEvents {
+        DroppedEvents(core::array::from_fn(|index| {
+            self.health.dropped_events[index].load(Ordering::Relaxed)
+        }))
     }
 
     /// Errors either device has reported since the streams started.
@@ -559,16 +567,53 @@ impl AudioIo {
     }
 }
 
+/// Reports that did not fit on the event ring, counted by kind.
+///
+/// Every count is cumulative since the engine was built: a reader compares against what
+/// it saw last.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DroppedEvents([u64; EventKind::COUNT]);
+
+impl DroppedEvents {
+    /// How many reports of one kind were lost.
+    pub fn of(&self, kind: EventKind) -> u64 {
+        self.0[kind.index()]
+    }
+
+    /// Reports lost since `earlier`, by kind, leaving out the kinds that lost none.
+    pub fn since(&self, earlier: &Self) -> impl Iterator<Item = (EventKind, u64)> {
+        let lost: [u64; EventKind::COUNT] =
+            core::array::from_fn(|index| self.0[index].saturating_sub(earlier.0[index]));
+        EventKind::ALL
+            .into_iter()
+            .map(move |kind| (kind, lost[kind.index()]))
+            .filter(|(_, count)| *count > 0)
+    }
+
+    /// How many reports were lost in total.
+    pub fn total(&self) -> u64 {
+        self.0.iter().copied().fold(0, u64::saturating_add)
+    }
+}
+
+impl From<[u64; EventKind::COUNT]> for DroppedEvents {
+    /// Takes counts indexed by [`EventKind::index`].
+    fn from(counts: [u64; EventKind::COUNT]) -> Self {
+        Self(counts)
+    }
+}
+
 /// Pushes engine reports onto the event ring, counting any that do not fit.
 struct RingSink<'a> {
     events: &'a mut Producer<Event>,
-    dropped: &'a AtomicU64,
+    dropped: &'a DropCounts,
 }
 
 impl EventSink for RingSink<'_> {
     fn event(&mut self, event: Event) {
+        let kind = event.kind();
         if self.events.push(event).is_err() {
-            self.dropped.fetch_add(1, Ordering::Relaxed);
+            self.dropped[kind.index()].fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -589,7 +634,7 @@ struct Shared {
     rendered: Vec<f32>,
     channels: usize,
     /// Shared with [`AudioIo`], so a reader can tell it has missed reports.
-    dropped_events: Arc<AtomicU64>,
+    dropped_events: DropCounts,
 }
 
 /// The output callback's state.
@@ -831,8 +876,8 @@ struct Health {
     lost: Arc<AtomicBool>,
     /// Frames the capture has delivered nothing for, in a row.
     starved: Arc<AtomicU32>,
-    /// Reports the engine could not fit onto the event ring.
-    dropped_events: Arc<AtomicU64>,
+    /// Reports the engine could not fit onto the event ring, by kind.
+    dropped_events: DropCounts,
 }
 
 /// Counts a stream error, and flags the ones that mean the stream has to be rebuilt.
@@ -912,8 +957,35 @@ mod tests {
             errors: Arc::new(AtomicU64::new(0)),
             lost: Arc::new(AtomicBool::new(false)),
             starved: Arc::new(AtomicU32::new(0)),
-            dropped_events: Arc::new(AtomicU64::new(0)),
+            dropped_events: Arc::new(core::array::from_fn(|_| AtomicU64::new(0))),
         }
+    }
+
+    fn dropped(counts: &[(EventKind, u64)]) -> DroppedEvents {
+        let mut array = [0; EventKind::COUNT];
+        for (kind, count) in counts {
+            array[kind.index()] = *count;
+        }
+        DroppedEvents::from(array)
+    }
+
+    #[test]
+    fn losses_are_counted_against_the_kind_that_was_lost() {
+        let counts = dropped(&[(EventKind::Beat, 3), (EventKind::SlotChanged, 1)]);
+        assert_eq!(counts.of(EventKind::Beat), 3);
+        assert_eq!(counts.of(EventKind::SlotChanged), 1);
+        assert_eq!(counts.of(EventKind::Clock), 0);
+        assert_eq!(counts.total(), 4);
+    }
+
+    #[test]
+    fn only_the_kinds_that_moved_are_reported() {
+        let seen = dropped(&[(EventKind::Beat, 3), (EventKind::SlotChanged, 1)]);
+        let now = dropped(&[(EventKind::Beat, 5), (EventKind::SlotChanged, 1)]);
+
+        let since: Vec<_> = now.since(&seen).collect();
+        assert_eq!(since, vec![(EventKind::Beat, 2)]);
+        assert_eq!(now.since(&now).count(), 0, "nothing new is nothing to say");
     }
 
     #[test]
