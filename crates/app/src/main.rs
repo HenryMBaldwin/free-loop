@@ -114,6 +114,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     controller.set_sessions(store.index());
     controller.set_input_count(negotiated.channels);
     controller.set_inputs([config.track_input(); free_loop_core::TRACK_COUNT]);
+    controller.set_launch_modes([config.launch_mode(); free_loop_core::TRACK_COUNT]);
 
     println!(
         "transport: {:.1} bpm, {}/{}",
