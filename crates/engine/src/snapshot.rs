@@ -22,6 +22,8 @@ pub struct Snapshot {
     pub addr: SlotAddr,
     /// What the pad was doing.
     pub state: SlotState,
+    /// Where the launch that is playing it put it, if the track restarts its clips.
+    pub launch_anchor: Option<free_loop_core::Frames>,
     /// The audio it held.
     pub clip: Arc<Clip>,
 }
@@ -80,6 +82,7 @@ mod tests {
         Snapshot {
             addr: SlotAddr::new(TrackId::new(track).unwrap(), SlotId::new(slot).unwrap()),
             state: SlotState::Stopped { clip: ClipId(0) },
+            launch_anchor: None,
             clip: Arc::new(Clip::new(AudioBuffer::new(1, 2), Frames(64), Frames(0), 2)),
         }
     }

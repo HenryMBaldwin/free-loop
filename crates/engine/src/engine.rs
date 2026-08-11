@@ -764,6 +764,7 @@ impl Engine {
                 addr,
                 mut clip,
                 playing,
+                launch_anchor,
             } => {
                 // The loader keeps the storage, so mark it before the engine sees it as
                 // one of its own.
@@ -773,6 +774,7 @@ impl Engine {
                 let id = audio.next_clip_id;
                 audio.next_clip_id = id.next();
                 audio.put_clip(addr, clip);
+                audio.anchors[addr.track.index()][addr.slot.index()] = launch_anchor;
 
                 let state = if playing {
                     SlotState::Playing { clip: id }
@@ -822,6 +824,7 @@ impl Engine {
             let snapshot = Snapshot {
                 addr,
                 state,
+                launch_anchor: self.audio.anchors[addr.track.index()][addr.slot.index()],
                 clip: Arc::clone(clip),
             };
             self.audio.snapshots.publish(snapshot);
