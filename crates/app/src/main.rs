@@ -112,7 +112,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let store = SessionStore::new(path.parent().unwrap_or(Path::new(".")).join("sessions"));
     // A save interrupted between its two renames leaves a session under another name.
-    store.recover();
+    for trouble in store.recover() {
+        eprintln!("sessions: {trouble}");
+    }
     controller.set_sessions(store.index());
     controller.set_input_count(negotiated.channels);
     controller.set_default_input(config.track_input());
@@ -572,24 +574,25 @@ fn load(
     config: &Config,
 ) -> Result<Restored, Box<dyn Error>> {
     let channels = u16::try_from(negotiated.channels).unwrap_or(2);
-    let session = store.load(addr, negotiated.sample_rate, channels)?;
 
-    // The engine's grid is fixed at startup, so a session in another meter would be laid
-    // against bars it was never played to.
+    // Read on its own first: everything decided by the manifest alone is settled before any
+    // audio is allocated, so a session that will be refused costs nothing to refuse.
+    let manifest = store.manifest(addr)?;
     let wanted = config.time_signature()?;
-    if session.manifest.beats_per_bar != wanted.beats_per_bar()
-        || session.manifest.beat_unit != wanted.beat_unit()
+    if manifest.beats_per_bar != wanted.beats_per_bar() || manifest.beat_unit != wanted.beat_unit()
     {
         return Err(format!(
             "session is in {}/{} but the transport is {}/{}",
-            session.manifest.beats_per_bar,
-            session.manifest.beat_unit,
+            manifest.beats_per_bar,
+            manifest.beat_unit,
             wanted.beats_per_bar(),
             wanted.beat_unit()
         )
         .into());
     }
-    let tempo = free_loop_core::Tempo::new(session.manifest.tempo)?;
+    let tempo = free_loop_core::Tempo::new(manifest.tempo)?;
+
+    let session = store.load(addr, negotiated.sample_rate, channels)?;
     let restored = Restored {
         gains: session.gains(),
         tracks: session.tracks(),
