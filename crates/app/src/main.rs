@@ -592,7 +592,7 @@ fn load(
     }
     let tempo = free_loop_core::Tempo::new(manifest.tempo)?;
 
-    let session = store.load(addr, negotiated.sample_rate, channels)?;
+    let session = store.load(addr, negotiated.sample_rate, channels, config.load_budget())?;
     let restored = Restored {
         gains: session.gains(),
         tracks: session.tracks(),

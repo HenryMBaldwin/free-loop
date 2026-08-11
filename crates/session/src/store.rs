@@ -359,6 +359,7 @@ impl SessionStore {
         addr: SlotAddr,
         sample_rate: u32,
         channels: u16,
+        budget: Frames,
     ) -> Result<LoadedSession, SessionError> {
         let manifest = self.manifest(addr)?;
         if manifest.sample_rate != sample_rate {
@@ -376,9 +377,7 @@ impl SessionStore {
             });
         }
 
-        manifest
-            .validate(max_frames(sample_rate))
-            .map_err(SessionError::Invalid)?;
+        manifest.validate(budget.0).map_err(SessionError::Invalid)?;
 
         let dir = self.dir(addr);
         let mut clips = Vec::with_capacity(manifest.clips.len());
@@ -511,15 +510,6 @@ fn write_wav(
     })
 }
 
-/// The most audio a session may claim in total, at half an hour.
-///
-/// The lengths in the file decide how much is allocated before a byte is read, so they need
-/// a ceiling. Half an hour across the whole grid is far more than the engine's own pools
-/// hold, so this only stops a file asking for the impossible.
-fn max_frames(sample_rate: u32) -> u64 {
-    u64::from(sample_rate) * 60 * 30
-}
-
 /// Reads one clip back into storage the caller owns.
 fn read_wav(
     path: &Path,
@@ -634,6 +624,9 @@ mod tests {
         }
     }
 
+    /// A load budget far above any fixture.
+    const BUDGET: Frames = Frames(48_000 * 60);
+
     fn addr(track: u8, slot: u8) -> SlotAddr {
         SlotAddr::new(TrackId::new(track).unwrap(), SlotId::new(slot).unwrap())
     }
@@ -693,7 +686,7 @@ mod tests {
         std::fs::write(dir.0.join(".00.saving"), b"in the way").unwrap();
         assert!(store.save(addr(0, 0), &data(saved(addr(0, 1)))).is_err());
 
-        let read = store.load(addr(0, 0), 48_000, 2).unwrap();
+        let read = store.load(addr(0, 0), 48_000, 2, BUDGET).unwrap();
         assert_eq!(read.clips.len(), 1, "the first save is still there");
         assert_eq!(read.clips[0].addr, addr(0, 0), "and it is the same clip");
     }
@@ -746,7 +739,7 @@ mod tests {
         overwrite_audio(&store.dir(pad), pad, 64, float_spec(CH));
 
         assert!(
-            store.load(pad, 48_000, CH).is_err(),
+            store.load(pad, 48_000, CH, BUDGET).is_err(),
             "would have become silence padded"
         );
     }
@@ -757,7 +750,10 @@ mod tests {
         let (store, pad) = saved_one(&dir);
         overwrite_audio(&store.dir(pad), pad, 256, float_spec(CH));
 
-        assert!(store.load(pad, 48_000, CH).is_err(), "would have been cut");
+        assert!(
+            store.load(pad, 48_000, CH, BUDGET).is_err(),
+            "would have been cut"
+        );
     }
 
     #[test]
@@ -776,7 +772,7 @@ mod tests {
             },
         );
 
-        let refused = store.load(pad, 48_000, CH);
+        let refused = store.load(pad, 48_000, CH, BUDGET);
         assert!(
             matches!(refused, Err(SessionError::Invalid(_))),
             "not a read failure"
@@ -789,7 +785,7 @@ mod tests {
         let (store, pad) = saved_one(&dir);
         overwrite_audio(&store.dir(pad), pad, 128, float_spec(1));
 
-        assert!(store.load(pad, 48_000, CH).is_err());
+        assert!(store.load(pad, 48_000, CH, BUDGET).is_err());
     }
 
     #[test]
@@ -816,7 +812,14 @@ mod tests {
 
         store.recover();
         assert!(store.exists(addr(0, 0)), "back where it belongs");
-        assert_eq!(store.load(addr(0, 0), 48_000, 2).unwrap().clips.len(), 1);
+        assert_eq!(
+            store
+                .load(addr(0, 0), 48_000, 2, BUDGET)
+                .unwrap()
+                .clips
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -849,7 +852,14 @@ mod tests {
         std::fs::create_dir_all(dir.0.join(".00.previous")).unwrap();
 
         store.recover();
-        assert_eq!(store.load(addr(0, 0), 48_000, 2).unwrap().clips.len(), 1);
+        assert_eq!(
+            store
+                .load(addr(0, 0), 48_000, 2, BUDGET)
+                .unwrap()
+                .clips
+                .len(),
+            1
+        );
         assert!(!dir.0.join(".00.previous").exists(), "and it is tidied up");
     }
 
@@ -901,7 +911,7 @@ mod tests {
             )
             .unwrap();
 
-        let read = store.load(addr(0, 0), 48_000, 2).unwrap();
+        let read = store.load(addr(0, 0), 48_000, 2, BUDGET).unwrap();
         assert_eq!(
             read.clips[0].launch_anchor,
             Some(Frames(365 % 128)),
@@ -928,7 +938,7 @@ mod tests {
             )
             .unwrap();
 
-        let read = store.load(addr(0, 0), 48_000, 2).unwrap();
+        let read = store.load(addr(0, 0), 48_000, 2, BUDGET).unwrap();
         assert_eq!(read.clips[0].launch_anchor, None);
         assert_eq!(read.clips[0].clip.recorded_at(), Frames(300 % 128));
     }
@@ -1200,7 +1210,7 @@ mod tests {
             )
             .unwrap();
 
-        let loaded = store.load(under, 48_000, CH).unwrap();
+        let loaded = store.load(under, 48_000, CH, BUDGET).unwrap();
         assert_eq!(loaded.clips.len(), 1);
 
         let read = &loaded.clips[0];
@@ -1240,7 +1250,7 @@ mod tests {
             )
             .unwrap();
 
-        let loaded = store.load(addr(0, 0), 48_000, CH).unwrap();
+        let loaded = store.load(addr(0, 0), 48_000, CH, BUDGET).unwrap();
         assert_eq!(loaded.clips[0].clip.len(), Frames(frames as u64));
 
         // The tail is the part a chunking bug would lose.
@@ -1276,7 +1286,7 @@ mod tests {
             )
             .unwrap();
 
-        let loaded = store.load(addr(0, 0), 48_000, CH).unwrap();
+        let loaded = store.load(addr(0, 0), 48_000, CH, BUDGET).unwrap();
         let read = &loaded.clips[0].clip;
         assert_eq!(read.len(), Frames(frames as u64));
 
@@ -1322,7 +1332,7 @@ mod tests {
             )
             .unwrap();
 
-        let loaded = store.load(addr(0, 0), 48_000, CH).unwrap();
+        let loaded = store.load(addr(0, 0), 48_000, CH, BUDGET).unwrap();
         let gains = loaded.gains();
 
         assert_eq!(gains[1], 2);
@@ -1339,16 +1349,16 @@ mod tests {
         let store = SessionStore::new(&dir.0);
         store.save(addr(0, 0), &data(Vec::new())).unwrap();
 
-        assert!(store.load(addr(0, 0), 44_100, CH).is_err());
-        assert!(store.load(addr(0, 0), 48_000, 1).is_err());
-        assert!(store.load(addr(0, 0), 48_000, CH).is_ok());
+        assert!(store.load(addr(0, 0), 44_100, CH, BUDGET).is_err());
+        assert!(store.load(addr(0, 0), 48_000, 1, BUDGET).is_err());
+        assert!(store.load(addr(0, 0), 48_000, CH, BUDGET).is_ok());
     }
 
     #[test]
     fn loading_a_pad_with_no_session_is_an_error() {
         let dir = TempDir::new("missing");
         let store = SessionStore::new(&dir.0);
-        assert!(store.load(addr(6, 6), 48_000, CH).is_err());
+        assert!(store.load(addr(6, 6), 48_000, CH, BUDGET).is_err());
     }
 
     #[test]
