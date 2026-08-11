@@ -1,7 +1,7 @@
 //! Control instructions for the realtime side. `Copy` and allocation-free.
 
 use crate::gain::GAIN_STEPS;
-use crate::ids::{PadMask, SlotAddr, TRACK_COUNT, TrackId};
+use crate::ids::{PadMask, SlotAddr, TRACK_COUNT, TrackId, TrackInput};
 use crate::time::Tempo;
 
 const _: () = assert!(GAIN_STEPS == 8);
@@ -22,6 +22,8 @@ pub enum Command {
     /// Set how loud each track plays, as a step on the gain ladder. Sent whole, like the
     /// mute masks.
     SetGains([u8; TRACK_COUNT]),
+    /// Set which input each track records.
+    SetInputs([TrackInput; TRACK_COUNT]),
     /// Publish a reference to every pad that holds a clip.
     Snapshot,
     /// Set which pads are silenced and which are soloed. Sent whole, not as toggles.
