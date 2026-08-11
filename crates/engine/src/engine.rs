@@ -426,8 +426,10 @@ pub struct Engine {
     pending: Option<Deferred>,
     /// The last position a beat fired on, so a grid change cannot fire it twice.
     last_boundary: Option<Frames>,
-    /// MIDI clock ticks already reported.
+    /// The clock count the transport position last stood at.
     last_clock: u64,
+    /// MIDI clock ticks reported since the engine was built.
+    clock_total: u64,
     sample_rate: SampleRate,
     time_signature: TimeSignature,
 }
@@ -502,6 +504,7 @@ impl Engine {
             pending: None,
             last_boundary: None,
             last_clock: 0,
+            clock_total: 0,
             sample_rate: config.sample_rate,
             time_signature: config.time_signature,
         };
@@ -1043,14 +1046,16 @@ impl Engine {
             return;
         }
         self.last_clock = now;
+        self.clock_total = self.clock_total.saturating_add(ticks);
         sink.event(Event::Clock {
-            ticks: u32::try_from(ticks).unwrap_or(u32::MAX),
+            total: self.clock_total,
         });
     }
 
     /// Takes the clock count from wherever the transport now is.
     ///
-    /// Called after anything that moves the transport other than playing.
+    /// Called after anything that moves the transport other than playing. The running
+    /// total is left alone: a move produces no pulses.
     fn resync_clock(&mut self) {
         self.last_clock = self.grid.clock_ticks_at(self.position);
     }

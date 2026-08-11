@@ -169,6 +169,70 @@ fn record(harness: &mut Harness, pad: SlotAddr, arm_at: u64, bars: u64) -> (u64,
     (start, end)
 }
 
+/// The running total from every clock report the engine has made, in order.
+fn clock_totals(harness: &mut Harness) -> Vec<u64> {
+    harness
+        .drain_events()
+        .iter()
+        .filter_map(|e| match e {
+            Event::Clock { total } => Some(*total),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Clock ticks in one bar at 120 bpm in 4/4.
+const TICKS_PER_BAR: u64 = 96;
+
+#[test]
+fn the_clock_reports_a_running_total() {
+    let mut harness = Harness::new(128);
+    harness.run_to(BAR);
+
+    let totals = clock_totals(&mut harness);
+    assert_eq!(totals.last().copied(), Some(TICKS_PER_BAR));
+    assert!(
+        totals.windows(2).all(|pair| pair[0] < pair[1]),
+        "a total never repeats or goes backwards"
+    );
+}
+
+#[test]
+fn a_discarded_clock_report_costs_no_ticks() {
+    let mut harness = Harness::new(128);
+    harness.run_to(BAR / 2);
+    let seen = clock_totals(&mut harness).last().copied().unwrap();
+    assert_eq!(seen, TICKS_PER_BAR / 2);
+
+    // Thrown away the way a full event ring throws them.
+    harness.run_to(BAR - 1_000);
+    harness.drain_events();
+
+    harness.run_to(BAR);
+    assert_eq!(
+        clock_totals(&mut harness).last().copied(),
+        Some(TICKS_PER_BAR),
+        "the newest total still owes the ticks nobody saw"
+    );
+}
+
+#[test]
+fn a_rewind_produces_no_ticks() {
+    let mut harness = Harness::new(128);
+    harness.run_to(BAR);
+    let before = clock_totals(&mut harness).last().copied().unwrap();
+
+    harness.command(Command::Rewind);
+    assert!(clock_totals(&mut harness).is_empty());
+
+    harness.run_to(1_000);
+    assert_eq!(
+        clock_totals(&mut harness).last().copied(),
+        Some(before + 1),
+        "the transport starts over but the pulse count carries on"
+    );
+}
+
 #[test]
 fn the_transport_reports_bars_and_beats_on_the_grid() {
     let mut harness = Harness::new(128);
