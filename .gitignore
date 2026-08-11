@@ -7,3 +7,6 @@
 # Per-rig configuration and recorded sessions
 free-loop.toml
 sessions/
+
+# Local working notes, never part of a commit
+review.md
