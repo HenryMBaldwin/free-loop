@@ -155,7 +155,9 @@ pub fn control(control: Control, chrome: Chrome) -> Led {
 pub const SELECTED: LedColor = LedColor::Pink;
 
 /// Colour the input selection is shown in, matching its side button.
-pub const INPUT: LedColor = LedColor::Green;
+///
+/// Not green: that is a playing clip, a queued one, and the session in use.
+pub const INPUT: LedColor = LedColor::Purple;
 
 /// Colour a silenced group takes, matching its side button.
 pub const MUTED: LedColor = LedColor::Red;
