@@ -21,7 +21,7 @@ use free_loop::control::{Controller, Request, TextUpdate};
 use free_loop_audio::{AudioIo, DeviceChange, Negotiated, open};
 use free_loop_core::{Command, Event};
 use free_loop_engine::{Engine, Housekeeping, LoadMessage, Loader, Snapshot};
-use free_loop_session::{SavedClip, SessionData, SessionStore};
+use free_loop_session::{SavedClip, SessionData, SessionStore, TrackSettings};
 use free_loop_surface::{ControlSurface, LaunchpadX, Reconnecting, SurfaceEvent};
 
 /// How often the control loop runs.
@@ -113,6 +113,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let store = SessionStore::new(path.parent().unwrap_or(Path::new(".")).join("sessions"));
     controller.set_sessions(store.index());
     controller.set_input_count(negotiated.channels);
+    controller.set_default_input(config.track_input());
+    controller.set_default_launch_mode(config.launch_mode());
     controller.set_inputs([config.track_input(); free_loop_core::TRACK_COUNT]);
     controller.set_launch_modes([config.launch_mode(); free_loop_core::TRACK_COUNT]);
 
@@ -355,9 +357,19 @@ fn load_session(
     controller: &mut Controller,
 ) {
     match load(store, addr, loader, negotiated) {
-        Ok(gains) => {
+        Ok(restored) => {
             println!("loaded session {}{}", addr.track.index(), addr.slot.index());
-            controller.set_gains(gains);
+            controller.set_gains(restored.gains);
+            controller.set_inputs(core::array::from_fn(|track| {
+                free_loop_core::TrackInput::from_column(restored.tracks[track].input)
+            }));
+            controller.set_launch_modes(core::array::from_fn(|track| {
+                if restored.tracks[track].restart {
+                    free_loop_core::LaunchMode::Restart
+                } else {
+                    free_loop_core::LaunchMode::Follow
+                }
+            }));
             controller.session_loaded(addr, true);
         }
         Err(error) => {
@@ -365,6 +377,16 @@ fn load_session(
             controller.cancel_picker();
         }
     }
+}
+
+/// What the controller has each track set to.
+fn track_settings(controller: &Controller) -> [TrackSettings; free_loop_core::TRACK_COUNT] {
+    let inputs = controller.inputs();
+    let modes = controller.launch_modes();
+    core::array::from_fn(|track| TrackSettings {
+        input: inputs[track].column(),
+        restart: modes[track].restarts(),
+    })
 }
 
 /// Writes the snapshotted clips out under `addr`.
@@ -375,6 +397,7 @@ fn save(
     negotiated: &free_loop_audio::Negotiated,
     snapshots: &[Snapshot],
     gains: [u8; free_loop_core::TRACK_COUNT],
+    tracks: [TrackSettings; free_loop_core::TRACK_COUNT],
 ) -> Result<(), free_loop_session::SessionError> {
     let clips = snapshots
         .iter()
@@ -399,6 +422,7 @@ fn save(
             sample_rate: negotiated.sample_rate,
             channels: u16::try_from(negotiated.channels).unwrap_or(2),
             clips,
+            tracks,
         },
     )
 }
@@ -431,11 +455,14 @@ fn load(
     addr: free_loop_core::SlotAddr,
     loader: &mut Loader,
     negotiated: &Negotiated,
-) -> Result<[u8; free_loop_core::TRACK_COUNT], Box<dyn Error>> {
+) -> Result<Restored, Box<dyn Error>> {
     let channels = u16::try_from(negotiated.channels).unwrap_or(2);
     let session = store.load(addr, negotiated.sample_rate, channels)?;
     let tempo = free_loop_core::Tempo::new(session.manifest.tempo)?;
-    let gains = session.gains();
+    let restored = Restored {
+        gains: session.gains(),
+        tracks: session.tracks(),
+    };
 
     if !loader.ready() {
         return Err("the audio thread has not drained the load queue".into());
@@ -449,7 +476,13 @@ fn load(
         })?;
     }
     loader.send(LoadMessage::End)?;
-    Ok(gains)
+    Ok(restored)
+}
+
+/// What a loaded session sets besides its audio.
+struct Restored {
+    gains: [u8; free_loop_core::TRACK_COUNT],
+    tracks: [TrackSettings; free_loop_core::TRACK_COUNT],
 }
 
 /// Writes a snapshot to a pad and tells the controller it landed.
@@ -468,6 +501,7 @@ fn write_session(
         negotiated,
         snapshots,
         controller.gains(),
+        track_settings(controller),
     ) {
         Ok(()) => {
             println!("saved session {}{}", addr.track.index(), addr.slot.index());
