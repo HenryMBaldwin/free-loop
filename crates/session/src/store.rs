@@ -102,12 +102,25 @@ pub struct SessionData<'a> {
 }
 
 /// One track's settings.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrackSettings {
     /// The column the track's input sits on. Zero is the whole input.
     pub input: usize,
     /// Whether launching a clip plays it from its start.
     pub restart: bool,
+    /// The step on the gain ladder the track plays at.
+    pub gain_step: u8,
+}
+
+impl Default for TrackSettings {
+    /// The whole input, following clips, at unity.
+    fn default() -> Self {
+        Self {
+            input: 0,
+            restart: false,
+            gain_step: UNITY_STEP,
+        }
+    }
 }
 
 /// One pad's audio, read back.
@@ -260,26 +273,30 @@ pub struct LoadedSession {
 
 impl LoadedSession {
     /// What each track's settings should be, defaulted where the session says nothing.
+    ///
+    /// The track's own level wins; a session saved before tracks carried one falls back
+    /// to the levels on its clips.
     pub fn tracks(&self) -> [TrackSettings; TRACK_COUNT] {
         let mut tracks = [TrackSettings::default(); TRACK_COUNT];
+        for loaded in &self.clips {
+            tracks[loaded.addr.track.index()].gain_step = loaded.gain_step;
+        }
+
         for entry in &self.manifest.tracks {
             if let Some(slot) = tracks.get_mut(usize::from(entry.track)) {
-                *slot = TrackSettings {
-                    input: entry.input,
-                    restart: entry.restart,
-                };
+                slot.input = entry.input;
+                slot.restart = entry.restart;
+                if let Some(step) = entry.gain_step {
+                    slot.gain_step = step;
+                }
             }
         }
         tracks
     }
 
-    /// The level each track should play at, taken from the clips it holds.
+    /// The level each track should play at.
     pub fn gains(&self) -> [u8; TRACK_COUNT] {
-        let mut gains = [UNITY_STEP; TRACK_COUNT];
-        for loaded in &self.clips {
-            gains[loaded.addr.track.index()] = loaded.gain_step;
-        }
-        gains
+        self.tracks().map(|track| track.gain_step)
     }
 }
 
@@ -427,6 +444,7 @@ impl SessionStore {
                     track: index_as_u8(index),
                     input: track.input,
                     restart: track.restart,
+                    gain_step: Some(track.gain_step),
                 })
                 .collect(),
         };
@@ -1217,6 +1235,7 @@ mod tests {
                     track: 7,
                     input: 2,
                     restart: true,
+                    gain_step: Some(3),
                 }],
             },
             clips: Vec::new(),
@@ -1225,7 +1244,99 @@ mod tests {
         let tracks = loaded.tracks();
         assert_eq!(tracks[7].input, 2);
         assert!(tracks[7].restart);
+        assert_eq!(tracks[7].gain_step, 3);
         assert_eq!(tracks[0], TrackSettings::default(), "and only that track");
+    }
+
+    /// A manifest holding nothing but track settings.
+    fn track_manifest(tracks: Vec<TrackEntry>) -> Manifest {
+        Manifest {
+            tempo: 120.0,
+            beats_per_bar: 4,
+            beat_unit: 4,
+            sample_rate: 48_000,
+            channels: CH,
+            clips: Vec::new(),
+            tracks,
+        }
+    }
+
+    fn loaded_clip(at: SlotAddr, gain_step: u8) -> LoadedClip {
+        LoadedClip {
+            addr: at,
+            playing: false,
+            gain_step,
+            launch_anchor: None,
+            clip: clip(64, 0),
+        }
+    }
+
+    #[test]
+    fn a_track_holding_no_clips_keeps_its_level() {
+        let loaded = LoadedSession {
+            manifest: track_manifest(vec![TrackEntry {
+                track: 5,
+                input: 0,
+                restart: false,
+                gain_step: Some(1),
+            }]),
+            clips: Vec::new(),
+        };
+
+        assert_eq!(loaded.gains()[5], 1);
+    }
+
+    #[test]
+    fn a_tracks_own_level_beats_the_ones_on_its_clips() {
+        let loaded = LoadedSession {
+            manifest: track_manifest(vec![TrackEntry {
+                track: 2,
+                input: 0,
+                restart: false,
+                gain_step: Some(1),
+            }]),
+            clips: vec![loaded_clip(addr(2, 0), 5), loaded_clip(addr(2, 1), 7)],
+        };
+
+        assert_eq!(
+            loaded.gains()[2],
+            1,
+            "two clips disagree; the track settles it, not the order they are listed in"
+        );
+    }
+
+    #[test]
+    fn a_session_saved_before_tracks_had_levels_takes_them_from_its_clips() {
+        let loaded = LoadedSession {
+            manifest: track_manifest(vec![TrackEntry {
+                track: 2,
+                input: 1,
+                restart: false,
+                gain_step: None,
+            }]),
+            clips: vec![loaded_clip(addr(2, 0), 5)],
+        };
+
+        assert_eq!(loaded.gains()[2], 5);
+        assert_eq!(
+            loaded.tracks()[2].input,
+            1,
+            "and the rest of the entry holds"
+        );
+    }
+
+    #[test]
+    fn a_saved_track_level_comes_back_without_a_clip_to_carry_it() {
+        let dir = TempDir::new("track-levels");
+        let store = SessionStore::new(&dir.0);
+
+        let mut data = data(Vec::new());
+        data.tracks[4].gain_step = 1;
+        store.save(addr(0, 0), &data).unwrap();
+
+        let loaded = store.load(addr(0, 0), 48_000, CH, BUDGET).unwrap();
+        assert_eq!(loaded.gains()[4], 1);
+        assert_eq!(loaded.gains()[3], UNITY_STEP, "and only that track");
     }
 
     #[test]
