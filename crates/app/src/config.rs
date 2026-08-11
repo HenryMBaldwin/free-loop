@@ -120,13 +120,6 @@ pub struct Engine {
     pub segment_pool: usize,
     /// Frames a level takes to travel the full gain range. 5 ms at 48 kHz.
     pub declick_frames: u64,
-    /// Segments a loaded session may hold, about 1.4 s and half a megabyte each.
-    ///
-    /// Separate from `segment_pool`: a load brings its own storage rather than drawing on the
-    /// recording pool, so a session built up over several record and load passes is normally
-    /// larger than the pool ever held at once. A ceiling rather than a reservation, so it only
-    /// stops a file claiming more than is sensible.
-    pub load_segments: usize,
 }
 
 impl Default for Engine {
@@ -134,7 +127,6 @@ impl Default for Engine {
         Self {
             segment_pool: 2_048,
             declick_frames: free_loop_engine::DEFAULT_DECLICK.0,
-            load_segments: 8_192,
         }
     }
 }
@@ -225,15 +217,12 @@ impl Config {
         }
     }
 
-    /// The most segments a loaded session may hold.
+    /// The most segments a session may hold, loaded or recorded.
     ///
-    /// Never below `segment_pool`: a session can be recorded up to the pool's size, and one
-    /// that cannot be loaded back is worse than one that was never allowed.
-    ///
-    /// Counted the way the loader allocates: one buffer per clip, each rounded up to whole
-    /// segments.
+    /// The pool is the only ceiling: loaded audio is stored outside it but reserves the
+    /// same capacity, so a session that fits is one that could have been recorded.
     pub fn load_budget(&self) -> usize {
-        self.engine.load_segments.max(self.engine.segment_pool)
+        self.engine.segment_pool
     }
 
     /// Where every track's clips start out being anchored.
@@ -330,12 +319,11 @@ restart_clips = false
 [engine]
 # About 1.4 s of stereo audio and half a megabyte each, shared across every pad. Allocated at
 # startup, so this is resident memory: 2048 is roughly 46 minutes for just over a gigabyte.
+# The ceiling on a whole session: loaded audio reserves the same capacity as recorded audio,
+# so lowering this can leave a session already on disk too large to load.
 segment_pool = 2048
 # Frames a level takes to travel the full gain range. 5 ms at 48 kHz.
 declick_frames = 240
-# The most segments a saved session may load. A load brings its own storage, so this is a
-# ceiling on a file rather than a draw on the pool; never applied below segment_pool.
-load_segments = 8192
 
 [click]
 enabled = true
@@ -354,22 +342,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_load_budget_never_falls_below_the_recording_pool() {
-        let config = Config::parse("[engine]\nsegment_pool = 4096\nload_segments = 8\n").unwrap();
+    fn the_pool_is_the_only_ceiling_on_a_session() {
+        let config = Config::parse("[engine]\nsegment_pool = 4096\n").unwrap();
         assert_eq!(
             config.load_budget(),
             4096,
-            "a session recorded to the pool's size has to load back"
+            "a session that fits is one that could have been recorded"
         );
     }
 
     #[test]
-    fn the_load_budget_is_set_apart_from_the_recording_pool() {
+    fn a_session_larger_than_the_configured_pool_is_off_limits() {
         let config = Config::parse("[engine]\nsegment_pool = 4\n").unwrap();
         assert_eq!(
             config.load_budget(),
-            8_192,
-            "a load is bounded on its own, not by the recording pool"
+            4,
+            "lowering the pool puts a session recorded under the old one out of reach"
         );
     }
 
@@ -407,7 +395,6 @@ mod tests {
         assert_eq!(config.transport.tempo, defaults.transport.tempo);
         assert_eq!(config.transport.max_bars, defaults.transport.max_bars);
         assert_eq!(config.engine.segment_pool, defaults.engine.segment_pool);
-        assert_eq!(config.engine.load_segments, defaults.engine.load_segments);
         assert_eq!(config.click.level, defaults.click.level);
         assert_eq!(config.audio.cushion_blocks, defaults.audio.cushion_blocks);
     }

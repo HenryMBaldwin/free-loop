@@ -438,6 +438,18 @@ impl Controller {
         self.show(LedColor::Red, now);
     }
 
+    /// Leaves the picker and says on the grid that nothing was loaded.
+    ///
+    /// `code` is scrolled after the flash, for a refusal with a number worth reading.
+    pub fn load_failed(&mut self, now: Duration, code: Option<String>) {
+        self.mode = Mode::Perform;
+        self.show(LedColor::Red, now);
+        if let Some(code) = code {
+            self.text = Some(TextUpdate::Show(code));
+            self.text_until = Some(now + TEXT_DURATION);
+        }
+    }
+
     /// Holds the grid at one colour for [`SAVE_FLASH`].
     fn show(&mut self, color: LedColor, now: Duration) {
         self.flash = Some(Flash {
@@ -1411,6 +1423,30 @@ mod tests {
         assert_eq!(controller.mode(), Mode::Perform);
         assert_eq!(controller.current_session(), None, "nothing was written");
 
+        let frame = controller.take_frame().unwrap();
+        assert!(SlotAddr::all().all(|a| frame.pad(a) == Led::solid(LedColor::Red)));
+    }
+
+    #[test]
+    fn a_failed_load_turns_the_grid_red_and_scrolls_its_code() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        controller.load_failed(T0, Some("2600".to_owned()));
+
+        assert_eq!(controller.mode(), Mode::Perform);
+        assert_eq!(
+            controller.take_text(),
+            Some(TextUpdate::Show("2600".to_owned())),
+            "the pool size the session needs"
+        );
+    }
+
+    #[test]
+    fn a_failed_load_with_nothing_to_read_only_flashes() {
+        let mut controller = controller();
+        controller.load_failed(T0, None);
+
+        assert_eq!(controller.take_text(), None);
         let frame = controller.take_frame().unwrap();
         assert!(SlotAddr::all().all(|a| frame.pad(a) == Led::solid(LedColor::Red)));
     }

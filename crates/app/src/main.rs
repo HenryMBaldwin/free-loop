@@ -234,6 +234,7 @@ fn run(s: Session<'_>) {
                         &negotiated,
                         controller,
                         config,
+                        now,
                     );
                 }
             }
@@ -362,6 +363,14 @@ fn report_latency(io: &AudioIo, negotiated: &Negotiated, already: bool) -> bool 
     true
 }
 
+/// The segments a session needs, when that is why it was refused.
+fn too_large(error: &(dyn Error + 'static)) -> Option<String> {
+    match error.downcast_ref::<free_loop_session::SessionError>()? {
+        free_loop_session::SessionError::TooLarge { wanted, .. } => Some(wanted.to_string()),
+        _ => None,
+    }
+}
+
 /// Reads a session in and tells the controller what came with it.
 fn load_session(
     store: &SessionStore,
@@ -370,6 +379,7 @@ fn load_session(
     negotiated: &Negotiated,
     controller: &mut Controller,
     config: &Config,
+    now: Duration,
 ) {
     match load(store, addr, loader, negotiated, config) {
         Ok(restored) => {
@@ -396,7 +406,7 @@ fn load_session(
                 addr.track.index(),
                 addr.slot.index()
             );
-            controller.cancel_picker();
+            controller.load_failed(now, too_large(error.as_ref()));
         }
     }
 }
@@ -932,6 +942,25 @@ mod tests {
             array[kind.index()] = *count;
         }
         DroppedEvents::from(array)
+    }
+
+    #[test]
+    fn a_session_too_large_reports_the_number_to_raise_the_pool_to() {
+        let error: Box<dyn Error> = Box::new(free_loop_session::SessionError::TooLarge {
+            allowed: 2_048,
+            wanted: 2_600,
+        });
+        assert_eq!(too_large(error.as_ref()), Some("2600".to_owned()));
+    }
+
+    #[test]
+    fn another_refusal_has_no_number_worth_scrolling() {
+        let error: Box<dyn Error> = Box::new(free_loop_session::SessionError::Mismatch {
+            what: "Hz",
+            wanted: 48_000,
+            found: 44_100,
+        });
+        assert_eq!(too_large(error.as_ref()), None);
     }
 
     #[test]
