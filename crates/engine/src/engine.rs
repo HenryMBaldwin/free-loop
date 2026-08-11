@@ -650,6 +650,14 @@ impl Engine {
             Command::SetLaunchModes(modes) => self.audio.launch_modes = modes,
             Command::ClearAll => self.defer(Deferred::ClearAll, sink),
             Command::Rewind => self.defer(Deferred::Rewind, sink),
+            Command::Resync => {
+                for addr in SlotAddr::all() {
+                    sink.event(Event::SlotChanged {
+                        addr,
+                        state: self.session.state(addr),
+                    });
+                }
+            }
             Command::Snapshot { request } => self.publish_snapshot(request, sink),
             Command::SetPaused(paused) => self.set_paused(paused, sink),
             Command::SetClickEnabled(enabled) => self.click.set_enabled(enabled),

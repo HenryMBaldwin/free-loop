@@ -194,12 +194,14 @@ fn run(s: Session<'_>) {
     // Only known once the driver has run a callback and said how much it buffers.
     let mut reported_latency = false;
     let mut connected = surface.is_connected();
+    // Reports that never arrived leave the grid showing what a pad used to be doing.
+    let mut missed_reports = 0_u64;
 
     while running.load(Ordering::Relaxed) {
         let now = started.elapsed();
 
-        connected = watch_surface(surface, now, connected);
-        watch_devices(io, now, controller, config.audio.pause_on_disconnect);
+        missed_reports = resync_after_loss(io, missed_reports);
+        connected = watch_devices_and_surface(io, surface, now, connected, controller, config);
 
         events.clear();
         surface.poll(&mut events);
@@ -650,6 +652,40 @@ fn write_session(
         }
         Err(error) => eprintln!("save failed: {error}"),
     }
+}
+
+/// Lets both devices settle, reporting anything that came or went.
+///
+/// Returns whether a surface is attached now.
+fn watch_devices_and_surface(
+    io: &mut AudioIo,
+    surface: &mut dyn ControlSurface,
+    now: Duration,
+    connected: bool,
+    controller: &mut Controller,
+    config: &Config,
+) -> bool {
+    let attached = watch_surface(surface, now, connected);
+    watch_devices(io, now, controller, config.audio.pause_on_disconnect);
+    attached
+}
+
+/// Asks the engine to report every pad again if any of its reports were lost.
+///
+/// The controller paints from a mirror kept in step by those reports, so one missing leaves
+/// a pad showing the wrong thing until something else changes it.
+fn resync_after_loss(io: &mut AudioIo, seen: u64) -> u64 {
+    let dropped = io.dropped_events();
+    if dropped == seen {
+        return seen;
+    }
+
+    eprintln!("missed {} engine reports; asking again", dropped - seen);
+    if io.send(Command::Resync).is_err() {
+        // The queue is full as well, so leave the count alone and try again next pass.
+        return seen;
+    }
+    dropped
 }
 
 /// Lets the audio devices come back after being unplugged, reporting what changed.
