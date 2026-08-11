@@ -126,6 +126,10 @@ pub struct Controller {
     tempo: f64,
     /// What the config asked for, which a fresh session goes back to.
     default_tempo: f64,
+    /// The input a fresh session puts every track on.
+    default_input: TrackInput,
+    /// The launch mode a fresh session puts every track on.
+    default_launch_mode: LaunchMode,
     /// Tempo to fall back to if the engine turns a change down.
     tempo_before_request: f64,
     /// When each held pad went down.
@@ -174,6 +178,8 @@ impl Controller {
             chrome,
             tempo,
             default_tempo: tempo,
+            default_input: TrackInput::Stereo,
+            default_launch_mode: LaunchMode::Follow,
             tempo_before_request: tempo,
             held: [[None; SLOT_COUNT]; TRACK_COUNT],
             warning: 0,
@@ -295,6 +301,16 @@ impl Controller {
         self.chrome.inputs
     }
 
+    /// The input a fresh session starts every track on.
+    pub fn set_default_input(&mut self, input: TrackInput) {
+        self.default_input = input;
+    }
+
+    /// The launch mode a fresh session starts every track on.
+    pub fn set_default_launch_mode(&mut self, mode: LaunchMode) {
+        self.default_launch_mode = mode;
+    }
+
     /// Takes the inputs a loaded session came with.
     pub fn set_inputs(&mut self, inputs: [TrackInput; TRACK_COUNT]) {
         self.chrome.inputs = inputs;
@@ -347,6 +363,11 @@ impl Controller {
 
         self.chrome.gains = [UNITY_STEP; TRACK_COUNT];
         self.commands.push(Command::SetGains(self.chrome.gains));
+        self.chrome.inputs = [self.default_input; TRACK_COUNT];
+        self.commands.push(Command::SetInputs(self.chrome.inputs));
+        self.chrome.launch_modes = [self.default_launch_mode; TRACK_COUNT];
+        self.commands
+            .push(Command::SetLaunchModes(self.chrome.launch_modes));
         self.commands.push(Command::ClearAll);
         self.commands.push(Command::SetMutes {
             muted: 0,
@@ -1505,6 +1526,24 @@ mod tests {
             commands(&mut controller).is_empty(),
             "no second pause to send"
         );
+    }
+
+    #[test]
+    fn a_fresh_session_puts_every_track_back_to_its_defaults() {
+        let mut controller = controller();
+        let mut modes = [LaunchMode::Follow; TRACK_COUNT];
+        modes[7] = LaunchMode::Restart;
+        controller.set_launch_modes(modes);
+        let mut inputs = [TrackInput::Stereo; TRACK_COUNT];
+        inputs[7] = TrackInput::Mono(1);
+        controller.set_inputs(inputs);
+        let _ = commands(&mut controller);
+
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        controller.on_surface(side(NEW_SIDE), T0);
+
+        assert_eq!(controller.launch_modes(), [LaunchMode::Follow; TRACK_COUNT]);
+        assert_eq!(controller.inputs(), [TrackInput::Stereo; TRACK_COUNT]);
     }
 
     #[test]
