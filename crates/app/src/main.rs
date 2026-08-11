@@ -575,10 +575,13 @@ fn load(
 ) -> Result<Restored, Box<dyn Error>> {
     let channels = u16::try_from(negotiated.channels).unwrap_or(2);
 
-    // Read on its own first: everything decided by the manifest alone is settled before any
-    // audio is allocated, so a session that will be refused costs nothing to refuse.
-    let manifest = store.manifest(addr)?;
+    // Everything a session can be refused for is settled before any of its audio is read,
+    // so refusing one costs a single parse.
+    let checked = store.inspect(addr)?;
+    checked.accepts(negotiated.sample_rate, channels, config.load_budget())?;
+
     let wanted = config.time_signature()?;
+    let manifest = checked.manifest();
     if manifest.beats_per_bar != wanted.beats_per_bar() || manifest.beat_unit != wanted.beat_unit()
     {
         return Err(format!(
@@ -592,7 +595,7 @@ fn load(
     }
     let tempo = free_loop_core::Tempo::new(manifest.tempo)?;
 
-    let session = store.load(addr, negotiated.sample_rate, channels, config.load_budget())?;
+    let session = checked.materialise(channels)?;
     let restored = Restored {
         gains: session.gains(),
         tracks: session.tracks(),
