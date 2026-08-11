@@ -1,7 +1,6 @@
 //! Control instructions for the realtime side. `Copy` and allocation-free.
 //!
-//! Only instructions whose effect depends on when they arrive. Whole-state settings go
-//! through [`crate::settings::Settings`].
+//! Only instructions whose effect depends on when they arrive.
 
 use crate::ids::{SlotAddr, TrackId};
 use crate::time::Tempo;

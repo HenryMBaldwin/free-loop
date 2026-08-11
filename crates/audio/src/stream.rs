@@ -527,8 +527,8 @@ impl AudioIo {
 
     /// Reports the engine could not fit onto the event ring since it was built, by kind.
     ///
-    /// A reader compares this against what it saw last: a kind that has risen is one it
-    /// has missed, and [`EventKind::is_replayed`] says whether asking again puts it right.
+    /// A reader compares this against what it saw last; [`EventKind::is_replayed`] says
+    /// whether asking the engine again puts a kind right.
     pub fn dropped_events(&self) -> DroppedEvents {
         DroppedEvents(core::array::from_fn(|index| {
             self.health.dropped_events[index].load(Ordering::Relaxed)

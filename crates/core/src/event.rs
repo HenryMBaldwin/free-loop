@@ -24,7 +24,7 @@ pub enum Event {
         /// How many the transport has produced since the engine was built.
         ///
         /// Never goes backwards, and a rewind produces none. Send on the difference from
-        /// the last total taken, so a report that never arrives costs no ticks.
+        /// the last total taken.
         total: u64,
     },
     /// The transport crossed a beat.
