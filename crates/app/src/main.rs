@@ -196,6 +196,8 @@ fn run(s: Session<'_>) {
     let mut connected = surface.is_connected();
     // Reports that never arrived leave the grid showing what a pad used to be doing.
     let mut missed_reports = 0_u64;
+    // Clock ticks the device has had, against the running total the engine reports.
+    let mut clock_sent = 0_u64;
 
     while running.load(Ordering::Relaxed) {
         let now = started.elapsed();
@@ -254,7 +256,7 @@ fn run(s: Session<'_>) {
         let drained = drain_engine(io, controller);
         let Drained {
             answered,
-            clock_ticks,
+            clock_total,
             clipped,
             short_frames,
         } = drained;
@@ -264,8 +266,13 @@ fn run(s: Session<'_>) {
         xruns.note(short_frames, now);
 
         // Keeps the device's flash and pulse animations on the transport's tempo.
-        if clock_ticks > 0
-            && let Err(error) = surface.send_clock(clock_ticks)
+        let ticks = clock_total.map_or(0, |total| {
+            let ticks = total.saturating_sub(clock_sent);
+            clock_sent = total;
+            u32::try_from(ticks).unwrap_or(u32::MAX)
+        });
+        if ticks > 0
+            && let Err(error) = surface.send_clock(ticks)
         {
             eprintln!("surface: {error}");
         }
@@ -718,7 +725,8 @@ fn write_session(
 struct Drained {
     /// The snapshot completion, if one arrived.
     answered: Option<(u32, u32, u32)>,
-    clock_ticks: u32,
+    /// The transport's running clock count, if it reported one.
+    clock_total: Option<u64>,
     clipped: u32,
     short_frames: u64,
 }
@@ -727,7 +735,7 @@ struct Drained {
 fn drain_engine(io: &mut AudioIo, controller: &mut Controller) -> Drained {
     let mut drained = Drained {
         answered: None,
-        clock_ticks: 0,
+        clock_total: None,
         clipped: 0,
         short_frames: 0,
     };
@@ -738,7 +746,8 @@ fn drain_engine(io: &mut AudioIo, controller: &mut Controller) -> Drained {
                 clips,
                 expected,
             } => drained.answered = Some((request, clips, expected)),
-            Event::Clock { ticks } => drained.clock_ticks += ticks,
+            // The latest total covers every one before it, dropped or drained.
+            Event::Clock { total } => drained.clock_total = Some(total),
             Event::Clipped { samples } => drained.clipped += samples,
             Event::Xrun { frames } => drained.short_frames += frames,
             _ => {}
