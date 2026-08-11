@@ -163,6 +163,36 @@ impl SessionStore {
         Self { root: root.into() }
     }
 
+    /// Puts back any session left mid-swap by an interrupted save.
+    ///
+    /// A swap moves the old directory aside and the new one into place. A process that dies
+    /// between those two leaves the pad with nothing where a complete session is sitting
+    /// under another name. Call once at startup.
+    pub fn recover(&self) {
+        for addr in SlotAddr::all() {
+            let dir = self.dir(addr);
+            if dir.is_dir() {
+                // Whatever is here is the finished session; anything aside is what it
+                // replaced.
+                let _ = std::fs::remove_dir_all(self.previous(addr));
+                continue;
+            }
+            let previous = self.previous(addr);
+            if previous.is_dir() {
+                let _ = std::fs::rename(&previous, &dir);
+            }
+        }
+    }
+
+    /// Where a pad's outgoing session waits during a swap.
+    fn previous(&self, addr: SlotAddr) -> PathBuf {
+        self.root.join(format!(
+            ".{}{}.previous",
+            addr.track.index(),
+            addr.slot.index()
+        ))
+    }
+
     /// Where a pad's session lives.
     pub fn dir(&self, addr: SlotAddr) -> PathBuf {
         self.root
@@ -282,11 +312,7 @@ impl SessionStore {
     /// two renames rather than a whole session's worth of writing.
     fn swap_in(&self, addr: SlotAddr, staging: &Path) -> Result<(), SessionError> {
         let dir = self.dir(addr);
-        let previous = self.root.join(format!(
-            ".{}{}.previous",
-            addr.track.index(),
-            addr.slot.index()
-        ));
+        let previous = self.previous(addr);
         let _ = std::fs::remove_dir_all(&previous);
 
         let had_previous = dir.is_dir();
@@ -294,7 +320,8 @@ impl SessionStore {
             rename(&dir, &previous)?;
         }
         if let Err(error) = rename(staging, &dir) {
-            // Put back what was there rather than leaving the pad with nothing.
+            // Put back what was there rather than leaving the pad with nothing. If even
+            // that fails, `recover` finds it at the next startup.
             if had_previous {
                 let _ = std::fs::rename(&previous, &dir);
             }
@@ -636,6 +663,56 @@ mod tests {
         let read = store.load(addr(0, 0), 48_000, 2).unwrap();
         assert_eq!(read.clips.len(), 1, "the first save is still there");
         assert_eq!(read.clips[0].addr, addr(0, 0), "and it is the same clip");
+    }
+
+    #[test]
+    fn a_session_left_mid_swap_is_put_back() {
+        let dir = TempDir::new("recover");
+        let store = SessionStore::new(&dir.0);
+        let held = clip(128, 0);
+        store
+            .save(
+                addr(0, 0),
+                &data(vec![SavedClip {
+                    addr: addr(0, 0),
+                    playing: true,
+                    gain_step: UNITY_STEP,
+                    launch_anchor: None,
+                    clip: &held,
+                }]),
+            )
+            .unwrap();
+
+        // What an interruption between the two renames leaves behind.
+        std::fs::rename(store.dir(addr(0, 0)), dir.0.join(".00.previous")).unwrap();
+        assert!(!store.exists(addr(0, 0)), "invisible until recovered");
+
+        store.recover();
+        assert!(store.exists(addr(0, 0)), "back where it belongs");
+        assert_eq!(store.load(addr(0, 0), 48_000, 2).unwrap().clips.len(), 1);
+    }
+
+    #[test]
+    fn recovery_leaves_a_finished_swap_alone() {
+        let dir = TempDir::new("recover-noop");
+        let store = SessionStore::new(&dir.0);
+        let held = clip(128, 0);
+        let save = |addr_of| {
+            vec![SavedClip {
+                addr: addr_of,
+                playing: true,
+                gain_step: UNITY_STEP,
+                launch_anchor: None,
+                clip: &held,
+            }]
+        };
+        store.save(addr(0, 0), &data(save(addr(0, 0)))).unwrap();
+        // A leftover from a swap that did finish.
+        std::fs::create_dir_all(dir.0.join(".00.previous")).unwrap();
+
+        store.recover();
+        assert_eq!(store.load(addr(0, 0), 48_000, 2).unwrap().clips.len(), 1);
+        assert!(!dir.0.join(".00.previous").exists(), "and it is tidied up");
     }
 
     #[test]
