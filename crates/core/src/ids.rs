@@ -229,3 +229,30 @@ impl TrackInput {
         }
     }
 }
+
+/// When a clip's playback position is decided.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LaunchMode {
+    /// The clip sits where it was recorded, so launching drops into whatever part of it
+    /// the transport has reached.
+    #[default]
+    Follow,
+    /// The clip is anchored where it is launched, so it plays from its start every time.
+    Restart,
+}
+
+impl LaunchMode {
+    /// The other mode.
+    #[must_use]
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Follow => Self::Restart,
+            Self::Restart => Self::Follow,
+        }
+    }
+
+    /// Whether a launch re-anchors the clip.
+    pub fn restarts(self) -> bool {
+        matches!(self, Self::Restart)
+    }
+}

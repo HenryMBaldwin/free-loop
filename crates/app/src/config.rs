@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use free_loop_audio::{AudioConfig, InputSource};
-use free_loop_core::{SampleRate, Tempo, TimeError, TimeSignature, TrackInput};
+use free_loop_core::{LaunchMode, SampleRate, Tempo, TimeError, TimeSignature, TrackInput};
 use free_loop_engine::{ClickConfig, EngineConfig, EngineError};
 use serde::Deserialize;
 
@@ -94,6 +94,9 @@ pub struct Transport {
     pub beat_unit: u32,
     /// Longest recording allowed, in bars.
     pub max_bars: u32,
+    /// Whether launching a clip plays it from its start rather than from wherever the
+    /// transport has reached.
+    pub restart_clips: bool,
 }
 
 impl Default for Transport {
@@ -103,6 +106,7 @@ impl Default for Transport {
             beats_per_bar: 4,
             beat_unit: 4,
             max_bars: 32,
+            restart_clips: false,
         }
     }
 }
@@ -213,6 +217,15 @@ impl Config {
         }
     }
 
+    /// Where every track's clips start out being anchored.
+    pub fn launch_mode(&self) -> LaunchMode {
+        if self.transport.restart_clips {
+            LaunchMode::Restart
+        } else {
+            LaunchMode::Follow
+        }
+    }
+
     /// The input every track starts on.
     pub fn track_input(&self) -> TrackInput {
         match self.audio.input_channel {
@@ -247,12 +260,8 @@ impl Config {
             max_bars: self.transport.max_bars,
             segment_pool: self.engine.segment_pool,
             declick: free_loop_core::Frames(self.engine.declick_frames),
-            input: match self.audio.input_channel {
-                Some(channel) => {
-                    free_loop_core::TrackInput::Mono(u8::try_from(channel).unwrap_or(0))
-                }
-                None => free_loop_core::TrackInput::Stereo,
-            },
+            input: self.track_input(),
+            launch_mode: self.launch_mode(),
             // Replaced by what the driver reports once the streams are running.
             capture_offset: free_loop_core::Frames::ZERO,
             click: ClickConfig {
@@ -295,6 +304,9 @@ tempo = 120.0
 beats_per_bar = 4
 beat_unit = 4
 max_bars = 32
+# Whether launching a clip plays it from its start. Off drops into whatever part of it the
+# transport has reached, which keeps every loop locked to the same grid.
+restart_clips = false
 
 [engine]
 # About 1.4 s of stereo audio each at 48 kHz.
