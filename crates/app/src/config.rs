@@ -241,6 +241,12 @@ impl Config {
             max_bars: self.transport.max_bars,
             segment_pool: self.engine.segment_pool,
             declick: free_loop_core::Frames(self.engine.declick_frames),
+            input: match self.audio.input_channel {
+                Some(channel) => {
+                    free_loop_core::TrackInput::Mono(u8::try_from(channel).unwrap_or(0))
+                }
+                None => free_loop_core::TrackInput::Stereo,
+            },
             // Replaced by what the driver reports once the streams are running.
             capture_offset: free_loop_core::Frames::ZERO,
             click: ClickConfig {
