@@ -770,8 +770,8 @@ fn lent_storage_comes_back_rather_than_joining_the_pool() {
 
     assert_eq!(
         harness.engine.segments_available(),
-        available,
-        "lent segments must not enter the engine's pool"
+        available - 1,
+        "a loaded clip reserves what it would have cost to record"
     );
 
     harness.command(Command::Clear(pad));
@@ -784,6 +784,51 @@ fn lent_storage_comes_back_rather_than_joining_the_pool() {
         harness.engine.segments_available(),
         available,
         "and the engine's pool is the size it started at"
+    );
+}
+
+#[test]
+fn a_load_leaves_less_room_to_record() {
+    let mut harness = Harness::new(128);
+    let available = harness.engine.segments_available();
+
+    // Every segment the pool has, arriving as a load rather than as a take.
+    harness
+        .housekeeping
+        .loader
+        .send(LoadMessage::Begin {
+            tempo: Tempo::new(120.0).unwrap(),
+        })
+        .unwrap();
+    for pad in SlotAddr::all().take(available) {
+        harness
+            .housekeeping
+            .loader
+            .send(LoadMessage::Clip {
+                addr: pad,
+                clip: lent_clip(1_000, 0),
+                playing: false,
+                launch_anchor: None,
+            })
+            .unwrap();
+    }
+    harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+    harness.run_frames(128);
+
+    assert_eq!(harness.engine.segments_available(), 0, "the grid is full");
+
+    // A take now has nowhere to go.
+    harness.command(Command::SetPaused(false));
+    harness.drain_events();
+    harness.command(Command::Press(addr(7, 7)));
+    harness.run_to(2 * BAR);
+
+    assert!(
+        harness.drain_events().iter().any(|e| matches!(
+            e,
+            Event::RecordBufferLow { .. } | Event::RecordingRefused { .. }
+        )),
+        "recording is refused the way a dry pool refuses it"
     );
 }
 
