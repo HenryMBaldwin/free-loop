@@ -10,7 +10,9 @@
     reason = "tests should fail loudly, and compare exact sample values"
 )]
 
-use free_loop_core::{ClipId, Command, Event, Frames, SlotAddr, SlotId, SlotState, Tempo, TrackId};
+use free_loop_core::{
+    ClipId, Command, Event, Frames, Settings, SlotAddr, SlotId, SlotState, Tempo, TrackId,
+};
 use free_loop_engine::{
     ClickConfig, Engine, EngineConfig, Housekeeping, LoadMessage, Snapshot,
     buffer::{AudioBuffer, Clip, SegmentPool},
@@ -35,6 +37,8 @@ struct Harness {
     housekeeping: Housekeeping,
     events: Vec<Event>,
     block: usize,
+    /// What the engine has been told, so one setting can be changed at a time.
+    settings: Settings,
 }
 
 impl Harness {
@@ -58,6 +62,7 @@ impl Harness {
             housekeeping,
             events: Vec::new(),
             block,
+            settings: Settings::new(),
         }
     }
 
@@ -91,6 +96,12 @@ impl Harness {
 
     fn command(&mut self, command: Command) {
         self.engine.handle(command, &mut self.events);
+    }
+
+    /// Changes one setting and hands the whole state to the engine.
+    fn setting(&mut self, change: impl FnOnce(&mut Settings)) {
+        change(&mut self.settings);
+        self.engine.apply_settings(self.settings);
     }
 
     /// Runs until the transport reaches `target`, returning the rendered output.
@@ -1114,18 +1125,12 @@ fn a_muted_pad_does_not_sound() {
     let pad = addr(0, 0);
     record(&mut harness, pad, 0, 1);
 
-    harness.command(Command::SetMutes {
-        muted: row_mask(pad.track),
-        soloed: 0,
-    });
+    harness.setting(|s| s.muted = row_mask(pad.track));
     let out = harness.run_frames(256);
     assert!(out.iter().all(|s| *s == 0.0), "a muted row is silent");
     assert!(!harness.engine.is_audible(pad));
 
-    harness.command(Command::SetMutes {
-        muted: 0,
-        soloed: 0,
-    });
+    harness.setting(|s| s.muted = 0);
     let out = harness.run_frames(256);
     assert!(out.iter().any(|s| *s != 0.0), "and comes back");
     let _ = pad_bit(pad);
@@ -1143,10 +1148,7 @@ fn a_solo_silences_everything_outside_it() {
     let after = harness.position();
     record(&mut harness, dropped, after, 1);
 
-    harness.command(Command::SetMutes {
-        muted: 0,
-        soloed: row_mask(kept.track),
-    });
+    harness.setting(|s| s.soloed = row_mask(kept.track));
 
     assert!(harness.engine.is_audible(kept));
     assert!(!harness.engine.is_audible(dropped));
@@ -1169,9 +1171,9 @@ fn a_mute_beats_a_solo_on_the_same_pad() {
     record(&mut harness, pad, 0, 1);
 
     let row = row_mask(pad.track);
-    harness.command(Command::SetMutes {
-        muted: row,
-        soloed: row,
+    harness.setting(|s| {
+        s.muted = row;
+        s.soloed = row;
     });
 
     assert!(!harness.engine.is_audible(pad));
@@ -1190,10 +1192,7 @@ fn muting_a_column_reaches_across_tracks() {
     let after = harness.position();
     record(&mut harness, second, after, 1);
 
-    harness.command(Command::SetMutes {
-        muted: column_mask(SlotId::new(0).unwrap()),
-        soloed: 0,
-    });
+    harness.setting(|s| s.muted = column_mask(SlotId::new(0).unwrap()));
 
     assert!(!harness.engine.is_audible(first));
     assert!(!harness.engine.is_audible(second));
@@ -1211,7 +1210,7 @@ fn a_track_plays_at_the_gain_it_was_given() {
 
     let mut gains = [UNITY_STEP; TRACK_COUNT];
     gains[0] = UNITY_STEP - 1;
-    harness.command(Command::SetGains(gains));
+    harness.setting(|s| s.gains = gains);
 
     let quieter = gain_for_step(UNITY_STEP - 1);
     let from = harness.position();
@@ -1233,7 +1232,7 @@ fn the_bottom_of_the_ladder_is_silence() {
 
     let mut gains = [UNITY_STEP; TRACK_COUNT];
     gains[0] = 0;
-    harness.command(Command::SetGains(gains));
+    harness.setting(|s| s.gains = gains);
 
     let out = harness.run_frames(256);
     assert!(out.iter().all(|s| *s == 0.0));
@@ -1252,7 +1251,7 @@ fn gain_is_per_track_not_per_grid() {
 
     let mut gains = [UNITY_STEP; TRACK_COUNT];
     gains[0] = 1;
-    harness.command(Command::SetGains(gains));
+    harness.setting(|s| s.gains = gains);
 
     let scale = gain_for_step(1);
     let from = harness.position();
@@ -1279,7 +1278,7 @@ fn nothing_leaves_the_engine_past_full_scale() {
 
     // Both tracks at the top of the ladder, which sums past full scale.
     let top = u8::try_from(free_loop_core::GAIN_STEPS - 1).unwrap();
-    harness.command(Command::SetGains([top; free_loop_core::TRACK_COUNT]));
+    harness.setting(|s| s.gains = [top; free_loop_core::TRACK_COUNT]);
 
     let out = harness.run_to(harness.position() + BAR);
     assert!(out.iter().all(|s| (-1.0..=1.0).contains(s)));
@@ -1713,7 +1712,7 @@ mod launch_mode {
     fn restart(harness: &mut Harness, track: usize) {
         let mut modes = [LaunchMode::Follow; free_loop_core::TRACK_COUNT];
         modes[track] = LaunchMode::Restart;
-        harness.command(Command::SetLaunchModes(modes));
+        harness.setting(|s| s.launch_modes = modes);
     }
 
     /// Records two bars on `pad`, stops it, then relaunches on the next bar line.
@@ -1819,7 +1818,7 @@ mod inputs {
     fn set(harness: &mut Harness, track: usize, input: TrackInput) {
         let mut inputs = [TrackInput::Stereo; free_loop_core::TRACK_COUNT];
         inputs[track] = input;
-        harness.command(Command::SetInputs(inputs));
+        harness.setting(|s| s.inputs = inputs);
     }
 
     /// Every frame of `out`, as (channel 0, channel 1) pairs.
@@ -1905,17 +1904,11 @@ mod declick {
     }
 
     fn mute(harness: &mut Harness, pad: SlotAddr) {
-        harness.command(Command::SetMutes {
-            muted: row_mask(pad.track),
-            soloed: 0,
-        });
+        harness.setting(|s| s.muted = row_mask(pad.track));
     }
 
     fn unmute(harness: &mut Harness) {
-        harness.command(Command::SetMutes {
-            muted: 0,
-            soloed: 0,
-        });
+        harness.setting(|s| s.muted = 0);
     }
 
     #[test]

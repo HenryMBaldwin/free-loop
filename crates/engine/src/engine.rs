@@ -10,8 +10,8 @@
 
 use free_loop_core::{
     BarGrid, ClipId, Command, Ctx, Effect, Event, Frames, LaunchMode, MIN_BPM, PadMask, SLOT_COUNT,
-    SampleRate, SessionModel, SlotAddr, SlotState, TRACK_COUNT, Tempo, TimeError, TimeSignature,
-    TrackInput, UNITY_STEP, gain_for_step, pad_bit,
+    SampleRate, SessionModel, Settings, SlotAddr, SlotState, TRACK_COUNT, Tempo, TimeError,
+    TimeSignature, TrackInput, UNITY_STEP, gain_for_step, pad_bit,
 };
 
 use std::sync::Arc;
@@ -639,15 +639,6 @@ impl Engine {
             Command::StopAll => self.with_session(|session, audio| {
                 session.stop_all(&ctx, &mut |a, e| audio.apply(a, e, sink));
             }),
-            Command::SetMutes { muted, soloed } => {
-                self.muted = muted;
-                self.soloed = soloed;
-            }
-            Command::SetGains(gains) => self.gains = gains,
-            // Takes in progress keep the input they started on.
-            Command::SetInputs(inputs) => self.audio.inputs = inputs,
-            // A clip already sounding keeps the anchor it was launched with.
-            Command::SetLaunchModes(modes) => self.audio.launch_modes = modes,
             Command::ClearAll => self.defer(Deferred::ClearAll, sink),
             Command::Rewind => self.defer(Deferred::Rewind, sink),
             Command::Resync => {
@@ -670,6 +661,18 @@ impl Engine {
 
         self.settle_refusals(sink);
         self.emit_changes(&before, sink);
+    }
+
+    /// Takes the latest whole-state settings.
+    ///
+    /// A take in progress keeps the input it started on, and a clip already sounding
+    /// keeps the anchor it was launched with.
+    pub fn apply_settings(&mut self, settings: Settings) {
+        self.gains = settings.gains;
+        self.muted = settings.muted;
+        self.soloed = settings.soloed;
+        self.audio.inputs = settings.inputs;
+        self.audio.launch_modes = settings.launch_modes;
     }
 
     /// Empties any pad that was armed but could not be given storage.

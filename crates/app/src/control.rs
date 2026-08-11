@@ -8,8 +8,8 @@
 use core::time::Duration;
 
 use free_loop_core::{
-    Command, Event, LaunchMode, MAX_BPM, MIN_BPM, SLOT_COUNT, SessionModel, SlotAddr, TRACK_COUNT,
-    Tempo, TrackInput, UNITY_STEP, column_mask, pad_bit, row_mask,
+    Command, Event, LaunchMode, MAX_BPM, MIN_BPM, SLOT_COUNT, SessionModel, Settings, SlotAddr,
+    TRACK_COUNT, Tempo, TrackInput, UNITY_STEP, column_mask, pad_bit, row_mask,
 };
 use free_loop_surface::{
     Axis, Chrome, Control, INPUT_SIDE, Led, LedColor, LedFrame, MUTE_SIDE, NEW_SIDE, PAUSE_SIDE,
@@ -137,6 +137,8 @@ pub struct Controller {
     /// Pads currently warning that they are about to empty.
     warning: u64,
     commands: Vec<Command>,
+    /// Whether the settings have moved since the engine was last told.
+    settings_changed: bool,
     requests: Vec<Request>,
     /// A tempo button being held down.
     tempo_hold: Option<TempoHold>,
@@ -184,6 +186,7 @@ impl Controller {
             held: [[None; SLOT_COUNT]; TRACK_COUNT],
             warning: 0,
             commands: Vec::new(),
+            settings_changed: true,
             requests: Vec::new(),
             tempo_hold: None,
             text: None,
@@ -251,7 +254,7 @@ impl Controller {
     fn set_level(&mut self, addr: SlotAddr) {
         let step = u8::try_from(addr.slot.index()).unwrap_or(UNITY_STEP);
         self.chrome.gains[addr.track.index()] = step;
-        self.commands.push(Command::SetGains(self.chrome.gains));
+        self.settings_changed = true;
         self.dirty = true;
     }
 
@@ -262,7 +265,7 @@ impl Controller {
             return;
         }
         self.chrome.inputs[addr.track.index()] = TrackInput::from_column(column);
-        self.commands.push(Command::SetInputs(self.chrome.inputs));
+        self.settings_changed = true;
         self.dirty = true;
     }
 
@@ -273,8 +276,7 @@ impl Controller {
         }
         let track = addr.track.index();
         self.chrome.launch_modes[track] = self.chrome.launch_modes[track].toggled();
-        self.commands
-            .push(Command::SetLaunchModes(self.chrome.launch_modes));
+        self.settings_changed = true;
         self.dirty = true;
     }
 
@@ -286,7 +288,7 @@ impl Controller {
     /// Takes the modes a loaded session came with.
     pub fn set_launch_modes(&mut self, modes: [LaunchMode; TRACK_COUNT]) {
         self.chrome.launch_modes = modes;
-        self.commands.push(Command::SetLaunchModes(modes));
+        self.settings_changed = true;
         self.dirty = true;
     }
 
@@ -314,14 +316,14 @@ impl Controller {
     /// Takes the inputs a loaded session came with.
     pub fn set_inputs(&mut self, inputs: [TrackInput; TRACK_COUNT]) {
         self.chrome.inputs = inputs;
-        self.commands.push(Command::SetInputs(inputs));
+        self.settings_changed = true;
         self.dirty = true;
     }
 
     /// Takes the levels a loaded session came with.
     pub fn set_gains(&mut self, gains: [u8; TRACK_COUNT]) {
         self.chrome.gains = gains;
-        self.commands.push(Command::SetGains(gains));
+        self.settings_changed = true;
         self.dirty = true;
     }
 
@@ -345,10 +347,7 @@ impl Controller {
             *marks &= !group;
         }
 
-        self.commands.push(Command::SetMutes {
-            muted: self.chrome.muted,
-            soloed: self.chrome.soloed,
-        });
+        self.settings_changed = true;
         self.dirty = true;
     }
 
@@ -362,17 +361,10 @@ impl Controller {
         self.mode = Mode::Perform;
 
         self.chrome.gains = [UNITY_STEP; TRACK_COUNT];
-        self.commands.push(Command::SetGains(self.chrome.gains));
         self.chrome.inputs = [self.default_input; TRACK_COUNT];
-        self.commands.push(Command::SetInputs(self.chrome.inputs));
         self.chrome.launch_modes = [self.default_launch_mode; TRACK_COUNT];
-        self.commands
-            .push(Command::SetLaunchModes(self.chrome.launch_modes));
+        self.settings_changed = true;
         self.commands.push(Command::ClearAll);
-        self.commands.push(Command::SetMutes {
-            muted: 0,
-            soloed: 0,
-        });
         self.commands.push(Command::SetPaused(false));
 
         // After the clear, so the engine is no longer holding clips to protect and takes
@@ -706,6 +698,22 @@ impl Controller {
         self.commands.drain(..)
     }
 
+    /// What every track should be set to.
+    pub fn settings(&self) -> Settings {
+        Settings {
+            gains: self.chrome.gains,
+            muted: self.chrome.muted,
+            soloed: self.chrome.soloed,
+            inputs: self.chrome.inputs,
+            launch_modes: self.chrome.launch_modes,
+        }
+    }
+
+    /// The settings to publish, if they have moved since they were last taken.
+    pub fn take_settings(&mut self) -> Option<Settings> {
+        core::mem::take(&mut self.settings_changed).then(|| self.settings())
+    }
+
     /// Marks whatever is waiting on the next press.
     ///
     /// Applied to every screen, so a held button looks the same on any of them.
@@ -795,6 +803,11 @@ mod tests {
         controller.drain_commands().collect()
     }
 
+    /// The settings the controller has ready for the engine, which must have moved.
+    fn settings(controller: &mut Controller) -> Settings {
+        controller.take_settings().unwrap()
+    }
+
     fn millis(value: u64) -> Duration {
         Duration::from_millis(value)
     }
@@ -836,13 +849,36 @@ mod tests {
         controller.on_surface(side(MUTE_SIDE), T0);
         press(&mut controller, addr(2, 0), T0);
 
-        assert_eq!(
-            commands(&mut controller),
-            vec![Command::SetMutes {
-                muted: row_mask(TrackId::new(2).unwrap()),
-                soloed: 0,
-            }]
+        let settings = settings(&mut controller);
+        assert_eq!(settings.muted, row_mask(TrackId::new(2).unwrap()));
+        assert_eq!(settings.soloed, 0);
+    }
+
+    #[test]
+    fn settings_are_offered_once_until_they_move_again() {
+        let mut controller = controller();
+        assert!(
+            controller.take_settings().is_some(),
+            "the engine is told what it starts on"
         );
+        assert_eq!(controller.take_settings(), None);
+
+        controller.on_surface(side(MUTE_SIDE), T0);
+        press(&mut controller, addr(0, 0), T0);
+        assert!(controller.take_settings().is_some());
+        assert_eq!(controller.take_settings(), None);
+    }
+
+    #[test]
+    fn only_the_latest_settings_are_offered() {
+        let mut controller = controller();
+        controller.on_surface(side(VOLUME_SIDE), T0);
+        press(&mut controller, addr(1, 2), T0);
+        press(&mut controller, addr(1, 6), T0);
+
+        // Two moves, one value: the level in between never has to reach the engine.
+        assert_eq!(settings(&mut controller).gains[1], 6);
+        assert_eq!(controller.take_settings(), None);
     }
 
     #[test]
@@ -852,13 +888,9 @@ mod tests {
         controller.on_surface(side(MUTE_SIDE), T0);
         press(&mut controller, addr(2, 5), T0);
 
-        assert_eq!(
-            commands(&mut controller),
-            vec![Command::SetMutes {
-                muted: column_mask(SlotId::new(5).unwrap()),
-                soloed: 0,
-            }]
-        );
+        let settings = settings(&mut controller);
+        assert_eq!(settings.muted, column_mask(SlotId::new(5).unwrap()));
+        assert_eq!(settings.soloed, 0);
     }
 
     #[test]
@@ -866,15 +898,12 @@ mod tests {
         let mut controller = controller();
         controller.on_surface(side(MUTE_SIDE), T0);
         press(&mut controller, addr(2, 0), T0);
-        commands(&mut controller);
+        settings(&mut controller);
 
         press(&mut controller, addr(2, 4), T0);
         assert_eq!(
-            commands(&mut controller),
-            vec![Command::SetMutes {
-                muted: 0,
-                soloed: 0,
-            }],
+            settings(&mut controller).muted,
+            0,
             "any pad in the group frees the group"
         );
     }
@@ -884,18 +913,14 @@ mod tests {
         let mut controller = controller();
         controller.on_surface(side(MUTE_SIDE), T0);
         press(&mut controller, addr(0, 0), T0);
-        commands(&mut controller);
+        settings(&mut controller);
 
         controller.on_surface(side(SOLO_SIDE), T0);
         press(&mut controller, addr(1, 0), T0);
 
-        assert_eq!(
-            commands(&mut controller),
-            vec![Command::SetMutes {
-                muted: row_mask(TrackId::new(0).unwrap()),
-                soloed: row_mask(TrackId::new(1).unwrap()),
-            }]
-        );
+        let settings = settings(&mut controller);
+        assert_eq!(settings.muted, row_mask(TrackId::new(0).unwrap()));
+        assert_eq!(settings.soloed, row_mask(TrackId::new(1).unwrap()));
     }
 
     #[test]
@@ -981,7 +1006,7 @@ mod tests {
         let mut expected = [UNITY_STEP; TRACK_COUNT];
         expected[2] = 6;
         assert_eq!(controller.gains(), expected);
-        assert_eq!(commands(&mut controller), vec![Command::SetGains(expected)]);
+        assert_eq!(settings(&mut controller).gains, expected);
     }
 
     #[test]
@@ -1031,7 +1056,7 @@ mod tests {
 
         controller.set_gains(gains);
         assert_eq!(controller.gains(), gains);
-        assert_eq!(commands(&mut controller), vec![Command::SetGains(gains)]);
+        assert_eq!(settings(&mut controller).gains, gains);
     }
 
     #[test]
@@ -1056,10 +1081,7 @@ mod tests {
 
         let sent = commands(&mut controller);
         assert!(sent.contains(&Command::ClearAll));
-        assert!(sent.contains(&Command::SetMutes {
-            muted: 0,
-            soloed: 0,
-        }));
+        assert_eq!(settings(&mut controller), Settings::new());
 
         let frame = controller.take_frame().unwrap();
         assert!(
@@ -1592,7 +1614,7 @@ mod tests {
         let mut wanted = [LaunchMode::Follow; TRACK_COUNT];
         wanted[2] = LaunchMode::Restart;
         assert_eq!(controller.launch_modes(), wanted);
-        assert!(commands(&mut controller).contains(&Command::SetLaunchModes(wanted)));
+        assert_eq!(settings(&mut controller).launch_modes, wanted);
 
         controller.on_surface(press, T0);
         assert_eq!(
@@ -1649,7 +1671,7 @@ mod tests {
         let mut wanted = [TrackInput::Stereo; TRACK_COUNT];
         wanted[3] = TrackInput::Mono(1);
         assert_eq!(controller.inputs(), wanted, "column two is input one");
-        assert!(commands(&mut controller).contains(&Command::SetInputs(wanted)));
+        assert_eq!(settings(&mut controller).inputs, wanted);
     }
 
     #[test]
