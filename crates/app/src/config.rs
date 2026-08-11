@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use free_loop_audio::{AudioConfig, InputSource};
-use free_loop_core::{SampleRate, Tempo, TimeError, TimeSignature};
+use free_loop_core::{SampleRate, Tempo, TimeError, TimeSignature, TrackInput};
 use free_loop_engine::{ClickConfig, EngineConfig, EngineError};
 use serde::Deserialize;
 
@@ -212,6 +212,14 @@ impl Config {
             },
             cushion_blocks: self.audio.cushion_blocks,
             capture_offset: self.audio.capture_offset_frames,
+        }
+    }
+
+    /// The input every track starts on.
+    pub fn track_input(&self) -> TrackInput {
+        match self.audio.input_channel {
+            Some(channel) => TrackInput::Mono(u8::try_from(channel).unwrap_or(0)),
+            None => TrackInput::Stereo,
         }
     }
 
