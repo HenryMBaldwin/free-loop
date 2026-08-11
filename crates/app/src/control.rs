@@ -876,8 +876,11 @@ mod tests {
         press(&mut controller, addr(1, 2), T0);
         press(&mut controller, addr(1, 6), T0);
 
-        // Two moves, one value: the level in between never has to reach the engine.
-        assert_eq!(settings(&mut controller).gains[1], 6);
+        assert_eq!(
+            settings(&mut controller).gains[1],
+            6,
+            "not the level in between"
+        );
         assert_eq!(controller.take_settings(), None);
     }
 
