@@ -254,12 +254,7 @@ pub fn tempo_gauge(tempo: f64, chrome: Chrome) -> LedFrame {
         frame.set_pad(addr, led);
     }
 
-    for button in Control::all() {
-        frame.set_control(button.index(), control(button, chrome));
-    }
-    beat_indicator(&mut frame, chrome);
-    side_buttons(&mut frame, chrome);
-
+    finish(&mut frame, chrome);
     frame
 }
 
@@ -283,12 +278,7 @@ pub fn volumes(chrome: Chrome) -> LedFrame {
         frame.set_pad(addr, led);
     }
 
-    for button in Control::all() {
-        frame.set_control(button.index(), control(button, chrome));
-    }
-    beat_indicator(&mut frame, chrome);
-    side_buttons(&mut frame, chrome);
-
+    finish(&mut frame, chrome);
     frame
 }
 
@@ -312,12 +302,7 @@ pub fn inputs(chrome: Chrome) -> LedFrame {
         frame.set_pad(addr, led);
     }
 
-    for button in Control::all() {
-        frame.set_control(button.index(), control(button, chrome));
-    }
-    beat_indicator(&mut frame, chrome);
-    side_buttons(&mut frame, chrome);
-
+    finish(&mut frame, chrome);
     frame
 }
 
@@ -339,12 +324,7 @@ pub fn settings(chrome: Chrome) -> LedFrame {
         frame.set_pad(addr, led);
     }
 
-    for button in Control::all() {
-        frame.set_control(button.index(), control(button, chrome));
-    }
-    beat_indicator(&mut frame, chrome);
-    side_buttons(&mut frame, chrome);
-
+    finish(&mut frame, chrome);
     frame
 }
 
@@ -396,16 +376,20 @@ pub fn frame(session: &SessionModel, chrome: Chrome) -> LedFrame {
             .map_or_else(|| pad(state), |color| marked_pad(state, color));
         frame.set_pad(addr, led);
     }
-    for button in Control::all() {
-        frame.set_control(button.index(), control(button, chrome));
-    }
-    beat_indicator(&mut frame, chrome);
-    side_buttons(&mut frame, chrome);
-
+    finish(&mut frame, chrome);
     frame
 }
 
 /// Paints the right-hand column.
+/// Paints the chrome every screen shares: the top row, the beat and the side buttons.
+fn finish(frame: &mut LedFrame, chrome: Chrome) {
+    for button in Control::all() {
+        frame.set_control(button.index(), control(button, chrome));
+    }
+    beat_indicator(frame, chrome);
+    side_buttons(frame, chrome);
+}
+
 fn side_buttons(frame: &mut LedFrame, chrome: Chrome) {
     let levelled = chrome.gains.iter().any(|step| *step != UNITY_STEP);
     frame.set_side(

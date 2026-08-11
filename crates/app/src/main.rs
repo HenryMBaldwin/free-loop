@@ -232,7 +232,7 @@ fn run(s: Session<'_>) {
         }
 
         // Storage the engine has finished with comes back here to be dropped.
-        drop(housekeeping.recycler.take_borrowed().collect::<Vec<_>>());
+        housekeeping.recycler.take_borrowed().for_each(drop);
 
         for command in controller.drain_commands() {
             if io.send(command).is_err() {
