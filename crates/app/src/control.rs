@@ -1470,7 +1470,7 @@ mod tests {
     fn the_input_button_opens_a_row_per_track() {
         let mut controller = controller();
         controller.set_input_count(2);
-        controller.on_surface(SurfaceEvent::SidePressed { index: 1 }, T0);
+        controller.on_surface(SurfaceEvent::SidePressed { index: 2 }, T0);
 
         let frame = controller.take_frame().unwrap();
         let row = SlotAddr::new(TrackId::new(0).unwrap(), SlotId::new(0).unwrap());
@@ -1481,7 +1481,7 @@ mod tests {
     fn picking_a_column_sets_that_tracks_input() {
         let mut controller = controller();
         controller.set_input_count(2);
-        controller.on_surface(SurfaceEvent::SidePressed { index: 1 }, T0);
+        controller.on_surface(SurfaceEvent::SidePressed { index: 2 }, T0);
         let _ = commands(&mut controller);
 
         let pad = SlotAddr::new(TrackId::new(3).unwrap(), SlotId::new(2).unwrap());
@@ -1503,7 +1503,7 @@ mod tests {
     fn a_column_the_device_cannot_offer_is_ignored() {
         let mut controller = controller();
         controller.set_input_count(2);
-        controller.on_surface(SurfaceEvent::SidePressed { index: 1 }, T0);
+        controller.on_surface(SurfaceEvent::SidePressed { index: 2 }, T0);
         let _ = commands(&mut controller);
 
         let pad = SlotAddr::new(TrackId::new(0).unwrap(), SlotId::new(5).unwrap());
