@@ -1356,6 +1356,112 @@ mod starvation {
     }
 }
 
+mod launch_mode {
+    use super::*;
+    use free_loop_core::LaunchMode;
+
+    fn restart(harness: &mut Harness, track: usize) {
+        let mut modes = [LaunchMode::Follow; free_loop_core::TRACK_COUNT];
+        modes[track] = LaunchMode::Restart;
+        harness.command(Command::SetLaunchModes(modes));
+    }
+
+    /// Records two bars on `pad`, stops it, then relaunches on the next bar line.
+    fn record_stop_relaunch(harness: &mut Harness, pad: SlotAddr) -> u64 {
+        let (start, end) = record(harness, pad, 0, 2);
+        harness.command(Command::Press(pad));
+        harness.run_to(2 * (end - start));
+
+        // Half a bar on, so the relaunch lands on an odd bar line rather than a multiple
+        // of the clip's own two, where the two modes would agree.
+        harness.run_to(harness.position() + BAR / 2);
+        harness.command(Command::Press(pad));
+        let launch = (harness.position() / BAR + 1) * BAR;
+        // Stops just short, so the next block is the one the launch lands on.
+        harness.run_to(launch);
+        start
+    }
+
+    #[test]
+    fn following_drops_into_the_clip_where_the_transport_is() {
+        let mut harness = Harness::new(128);
+        let pad = addr(0, 0);
+        let start = record_stop_relaunch(&mut harness, pad);
+
+        let from = harness.position();
+        let out = harness.run_frames(64);
+        let phase = (from - start) % (2 * BAR);
+        assert_eq!(out[0], signal(start + phase, 0), "wherever the grid is");
+        assert_ne!(phase, 0, "and that is not the clip's start");
+    }
+
+    #[test]
+    fn restarting_plays_the_clip_from_its_start() {
+        let mut harness = Harness::new(128);
+        let pad = addr(0, 0);
+        restart(&mut harness, 0);
+        let start = record_stop_relaunch(&mut harness, pad);
+
+        let out = harness.run_frames(64);
+        assert_eq!(out[0], signal(start, 0), "the first frame of the take");
+    }
+
+    #[test]
+    fn a_restart_lands_on_the_beat_the_take_began_on() {
+        const LATENCY: u64 = 2_048;
+
+        let mut harness = Harness::with_offset(128, Frames(LATENCY));
+        let pad = addr(0, 0);
+        restart(&mut harness, 0);
+        let start = record_stop_relaunch(&mut harness, pad);
+
+        // Compensation put the audio played on the take's first beat `LATENCY` frames into
+        // the buffer, so that is what a restart has to reach for.
+        let out = harness.run_frames(64);
+        assert_eq!(
+            out[0],
+            signal(start + LATENCY, 0),
+            "what was played on the downbeat, not the round trip before it"
+        );
+    }
+
+    #[test]
+    fn a_mode_change_leaves_a_sounding_clip_alone() {
+        let mut harness = Harness::new(128);
+        let pad = addr(0, 0);
+        let (start, end) = record(&mut harness, pad, 0, 2);
+        let len = end - start;
+
+        restart(&mut harness, 0);
+        let from = harness.position();
+        let out = harness.run_frames(64);
+        let phase = (from - start) % len;
+        assert_eq!(out[0], signal(start + phase, 0), "no jump mid performance");
+    }
+
+    #[test]
+    fn a_rewind_does_not_send_a_sounding_clip_back_to_its_start() {
+        let mut harness = Harness::new(128);
+        let pad = addr(0, 0);
+        restart(&mut harness, 0);
+        let (start, end) = record(&mut harness, pad, 0, 2);
+        let len = end - start;
+
+        harness.run_to(harness.position() + BAR + BAR / 2);
+        harness.command(Command::Rewind);
+        harness.run_frames(128);
+
+        let from = harness.position();
+        let out = harness.run_frames(64);
+        assert!(
+            out.iter().any(|s| *s != 0.0),
+            "still sounding after the rewind"
+        );
+        let phase = (from + (harness.position() - from)) % len;
+        assert_ne!(phase, 0, "and carrying on rather than jumping to its start");
+    }
+}
+
 mod inputs {
     use super::*;
     use free_loop_core::TrackInput;

@@ -381,6 +381,14 @@ impl Clip {
     ///
     /// `dst` is interleaved and its length must be a multiple of the channel count.
     pub fn mix_into(&self, position: Frames, dst: &mut [f32], ramp: Ramp) {
+        self.mix_from(self.recorded_at, position, dst, ramp);
+    }
+
+    /// Adds the loop into `dst` as though it were recorded at `anchor`.
+    ///
+    /// For a clip whose playback position is decided when it is launched rather than when
+    /// it was recorded. Otherwise as [`Clip::mix_into`].
+    pub fn mix_from(&self, anchor: Frames, position: Frames, dst: &mut [f32], ramp: Ramp) {
         let len = self.len.0;
         if len == 0 || ramp.is_silent() {
             return;
@@ -389,7 +397,7 @@ impl Clip {
         let total = dst.len() / self.channels;
         // Modular rather than saturating: a clip loaded from a session can sit ahead of
         // the transport, and clamping to zero replays one fragment until it catches up.
-        let mut phase = (position.0 % len + len - self.recorded_at.0 % len) % len;
+        let mut phase = (position.0 % len + len - anchor.0 % len) % len;
         let mut done = 0;
 
         while done < total {

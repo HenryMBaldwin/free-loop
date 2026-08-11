@@ -21,8 +21,8 @@ pub use command::Command;
 pub use event::Event;
 pub use gain::{GAIN_STEPS, UNITY_STEP, gain_for_step};
 pub use ids::{
-    ClipId, IndexOutOfRange, PadMask, SLOT_COUNT, SlotAddr, SlotId, TRACK_COUNT, TrackId,
-    TrackInput, column_mask, pad_bit, row_mask,
+    ClipId, IndexOutOfRange, LaunchMode, PadMask, SLOT_COUNT, SlotAddr, SlotId, TRACK_COUNT,
+    TrackId, TrackInput, column_mask, pad_bit, row_mask,
 };
 pub use session::SessionModel;
 pub use slot::{Ctx, Effect, Effects, SlotInput, SlotState, step};

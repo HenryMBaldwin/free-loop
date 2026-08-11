@@ -73,6 +73,13 @@ impl SlotState {
         )
     }
 
+    /// Whether this slot is putting audio out.
+    ///
+    /// A queued stop is still sounding until its boundary arrives.
+    pub fn is_sounding(self) -> bool {
+        matches!(self, Self::Playing { .. } | Self::QueuedStop { .. })
+    }
+
     /// Whether this slot is waiting on a bar boundary.
     pub fn is_pending(self) -> bool {
         match self {
