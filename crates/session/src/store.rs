@@ -459,7 +459,6 @@ fn write_wav(
     })
 }
 
-/// Reads one clip back into storage the caller owns.
 /// The longest clip a session may claim, at half an hour.
 ///
 /// A length in the file decides how much is allocated before a byte is read, so it needs a
@@ -468,6 +467,7 @@ fn max_frames(sample_rate: u32) -> u64 {
     u64::from(sample_rate) * 60 * 30
 }
 
+/// Reads one clip back into storage the caller owns.
 fn read_wav(
     path: &Path,
     entry: &ClipEntry,

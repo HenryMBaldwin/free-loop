@@ -380,7 +380,6 @@ pub fn frame(session: &SessionModel, chrome: Chrome) -> LedFrame {
     frame
 }
 
-/// Paints the right-hand column.
 /// Paints the chrome every screen shares: the top row, the beat and the side buttons.
 fn finish(frame: &mut LedFrame, chrome: Chrome) {
     for button in Control::all() {
@@ -390,6 +389,7 @@ fn finish(frame: &mut LedFrame, chrome: Chrome) {
     side_buttons(frame, chrome);
 }
 
+/// Paints the right-hand column.
 fn side_buttons(frame: &mut LedFrame, chrome: Chrome) {
     let levelled = chrome.gains.iter().any(|step| *step != UNITY_STEP);
     frame.set_side(

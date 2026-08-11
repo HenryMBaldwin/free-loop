@@ -1358,6 +1358,103 @@ mod staged_load {
     }
 }
 
+mod load_protocol {
+    use super::*;
+
+    fn begin(harness: &mut Harness) {
+        harness
+            .housekeeping
+            .loader
+            .send(LoadMessage::Begin {
+                tempo: Tempo::new(90.0).unwrap(),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn an_end_with_nothing_open_leaves_the_session_alone() {
+        let mut harness = Harness::new(128);
+        let pad = addr(0, 0);
+        record(&mut harness, pad, 0, 1);
+        let playing = harness.engine.state(pad);
+
+        harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+        harness.run_frames(128);
+
+        assert_eq!(harness.engine.state(pad), playing, "nothing was loaded");
+        assert!(!harness.engine.is_paused());
+    }
+
+    #[test]
+    fn a_second_load_does_not_inherit_the_first_ones_completion() {
+        let mut harness = Harness::new(128);
+        record(&mut harness, addr(0, 0), 0, 1);
+
+        // A finished load, then the start of another in the same drain.
+        begin(&mut harness);
+        harness
+            .housekeeping
+            .loader
+            .send(LoadMessage::Clip {
+                addr: addr(2, 3),
+                clip: lent_clip(BAR, 0),
+                playing: true,
+                launch_anchor: None,
+            })
+            .unwrap();
+        harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+        begin(&mut harness);
+        harness
+            .housekeeping
+            .loader
+            .send(LoadMessage::Clip {
+                addr: addr(4, 5),
+                clip: lent_clip(BAR, 0),
+                playing: true,
+                launch_anchor: None,
+            })
+            .unwrap();
+        harness.run_frames(128);
+
+        assert!(
+            harness.engine.state(addr(2, 3)).is_sounding(),
+            "the finished load went in"
+        );
+        assert_eq!(
+            harness.engine.state(addr(4, 5)),
+            SlotState::Empty,
+            "the unfinished one did not"
+        );
+    }
+
+    #[test]
+    fn a_load_cancels_a_move_queued_against_what_it_replaced() {
+        let mut harness = Harness::with_declick(128, Frames(256));
+        record(&mut harness, addr(0, 0), 0, 1);
+
+        // Queued behind a fade, so it is still waiting when the load lands.
+        harness.command(Command::ClearAll);
+        begin(&mut harness);
+        harness
+            .housekeeping
+            .loader
+            .send(LoadMessage::Clip {
+                addr: addr(2, 3),
+                clip: lent_clip(BAR, 0),
+                playing: true,
+                launch_anchor: None,
+            })
+            .unwrap();
+        harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+        harness.run_blocks(4);
+
+        assert!(
+            harness.engine.state(addr(2, 3)).is_sounding(),
+            "the load survived the clear it did not belong to"
+        );
+    }
+}
+
 mod snapshots {
     use super::*;
 
@@ -1401,6 +1498,51 @@ mod snapshots {
 
 mod resources {
     use super::*;
+
+    #[test]
+    fn every_pad_refused_on_one_boundary_is_put_back() {
+        let mut harness = Harness::new(512);
+        // Fill the pool: one shell per pad, and a sealed take keeps the one it was given.
+        for slot in 0..u8::try_from(free_loop_core::SLOT_COUNT).unwrap() {
+            for track in 0..u8::try_from(free_loop_core::TRACK_COUNT).unwrap() {
+                harness.command(Command::Press(addr(track, slot)));
+            }
+            let until = (harness.position() / BAR + 2) * BAR;
+            harness.run_to(until);
+            for track in 0..u8::try_from(free_loop_core::TRACK_COUNT).unwrap() {
+                harness.command(Command::Press(addr(track, slot)));
+            }
+            harness.run_to(until + 1);
+        }
+
+        // Clearing hands shells to the recycler rather than back, so several arms on one
+        // boundary all have nowhere to write.
+        harness.command(Command::Snapshot { request: 1 });
+        let spares = [addr(0, 0), addr(1, 0), addr(2, 0)];
+        for spare in spares {
+            harness.command(Command::Clear(spare));
+        }
+        harness.drain_events();
+
+        for spare in spares {
+            harness.command(Command::Press(spare));
+        }
+        let until = (harness.position() / BAR + 2) * BAR;
+        harness.run_to(until);
+
+        let refused: Vec<SlotAddr> = harness
+            .drain_events()
+            .iter()
+            .filter_map(|event| match event {
+                Event::RecordingRefused { addr } => Some(*addr),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(refused.len(), spares.len(), "each one said so");
+        for spare in spares {
+            assert_eq!(harness.engine.state(spare), SlotState::Empty, "{spare:?}");
+        }
+    }
 
     #[test]
     fn a_pad_with_no_storage_left_is_put_back_rather_than_left_playing() {
