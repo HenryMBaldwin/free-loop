@@ -237,7 +237,7 @@ impl Controller {
 
     /// Says on the grid that the audio device has gone away.
     pub fn device_lost(&mut self, now: Duration) {
-        self.show(LedColor::Red, now, Some("NO AUDIO".to_owned()));
+        self.scroll("NO AUDIO".to_owned(), now);
     }
 
     /// Freezes the transport without a press, for something the performer did not ask for.
@@ -454,6 +454,13 @@ impl Controller {
         self.show(LedColor::Red, now, code);
     }
 
+    /// Puts text on the grid for [`TEXT_DURATION`].
+    fn scroll(&mut self, text: String, now: Duration) {
+        self.text = Some(TextUpdate::Show(text));
+        self.text_until = Some(now + TEXT_DURATION);
+        self.dirty = true;
+    }
+
     /// Holds the grid at one colour for [`RESULT_FLASH`], then scrolls `then`.
     ///
     /// Text already on the grid is stopped first.
@@ -587,8 +594,7 @@ impl Controller {
 
         if let Some(flash) = self.flash.take_if(|flash| now >= flash.until) {
             if let Some(text) = flash.then {
-                self.text = Some(TextUpdate::Show(text));
-                self.text_until = Some(now + TEXT_DURATION);
+                self.scroll(text, now);
             }
             self.dirty = true;
         }
@@ -674,8 +680,7 @@ impl Controller {
         #[expect(clippy::cast_possible_truncation, reason = "tempo is under 300")]
         let shown = bpm as i32;
 
-        self.text = Some(TextUpdate::Show(shown.to_string()));
-        self.text_until = Some(now + TEXT_DURATION);
+        self.scroll(shown.to_string(), now);
     }
 
     /// Moves the tempo again while a button stays down.
@@ -1504,18 +1509,14 @@ mod tests {
     }
 
     #[test]
-    fn a_lost_device_says_so_after_the_red() {
+    fn a_lost_device_says_so_without_a_flash_first() {
         let mut controller = controller();
         controller.device_lost(T0);
 
-        let frame = controller.take_frame().unwrap();
-        assert!(SlotAddr::all().all(|a| frame.pad(a) == Led::solid(LedColor::Red)));
-        assert_eq!(controller.take_text(), None, "nothing over the answer yet");
-
-        controller.tick(T0 + RESULT_FLASH);
         assert_eq!(
             controller.take_text(),
-            Some(TextUpdate::Show("NO AUDIO".to_owned()))
+            Some(TextUpdate::Show("NO AUDIO".to_owned())),
+            "the word is the whole answer"
         );
     }
 
