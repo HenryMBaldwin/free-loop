@@ -376,7 +376,9 @@ fn load_session(
     match load(store, addr, loader, negotiated, config) {
         Ok(restored) => {
             println!("loaded session {}{}", addr.track.index(), addr.slot.index());
-            controller.set_gains(restored.gains);
+            controller.set_gains(core::array::from_fn(|track| {
+                restored.tracks[track].gain_step
+            }));
             controller.set_loaded_tempo(restored.tempo);
             controller.set_inputs(core::array::from_fn(|track| {
                 free_loop_core::TrackInput::from_column(restored.tracks[track].input)
@@ -417,7 +419,7 @@ fn ask_for_snapshot(
         deadline: now + SAVE_TIMEOUT,
         request,
         addr,
-        settings: settings(controller),
+        settings: save_settings(controller),
     })
 }
 
@@ -505,7 +507,7 @@ fn resolve_save(
 struct Answered {
     addr: free_loop_core::SlotAddr,
     /// What was set when the snapshot was asked for.
-    settings: Settings,
+    settings: SaveSettings,
     /// Pads that arrived.
     clips: u32,
     /// Pads there were to send. More than `clips` means some were lost on the way.
@@ -545,29 +547,28 @@ struct PendingSave {
     addr: free_loop_core::SlotAddr,
     /// Taken when the snapshot was asked for, so the audio and the settings describe the
     /// same moment.
-    settings: Settings,
+    settings: SaveSettings,
 }
 
 /// What a save records besides the audio.
 #[derive(Debug)]
-struct Settings {
+struct SaveSettings {
     /// What the performer has the transport set to, not what the config file says.
     tempo: f64,
-    gains: [u8; free_loop_core::TRACK_COUNT],
     tracks: [TrackSettings; free_loop_core::TRACK_COUNT],
 }
 
 /// What the controller currently has set.
-fn settings(controller: &Controller) -> Settings {
+fn save_settings(controller: &Controller) -> SaveSettings {
     let inputs = controller.inputs();
     let modes = controller.launch_modes();
-    Settings {
+    let gains = controller.gains();
+    SaveSettings {
         tempo: controller.tempo(),
-        gains: controller.gains(),
         tracks: core::array::from_fn(|track| TrackSettings {
             input: inputs[track].column(),
             restart: modes[track].restarts(),
-            gain_step: controller.gains()[track],
+            gain_step: gains[track],
         }),
     }
 }
@@ -579,13 +580,13 @@ fn save(
     config: &Config,
     negotiated: &free_loop_audio::Negotiated,
     snapshots: &[Snapshot],
-    settings: &Settings,
+    settings: &SaveSettings,
 ) -> Result<(), free_loop_session::SessionError> {
     let clips = snapshots
         .iter()
         .map(|snapshot| SavedClip {
             addr: snapshot.addr,
-            gain_step: settings.gains[snapshot.addr.track.index()],
+            gain_step: settings.tracks[snapshot.addr.track.index()].gain_step,
             playing: matches!(
                 snapshot.state,
                 free_loop_core::SlotState::Playing { .. }
@@ -607,6 +608,7 @@ fn save(
             clips,
             tracks: settings.tracks,
         },
+        config.load_budget(),
     )
 }
 
@@ -666,7 +668,6 @@ fn load(
 
     let session = checked.materialise()?;
     let restored = Restored {
-        gains: session.gains(),
         tracks: session.tracks(),
         tempo: session.manifest.tempo,
     };
@@ -689,7 +690,6 @@ fn load(
 
 /// What a loaded session sets besides its audio.
 struct Restored {
-    gains: [u8; free_loop_core::TRACK_COUNT],
     tracks: [TrackSettings; free_loop_core::TRACK_COUNT],
     /// What the session was recorded at, which the engine has already taken.
     tempo: f64,
@@ -959,9 +959,8 @@ mod tests {
             deadline: DEADLINE,
             request,
             addr: pad(1, 2),
-            settings: Settings {
+            settings: SaveSettings {
                 tempo: 120.0,
-                gains: [free_loop_core::UNITY_STEP; free_loop_core::TRACK_COUNT],
                 tracks: [TrackSettings::default(); free_loop_core::TRACK_COUNT],
             },
         }

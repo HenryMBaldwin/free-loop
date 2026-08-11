@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn the_load_budget_follows_the_recording_pool() {
+    fn the_load_budget_is_set_apart_from_the_recording_pool() {
         let config = Config::parse("[engine]\nsegment_pool = 4\n").unwrap();
         assert_eq!(
             config.load_budget(),
