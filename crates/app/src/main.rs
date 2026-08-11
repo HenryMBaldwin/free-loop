@@ -111,6 +111,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let store = SessionStore::new(path.parent().unwrap_or(Path::new(".")).join("sessions"));
+    // A save interrupted between its two renames leaves a session under another name.
+    store.recover();
     controller.set_sessions(store.index());
     controller.set_input_count(negotiated.channels);
     controller.set_default_input(config.track_input());
