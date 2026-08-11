@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 
-use crate::buffer::Clip;
+use free_loop_clip::Clip;
 
 /// Clips the engine can hand over before the recycler drains any. One buffer exists per
 /// pad, so 128 covers the whole population.
@@ -140,7 +140,7 @@ mod tests {
     #![allow(clippy::unwrap_used, reason = "tests should fail loudly")]
 
     use super::*;
-    use crate::buffer::AudioBuffer;
+    use free_loop_clip::AudioBuffer;
     use free_loop_core::Frames;
 
     const CH: usize = 2;

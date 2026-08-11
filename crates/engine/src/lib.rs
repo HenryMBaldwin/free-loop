@@ -4,21 +4,18 @@
 //! device or a MIDI port: [`Engine::process`] takes an input slice and fills an output
 //! slice, so it can be driven by a device callback or by a test at any block size.
 //!
-//! - [`buffer`]: pooled audio storage for recorded clips.
 //! - [`click`]: the metronome.
 //! - [`load`]: putting a saved session back in.
 //! - [`recycle`]: returning retired clips to the pools without dropping them on the
 //!   audio thread.
 //! - [`snapshot`]: handing clips out to be read off the audio thread.
 
-pub mod buffer;
 pub mod click;
 mod engine;
 pub mod load;
 pub mod recycle;
 pub mod snapshot;
 
-pub use buffer::{AudioBuffer, Clip, Ramp, SEGMENT_FRAMES, Segment, SegmentPool};
 pub use click::{Click, ClickConfig};
 pub use engine::{DEFAULT_DECLICK, Engine, EngineConfig, EngineError, EventSink, Housekeeping};
 pub use load::{LoadMessage, Loader};

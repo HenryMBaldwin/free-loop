@@ -6,8 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
+use free_loop_clip::{AudioBuffer, Clip, Ramp, SEGMENT_FRAMES, SegmentPool};
 use free_loop_core::{Frames, SLOT_COUNT, SlotAddr, TRACK_COUNT, UNITY_STEP};
-use free_loop_engine::buffer::{AudioBuffer, Clip, Ramp, SEGMENT_FRAMES, SegmentPool};
 
 use crate::manifest::{ClipEntry, MANIFEST, Manifest, TrackEntry};
 
@@ -746,8 +746,8 @@ mod tests {
     )]
 
     use super::*;
+    use free_loop_clip::{AudioBuffer, SegmentPool};
     use free_loop_core::{SlotId, TrackId};
-    use free_loop_engine::buffer::{AudioBuffer, SegmentPool};
 
     const CH: u16 = 2;
 

@@ -263,6 +263,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "free-loop-clip"
+version = "0.1.0"
+dependencies = [
+ "free-loop-core",
+]
+
+[[package]]
 name = "free-loop-core"
 version = "0.1.0"
 dependencies = [
@@ -273,6 +280,7 @@ dependencies = [
 name = "free-loop-engine"
 version = "0.1.0"
 dependencies = [
+ "free-loop-clip",
  "free-loop-core",
  "rtrb",
  "thiserror 2.0.20",
@@ -282,8 +290,8 @@ dependencies = [
 name = "free-loop-session"
 version = "0.1.0"
 dependencies = [
+ "free-loop-clip",
  "free-loop-core",
- "free-loop-engine",
  "hound",
  "serde",
  "thiserror 2.0.20",

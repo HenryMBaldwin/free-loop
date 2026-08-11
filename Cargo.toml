@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/core",
+  "crates/clip",
   "crates/engine",
   "crates/audio",
   "crates/surface",
@@ -22,6 +23,7 @@ core-foundation = "0.10"
 cpal = "0.18"
 ctrlc = "3"
 free-loop-audio = { path = "crates/audio", version = "0.1.0" }
+free-loop-clip = { path = "crates/clip", version = "0.1.0" }
 free-loop-core = { path = "crates/core", version = "0.1.0" }
 free-loop-engine = { path = "crates/engine", version = "0.1.0" }
 free-loop-session = { path = "crates/session", version = "0.1.0" }
