@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use free_loop_core::{Frames, SLOT_COUNT, SlotAddr, TRACK_COUNT, UNITY_STEP};
 use free_loop_engine::buffer::{AudioBuffer, Clip, Ramp, SEGMENT_FRAMES, SegmentPool};
 
-use crate::manifest::{ClipEntry, MANIFEST, Manifest};
+use crate::manifest::{ClipEntry, MANIFEST, Manifest, TrackEntry};
 
 /// Something went wrong reading or writing a session.
 #[derive(Debug, thiserror::Error)]
@@ -84,6 +84,17 @@ pub struct SessionData<'a> {
     pub channels: u16,
     /// The pads that hold something.
     pub clips: Vec<SavedClip<'a>>,
+    /// What each track's input and launch mode are set to.
+    pub tracks: [TrackSettings; TRACK_COUNT],
+}
+
+/// One track's settings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TrackSettings {
+    /// The column the track's input sits on. Zero is the whole input.
+    pub input: usize,
+    /// Whether launching a clip plays it from its start.
+    pub restart: bool,
 }
 
 /// One pad's audio, read back.
@@ -109,6 +120,20 @@ pub struct LoadedSession {
 }
 
 impl LoadedSession {
+    /// What each track's settings should be, defaulted where the session says nothing.
+    pub fn tracks(&self) -> [TrackSettings; TRACK_COUNT] {
+        let mut tracks = [TrackSettings::default(); TRACK_COUNT];
+        for entry in &self.manifest.tracks {
+            if let Some(slot) = tracks.get_mut(usize::from(entry.track)) {
+                *slot = TrackSettings {
+                    input: entry.input,
+                    restart: entry.restart,
+                };
+            }
+        }
+        tracks
+    }
+
     /// The level each track should play at, taken from the clips it holds.
     pub fn gains(&self) -> [u8; TRACK_COUNT] {
         let mut gains = [UNITY_STEP; TRACK_COUNT];
@@ -206,6 +231,18 @@ impl SessionStore {
             sample_rate: data.sample_rate,
             channels: data.channels,
             clips: entries,
+            // Only what differs, so a session file stays readable.
+            tracks: data
+                .tracks
+                .iter()
+                .enumerate()
+                .filter(|(_, track)| **track != TrackSettings::default())
+                .map(|(index, track)| TrackEntry {
+                    track: index_as_u8(index),
+                    input: track.input,
+                    restart: track.restart,
+                })
+                .collect(),
         };
 
         let path = dir.join(MANIFEST);
@@ -473,6 +510,7 @@ mod tests {
 
     fn data<'a>(clips: Vec<SavedClip<'a>>) -> SessionData<'a> {
         SessionData {
+            tracks: [TrackSettings::default(); TRACK_COUNT],
             tempo: 120.0,
             beats_per_bar: 4,
             beat_unit: 4,
@@ -480,6 +518,52 @@ mod tests {
             channels: CH,
             clips,
         }
+    }
+
+    #[test]
+    fn a_session_that_says_nothing_about_a_track_defaults_it() {
+        let loaded = LoadedSession {
+            manifest: Manifest {
+                tempo: 120.0,
+                beats_per_bar: 4,
+                beat_unit: 4,
+                sample_rate: 48_000,
+                channels: 2,
+                clips: Vec::new(),
+                tracks: Vec::new(),
+            },
+            clips: Vec::new(),
+        };
+        assert_eq!(
+            loaded.tracks(),
+            [TrackSettings::default(); TRACK_COUNT],
+            "an older session puts every track back rather than leaving the last one's"
+        );
+    }
+
+    #[test]
+    fn a_saved_track_setting_comes_back() {
+        let loaded = LoadedSession {
+            manifest: Manifest {
+                tempo: 120.0,
+                beats_per_bar: 4,
+                beat_unit: 4,
+                sample_rate: 48_000,
+                channels: 2,
+                clips: Vec::new(),
+                tracks: vec![TrackEntry {
+                    track: 7,
+                    input: 2,
+                    restart: true,
+                }],
+            },
+            clips: Vec::new(),
+        };
+
+        let tracks = loaded.tracks();
+        assert_eq!(tracks[7].input, 2);
+        assert!(tracks[7].restart);
+        assert_eq!(tracks[0], TrackSettings::default(), "and only that track");
     }
 
     #[test]

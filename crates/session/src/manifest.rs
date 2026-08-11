@@ -52,6 +52,19 @@ impl ClipEntry {
     }
 }
 
+/// One track's settings, for the tracks that are not on their defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackEntry {
+    /// Row on the grid.
+    pub track: u8,
+    /// The column the track's input sits on. Zero is the whole input.
+    #[serde(default)]
+    pub input: usize,
+    /// Whether launching a clip plays it from its start.
+    #[serde(default)]
+    pub restart: bool,
+}
+
 /// Everything a session holds apart from the audio itself.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
@@ -68,6 +81,12 @@ pub struct Manifest {
     /// The pads that hold something.
     #[serde(default)]
     pub clips: Vec<ClipEntry>,
+    /// The tracks that are not on their default settings.
+    ///
+    /// A session saved before track settings existed has none, and loading it puts every
+    /// track back to its default rather than leaving the last session's behind.
+    #[serde(default)]
+    pub tracks: Vec<TrackEntry>,
 }
 
 impl Manifest {
@@ -94,6 +113,7 @@ mod tests {
             beat_unit: 4,
             sample_rate: 48_000,
             channels: 2,
+            tracks: Vec::new(),
             clips: vec![ClipEntry {
                 track: 1,
                 slot: 3,
@@ -126,6 +146,27 @@ mod tests {
         let mut entry = manifest().clips[0].clone();
         entry.track = 9;
         assert!(entry.addr().is_err());
+    }
+
+    #[test]
+    fn a_session_saved_before_track_settings_existed_has_none() {
+        let text =
+            "tempo = 120.0\nbeats_per_bar = 4\nbeat_unit = 4\nsample_rate = 48000\nchannels = 2\n";
+        let read: Manifest = toml::from_str(text).unwrap();
+        assert!(read.tracks.is_empty());
+    }
+
+    #[test]
+    fn a_track_entry_round_trips() {
+        let mut manifest = manifest();
+        manifest.tracks = vec![TrackEntry {
+            track: 7,
+            input: 2,
+            restart: true,
+        }];
+        let written = toml::to_string(&manifest).unwrap();
+        let read: Manifest = toml::from_str(&written).unwrap();
+        assert_eq!(read.tracks, manifest.tracks);
     }
 
     #[test]
