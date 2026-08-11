@@ -689,10 +689,18 @@ fn read_wav(path: &Path, entry: &ClipEntry, channels: u16) -> Result<Clip, Sessi
     let mut written = 0_u64;
 
     for sample in reader.samples::<f32>() {
-        chunk.push(sample.map_err(|source| SessionError::Wav {
+        let sample = sample.map_err(|source| SessionError::Wav {
             path: path.display().to_string(),
             source,
-        })?);
+        })?;
+        // A NaN reaching the mix bus survives every gain and the limiter cannot clamp it, so
+        // one in a loop silences everything for as long as the loop plays.
+        if !sample.is_finite() {
+            return Err(SessionError::Invalid(
+                "an audio file holds a sample that is not a number",
+            ));
+        }
+        chunk.push(sample);
 
         if chunk.len() == chunk.capacity() {
             written += buffer.write(written, &chunk, &mut pool) as u64;
@@ -887,6 +895,29 @@ mod tests {
         );
         let accepted = store.inspect(addr(0, 0)).unwrap().accepts(48_000, CH, 8);
         assert!(accepted.is_ok());
+    }
+
+    #[test]
+    fn a_sample_that_is_not_a_number_is_refused() {
+        let dir = TempDir::new("nan-wav");
+        let (store, pad) = saved_one(&dir);
+
+        // A file whose header is perfect and whose contents are poison.
+        let path = store.dir(pad).join(Manifest::file_name(pad));
+        let mut writer = hound::WavWriter::create(&path, float_spec(CH)).unwrap();
+        for frame in 0..128 {
+            for _ in 0..CH {
+                let sample = if frame == 64 { f32::NAN } else { 0.25 };
+                writer.write_sample(sample).unwrap();
+            }
+        }
+        writer.finalize().unwrap();
+
+        let refused = store.load(pad, 48_000, CH, BUDGET);
+        assert!(
+            matches!(refused, Err(SessionError::Invalid(_))),
+            "a NaN in a loop would silence the mix for as long as it played"
+        );
     }
 
     #[test]
