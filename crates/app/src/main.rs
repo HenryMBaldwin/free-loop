@@ -269,18 +269,8 @@ fn run(s: Session<'_>) {
             pending_save.as_ref(),
             &mut snapshots,
         );
-        // An answer that arrived wins over the deadline, even on the pass the deadline falls
-        // on: it is the result being waited for.
-        if let Some(save) = finished_save(&mut pending_save, answered) {
-            settle_save(store, &save, config, &negotiated, &snapshots, controller);
-            snapshots.clear();
-        } else if let Some(save) = pending_save.take_if(|save| now >= save.deadline) {
-            eprintln!(
-                "save to {}{} never completed; nothing was written",
-                save.addr.track.index(),
-                save.addr.slot.index()
-            );
-            controller.cancel_picker();
+        let outcome = resolve_save(&mut pending_save, answered, now);
+        if carry_out_save(outcome, store, config, &negotiated, &snapshots, controller) {
             snapshots.clear();
         }
 
@@ -431,25 +421,72 @@ fn collect_snapshots(
     });
 }
 
-/// The save a completion finishes, if it is the one being waited on.
-fn finished_save(
+/// Acts on what became of a save. Returns whether its snapshots are finished with.
+fn carry_out_save(
+    outcome: SaveOutcome,
+    store: &SessionStore,
+    config: &Config,
+    negotiated: &Negotiated,
+    snapshots: &[Snapshot],
+    controller: &mut Controller,
+) -> bool {
+    match outcome {
+        SaveOutcome::Waiting => false,
+        SaveOutcome::Answered(save) => {
+            settle_save(store, &save, config, negotiated, snapshots, controller);
+            true
+        }
+        SaveOutcome::Expired(addr) => {
+            eprintln!(
+                "save to {}{} never completed; nothing was written",
+                addr.track.index(),
+                addr.slot.index()
+            );
+            controller.cancel_picker();
+            true
+        }
+    }
+}
+
+/// What became of the save that was waiting.
+#[derive(Debug)]
+enum SaveOutcome {
+    /// Still waiting for its answer.
+    Waiting,
+    /// Its answer arrived.
+    Answered(Answered),
+    /// Its answer never came.
+    Expired(free_loop_core::SlotAddr),
+}
+
+/// Decides what to do with the save that is waiting.
+///
+/// An answer that arrived wins over the deadline, even on the pass the deadline falls on: it
+/// is the result being waited for, and the engine will not send it again.
+fn resolve_save(
     pending: &mut Option<PendingSave>,
     answered: Option<(u32, u32, u32)>,
-) -> Option<Answered> {
-    let (request, clips, expected) = answered?;
-    if pending.as_ref().is_none_or(|save| save.request != request) {
-        return None;
+    now: Duration,
+) -> SaveOutcome {
+    if let Some((request, clips, expected)) = answered
+        && pending.as_ref().is_some_and(|save| save.request == request)
+        && let Some(save) = pending.take()
+    {
+        return SaveOutcome::Answered(Answered {
+            addr: save.addr,
+            settings: save.settings,
+            clips,
+            expected,
+        });
     }
-    let save = pending.take()?;
-    Some(Answered {
-        addr: save.addr,
-        settings: save.settings,
-        clips,
-        expected,
-    })
+    match pending.take_if(|save| now >= save.deadline) {
+        Some(save) => SaveOutcome::Expired(save.addr),
+        None => SaveOutcome::Waiting,
+    }
 }
 
 /// A save whose snapshots have all been accounted for.
+#[derive(Debug)]
 struct Answered {
     addr: free_loop_core::SlotAddr,
     /// What was set when the snapshot was asked for.
@@ -481,6 +518,7 @@ fn settle_save(
 }
 
 /// A save waiting on the engine to publish its clips.
+#[derive(Debug)]
 struct PendingSave {
     /// When the answer stops being expected.
     ///
@@ -497,6 +535,7 @@ struct PendingSave {
 }
 
 /// What a save records besides the audio.
+#[derive(Debug)]
 struct Settings {
     /// What the performer has the transport set to, not what the config file says.
     tempo: f64,
@@ -819,5 +858,91 @@ fn report(event: Event) {
         | Event::Beat { .. }
         | Event::SlotChanged { .. }
         | Event::ClipReleased { .. } => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::unnecessary_wraps,
+        reason = "tests should fail loudly, and build the state under test directly"
+    )]
+
+    use super::*;
+
+    const DEADLINE: Duration = Duration::from_secs(2);
+
+    fn pad(track: u8, slot: u8) -> free_loop_core::SlotAddr {
+        free_loop_core::SlotAddr::new(
+            free_loop_core::TrackId::new(track).unwrap(),
+            free_loop_core::SlotId::new(slot).unwrap(),
+        )
+    }
+
+    fn waiting(request: u32) -> Option<PendingSave> {
+        Some(PendingSave {
+            deadline: DEADLINE,
+            request,
+            addr: pad(1, 2),
+            settings: Settings {
+                tempo: 120.0,
+                gains: [free_loop_core::UNITY_STEP; free_loop_core::TRACK_COUNT],
+                tracks: [TrackSettings::default(); free_loop_core::TRACK_COUNT],
+            },
+        })
+    }
+
+    #[test]
+    fn a_save_with_no_answer_yet_keeps_waiting() {
+        let mut pending = waiting(1);
+        let outcome = resolve_save(&mut pending, None, Duration::from_secs(1));
+
+        assert!(matches!(outcome, SaveOutcome::Waiting));
+        assert!(pending.is_some(), "still expecting its answer");
+    }
+
+    #[test]
+    fn an_answer_to_this_save_finishes_it() {
+        let mut pending = waiting(7);
+        let outcome = resolve_save(&mut pending, Some((7, 3, 3)), Duration::from_secs(1));
+
+        let answered = match outcome {
+            SaveOutcome::Answered(answered) => answered,
+            other => unreachable!("expected an answer, got {other:?}"),
+        };
+        assert_eq!(answered.addr, pad(1, 2));
+        assert_eq!((answered.clips, answered.expected), (3, 3));
+        assert!(pending.is_none(), "no longer pending");
+    }
+
+    #[test]
+    fn an_answer_to_a_superseded_save_is_not_this_one() {
+        let mut pending = waiting(9);
+        let outcome = resolve_save(&mut pending, Some((8, 3, 3)), Duration::from_secs(1));
+
+        assert!(matches!(outcome, SaveOutcome::Waiting));
+        assert!(pending.is_some(), "still expecting request nine");
+    }
+
+    #[test]
+    fn a_save_whose_answer_never_came_expires() {
+        let mut pending = waiting(1);
+        let outcome = resolve_save(&mut pending, None, DEADLINE);
+
+        assert!(matches!(outcome, SaveOutcome::Expired(addr) if addr == pad(1, 2)));
+        assert!(pending.is_none(), "given up on");
+    }
+
+    /// The answer cannot be asked for again, so it has to win.
+    #[test]
+    fn an_answer_arriving_on_the_deadline_still_wins() {
+        let mut pending = waiting(4);
+        let outcome = resolve_save(&mut pending, Some((4, 2, 2)), DEADLINE);
+
+        assert!(
+            matches!(outcome, SaveOutcome::Answered(_)),
+            "written, not abandoned"
+        );
     }
 }
