@@ -603,7 +603,7 @@ impl Engine {
             Command::SetLaunchModes(modes) => self.audio.launch_modes = modes,
             Command::ClearAll => self.defer(Deferred::ClearAll, sink),
             Command::Rewind => self.defer(Deferred::Rewind, sink),
-            Command::Snapshot => self.publish_snapshot(sink),
+            Command::Snapshot { request } => self.publish_snapshot(request, sink),
             Command::SetPaused(paused) => self.set_paused(paused, sink),
             Command::SetClickEnabled(enabled) => self.click.set_enabled(enabled),
             Command::SetClickLevel(level) => self.click.set_level(level),
@@ -814,8 +814,9 @@ impl Engine {
     }
 
     /// Publishes a reference to every pad that holds a clip.
-    fn publish_snapshot(&mut self, sink: &mut impl EventSink) {
+    fn publish_snapshot(&mut self, request: u32, sink: &mut impl EventSink) {
         let mut published = 0;
+        let mut expected = 0;
         for addr in SlotAddr::all() {
             let state = self.session.state(addr);
             // A pad still recording has no finished audio to publish.
@@ -825,16 +826,23 @@ impl Engine {
             let Some(clip) = self.audio.clip(addr) else {
                 continue;
             };
+            expected += 1;
             let snapshot = Snapshot {
+                request,
                 addr,
                 state,
                 launch_anchor: self.audio.anchors[addr.track.index()][addr.slot.index()],
                 clip: Arc::clone(clip),
             };
-            self.audio.snapshots.publish(snapshot);
-            published += 1;
+            if self.audio.snapshots.publish(snapshot) {
+                published += 1;
+            }
         }
-        sink.event(Event::SnapshotComplete { clips: published });
+        sink.event(Event::SnapshotComplete {
+            request,
+            clips: published,
+            expected,
+        });
     }
 
     fn set_paused(&mut self, paused: bool, sink: &mut impl EventSink) {
