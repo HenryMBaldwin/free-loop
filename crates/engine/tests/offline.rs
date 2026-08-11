@@ -1297,6 +1297,67 @@ fn a_quiet_mix_is_left_alone() {
     assert!(!clipped);
 }
 
+mod staged_load {
+    use super::*;
+
+    #[test]
+    fn a_load_that_has_not_finished_arriving_changes_nothing() {
+        let mut harness = Harness::new(128);
+        let pad = addr(0, 0);
+        record(&mut harness, pad, 0, 1);
+        let playing = harness.engine.state(pad);
+
+        // Begin and one clip, with no End yet.
+        harness
+            .housekeeping
+            .loader
+            .send(LoadMessage::Begin {
+                tempo: Tempo::new(90.0).unwrap(),
+            })
+            .unwrap();
+        harness.run_frames(128);
+
+        assert_eq!(
+            harness.engine.state(pad),
+            playing,
+            "the grid is untouched until the whole load is in"
+        );
+        assert!(!harness.engine.is_paused(), "and it has not frozen");
+    }
+
+    #[test]
+    fn a_load_takes_effect_all_at_once_when_it_finishes() {
+        let mut harness = Harness::new(128);
+        record(&mut harness, addr(0, 0), 0, 1);
+
+        let loaded = addr(2, 3);
+        harness
+            .housekeeping
+            .loader
+            .send(LoadMessage::Begin {
+                tempo: Tempo::new(90.0).unwrap(),
+            })
+            .unwrap();
+        harness.run_frames(128);
+        harness
+            .housekeeping
+            .loader
+            .send(LoadMessage::Clip {
+                addr: loaded,
+                clip: lent_clip(BAR, 0),
+                playing: true,
+                launch_anchor: None,
+            })
+            .unwrap();
+        harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+        harness.run_frames(128);
+
+        assert_eq!(harness.engine.state(addr(0, 0)), SlotState::Empty);
+        assert!(harness.engine.state(loaded).is_sounding());
+        assert!(harness.engine.is_paused(), "a load waits to be started");
+    }
+}
+
 mod snapshots {
     use super::*;
 
