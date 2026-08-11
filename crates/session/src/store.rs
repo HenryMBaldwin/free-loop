@@ -43,6 +43,14 @@ pub enum SessionError {
         /// What the session holds.
         found: u32,
     },
+    /// The session asks for more storage than the loader is allowed to give it.
+    #[error("session needs {wanted} segments but the loader allows {allowed}")]
+    TooLarge {
+        /// Segments the loader may allocate.
+        allowed: usize,
+        /// Segments the session would need.
+        wanted: usize,
+    },
     /// The session file describes something that cannot be loaded.
     #[error("session is not loadable: {0}")]
     Invalid(&'static str),
@@ -207,22 +215,21 @@ impl Inspected {
                 found: u32::from(self.manifest.channels),
             });
         }
+        // Structure first: it caps the list at one entry per pad, after which the sum below
+        // is over something bounded.
+        self.manifest.validate().map_err(SessionError::Invalid)?;
+
         // Segments rather than frames: every clip gets its own buffer and rounds up to a
         // whole segment, so a grid of one-frame clips costs a segment each.
-        let wanted: usize = self
-            .manifest
-            .clips
-            .iter()
-            .map(|entry| as_segments(entry.len_frames))
-            .sum();
+        let wanted = self.manifest.clips.iter().fold(0_usize, |total, entry| {
+            total.saturating_add(as_segments(entry.len_frames))
+        });
         if wanted > segments {
-            return Err(SessionError::Mismatch {
-                what: "segments a session needs",
-                wanted: u32::try_from(segments).unwrap_or(u32::MAX),
-                found: u32::try_from(wanted).unwrap_or(u32::MAX),
+            return Err(SessionError::TooLarge {
+                allowed: segments,
+                wanted,
             });
         }
-        self.manifest.validate().map_err(SessionError::Invalid)?;
 
         for entry in &self.manifest.clips {
             let pad = entry.addr()?;
@@ -539,12 +546,12 @@ fn phase_in(anchor: Frames, len: Frames) -> u64 {
     if len.0 == 0 { 0 } else { anchor.0 % len.0 }
 }
 
-/// Removes a directory if it is there, reporting anything other than its absence.
 /// Segments a clip of `frames` needs. Each clip is held in its own buffer.
 fn as_segments(frames: u64) -> usize {
     usize::try_from(frames.div_ceil(SEGMENT_FRAMES as u64)).unwrap_or(usize::MAX)
 }
 
+/// Removes a directory if it is there, reporting anything other than its absence.
 fn remove_dir(dir: &Path) -> Result<(), SessionError> {
     match std::fs::remove_dir_all(dir) {
         Ok(()) => Ok(()),
@@ -869,7 +876,13 @@ mod tests {
         // Eight one-frame clips are a handful of frames but eight separate buffers.
         let refused = store.inspect(addr(0, 0)).unwrap().accepts(48_000, CH, 4);
         assert!(
-            refused.is_err(),
+            matches!(
+                refused,
+                Err(SessionError::TooLarge {
+                    allowed: 4,
+                    wanted: 8
+                })
+            ),
             "each clip rounds up to a whole segment of its own"
         );
         let accepted = store.inspect(addr(0, 0)).unwrap().accepts(48_000, CH, 8);

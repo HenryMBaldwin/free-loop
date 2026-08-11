@@ -976,6 +976,9 @@ impl Engine {
         self.position = self.grid.rebase_onto(self.position, grid);
         self.grid = grid;
         self.resync_clock();
+        // Reported on success as well as refusal, so a resync answer queued earlier cannot
+        // end up as the last word on the tempo.
+        sink.event(Event::Tempo { bpm: tempo.bpm() });
     }
 
     /// Renders one block.
