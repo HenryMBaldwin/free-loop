@@ -679,8 +679,6 @@ impl Controller {
                     self.dirty = true;
                 }
             }
-            // Bars are already covered by the beat they start with, and the rest are for
-            // logging rather than for the grid.
             // The engine's own value wins: the display may have been left optimistic by a
             // refusal that never arrived.
             Event::Tempo { bpm } => {
@@ -688,6 +686,8 @@ impl Controller {
                 self.tempo_before_request = bpm;
                 self.dirty = true;
             }
+            // Bars are already covered by the beat they start with, and the rest are for
+            // logging rather than for the grid.
             Event::Bar { .. }
             | Event::ClipRecorded { .. }
             | Event::ClipReleased { .. }
