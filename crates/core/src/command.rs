@@ -26,7 +26,6 @@ pub enum Command {
     SetInputs([TrackInput; TRACK_COUNT]),
     /// Set where each track's clips are anchored when launched.
     SetLaunchModes([LaunchMode; TRACK_COUNT]),
-    /// Publish a reference to every pad that holds a clip.
     /// Report every pad's state again, for a reader that has missed some.
     Resync,
     /// Publish every pad holding a clip, tagged with `request` so a reader can tell one

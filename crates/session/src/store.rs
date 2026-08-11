@@ -143,7 +143,7 @@ impl Inspected {
         &self,
         sample_rate: u32,
         channels: u16,
-        budget: Frames,
+        segments: usize,
     ) -> Result<(), SessionError> {
         if self.manifest.sample_rate != sample_rate {
             return Err(SessionError::Mismatch {
@@ -159,9 +159,22 @@ impl Inspected {
                 found: u32::from(self.manifest.channels),
             });
         }
-        self.manifest
-            .validate(budget.0)
-            .map_err(SessionError::Invalid)?;
+        // Segments rather than frames: every clip gets its own buffer and rounds up to a
+        // whole segment, so a grid of one-frame clips costs a segment each.
+        let wanted: usize = self
+            .manifest
+            .clips
+            .iter()
+            .map(|entry| as_segments(entry.len_frames))
+            .sum();
+        if wanted > segments {
+            return Err(SessionError::Mismatch {
+                what: "segments a session needs",
+                wanted: u32::try_from(segments).unwrap_or(u32::MAX),
+                found: u32::try_from(wanted).unwrap_or(u32::MAX),
+            });
+        }
+        self.manifest.validate().map_err(SessionError::Invalid)?;
 
         for entry in &self.manifest.clips {
             let pad = entry.addr()?;
@@ -445,10 +458,10 @@ impl SessionStore {
         addr: SlotAddr,
         sample_rate: u32,
         channels: u16,
-        budget: Frames,
+        segments: usize,
     ) -> Result<LoadedSession, SessionError> {
         let checked = self.inspect(addr)?;
-        checked.accepts(sample_rate, channels, budget)?;
+        checked.accepts(sample_rate, channels, segments)?;
         checked.materialise(channels)
     }
 
@@ -501,6 +514,11 @@ fn phase_in(anchor: Frames, len: Frames) -> u64 {
 }
 
 /// Removes a directory if it is there, reporting anything other than its absence.
+/// Segments a clip of `frames` needs. Each clip is held in its own buffer.
+fn as_segments(frames: u64) -> usize {
+    usize::try_from(frames.div_ceil(SEGMENT_FRAMES as u64)).unwrap_or(usize::MAX)
+}
+
 fn remove_dir(dir: &Path) -> Result<(), SessionError> {
     match std::fs::remove_dir_all(dir) {
         Ok(()) => Ok(()),
@@ -699,7 +717,7 @@ mod tests {
     }
 
     /// A load budget far above any fixture.
-    const BUDGET: Frames = Frames(48_000 * 60);
+    const BUDGET: usize = 64;
 
     fn addr(track: u8, slot: u8) -> SlotAddr {
         SlotAddr::new(TrackId::new(track).unwrap(), SlotId::new(slot).unwrap())
@@ -804,6 +822,31 @@ mod tests {
             )
             .unwrap();
         (store, addr(0, 0))
+    }
+
+    #[test]
+    fn short_clips_are_bounded_by_the_segments_they_each_take() {
+        let dir = TempDir::new("segment-budget");
+        let store = SessionStore::new(&dir.0);
+        let tiny = clip(1, 0);
+        let clips: Vec<SavedClip<'_>> = (0..8)
+            .map(|slot| SavedClip {
+                addr: addr(0, slot),
+                playing: false,
+                gain_step: UNITY_STEP,
+                launch_anchor: None,
+                clip: &tiny,
+            })
+            .collect();
+        store.save(addr(0, 0), &data(clips)).unwrap();
+
+        let checked = store.inspect(addr(0, 0)).unwrap();
+        // Eight one-frame clips are a handful of frames but eight separate buffers.
+        assert!(
+            checked.accepts(48_000, CH, 4).is_err(),
+            "each clip rounds up to a whole segment of its own"
+        );
+        assert!(checked.accepts(48_000, CH, 8).is_ok());
     }
 
     #[test]

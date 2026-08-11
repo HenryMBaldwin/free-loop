@@ -200,8 +200,8 @@ fn run(s: Session<'_>) {
     while running.load(Ordering::Relaxed) {
         let now = started.elapsed();
 
-        missed_reports = resync_after_loss(io, missed_reports);
-        connected = watch_devices_and_surface(io, surface, now, connected, controller, config);
+        connected = watch_surface(surface, now, connected);
+        watch_devices(io, now, controller, config.audio.pause_on_disconnect);
 
         events.clear();
         surface.poll(&mut events);
@@ -246,25 +246,15 @@ fn run(s: Session<'_>) {
             }
         }
 
-        let mut answered: Option<(u32, u32, u32)> = None;
-        let mut clock_ticks = 0;
-        let mut clipped = 0_u32;
-        let mut short_frames = 0_u64;
-        io.drain_events(|event| {
-            match event {
-                Event::SnapshotComplete {
-                    request,
-                    clips,
-                    expected,
-                } => answered = Some((request, clips, expected)),
-                Event::Clock { ticks } => clock_ticks += ticks,
-                Event::Clipped { samples } => clipped += samples,
-                Event::Xrun { frames } => short_frames += frames,
-                _ => {}
-            }
-            report(event);
-            controller.on_engine(event);
-        });
+        let drained = drain_engine(io, controller);
+        let Drained {
+            answered,
+            clock_ticks,
+            clipped,
+            short_frames,
+        } = drained;
+        // After draining, so the replay it asks for has somewhere to go.
+        missed_reports = resync_after_loss(io, missed_reports);
         clipping.note(clipped, now);
         xruns.note(short_frames, now);
 
@@ -654,20 +644,39 @@ fn write_session(
     }
 }
 
-/// Lets both devices settle, reporting anything that came or went.
-///
-/// Returns whether a surface is attached now.
-fn watch_devices_and_surface(
-    io: &mut AudioIo,
-    surface: &mut dyn ControlSurface,
-    now: Duration,
-    connected: bool,
-    controller: &mut Controller,
-    config: &Config,
-) -> bool {
-    let attached = watch_surface(surface, now, connected);
-    watch_devices(io, now, controller, config.audio.pause_on_disconnect);
-    attached
+/// What one pass of the engine's reports added up to.
+struct Drained {
+    /// The snapshot completion, if one arrived.
+    answered: Option<(u32, u32, u32)>,
+    clock_ticks: u32,
+    clipped: u32,
+    short_frames: u64,
+}
+
+/// Takes everything the engine has reported, printing and mirroring as it goes.
+fn drain_engine(io: &mut AudioIo, controller: &mut Controller) -> Drained {
+    let mut drained = Drained {
+        answered: None,
+        clock_ticks: 0,
+        clipped: 0,
+        short_frames: 0,
+    };
+    io.drain_events(|event| {
+        match event {
+            Event::SnapshotComplete {
+                request,
+                clips,
+                expected,
+            } => drained.answered = Some((request, clips, expected)),
+            Event::Clock { ticks } => drained.clock_ticks += ticks,
+            Event::Clipped { samples } => drained.clipped += samples,
+            Event::Xrun { frames } => drained.short_frames += frames,
+            _ => {}
+        }
+        report(event);
+        controller.on_engine(event);
+    });
+    drained
 }
 
 /// Asks the engine to report every pad again if any of its reports were lost.
