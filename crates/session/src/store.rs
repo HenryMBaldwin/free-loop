@@ -167,21 +167,34 @@ impl SessionStore {
     ///
     /// A swap moves the old directory aside and the new one into place. A process that dies
     /// between those two leaves the pad with nothing where a complete session is sitting
-    /// under another name. Call once at startup.
-    pub fn recover(&self) {
+    /// under another name. Also clears staging left by an interruption during writing,
+    /// which holds disk space until that pad is saved again. Call once at startup.
+    ///
+    /// Returns what could not be put right, so a pad that is still missing can be said so
+    /// rather than looking empty.
+    pub fn recover(&self) -> Vec<SessionError> {
+        let mut trouble = Vec::new();
         for addr in SlotAddr::all() {
             let dir = self.dir(addr);
+            let previous = self.previous(addr);
+
             if dir.is_dir() {
                 // Whatever is here is the finished session; anything aside is what it
                 // replaced.
-                let _ = std::fs::remove_dir_all(self.previous(addr));
-                continue;
+                if let Err(error) = remove_dir(&previous) {
+                    trouble.push(error);
+                }
+            } else if previous.is_dir()
+                && let Err(error) = rename(&previous, &dir)
+            {
+                trouble.push(error);
             }
-            let previous = self.previous(addr);
-            if previous.is_dir() {
-                let _ = std::fs::rename(&previous, &dir);
+
+            if let Err(error) = remove_dir(&self.staging(addr)) {
+                trouble.push(error);
             }
         }
+        trouble
     }
 
     /// Where a pad's outgoing session waits during a swap.
@@ -423,6 +436,18 @@ fn phase_in(anchor: Frames, len: Frames) -> u64 {
     if len.0 == 0 { 0 } else { anchor.0 % len.0 }
 }
 
+/// Removes a directory if it is there, reporting anything other than its absence.
+fn remove_dir(dir: &Path) -> Result<(), SessionError> {
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(SessionError::Io {
+            path: dir.display().to_string(),
+            source,
+        }),
+    }
+}
+
 fn rename(from: &Path, to: &Path) -> Result<(), SessionError> {
     std::fs::rename(from, to).map_err(|source| SessionError::Io {
         path: to.display().to_string(),
@@ -519,6 +544,14 @@ fn read_wav(
     }
     if spec.sample_rate != sample_rate {
         return Err(SessionError::Invalid("an audio file is at another rate"));
+    }
+    // Read as `f32` below, which an integer file would only fail on at the first sample,
+    // by which point the whole clip has been allocated.
+    if spec.sample_format != hound::SampleFormat::Float || spec.bits_per_sample != 32 {
+        return Err(SessionError::Invalid("an audio file is not 32-bit float"));
+    }
+    if reader.len() % u32::from(spec.channels.max(1)) != 0 {
+        return Err(SessionError::Invalid("an audio file ends mid frame"));
     }
     // A file shorter than the manifest claims would become silence-padded, and a longer one
     // would be cut off without a word.
@@ -665,6 +698,100 @@ mod tests {
         assert_eq!(read.clips[0].addr, addr(0, 0), "and it is the same clip");
     }
 
+    /// Writes a wav of `frames` in `spec`, over whatever the pad's audio file is.
+    fn overwrite_audio(dir: &Path, pad: SlotAddr, frames: u32, spec: hound::WavSpec) {
+        let path = dir.join(Manifest::file_name(pad));
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        for _ in 0..frames * u32::from(spec.channels) {
+            match spec.sample_format {
+                hound::SampleFormat::Float => writer.write_sample(0.25_f32).unwrap(),
+                hound::SampleFormat::Int => writer.write_sample(0_i16).unwrap(),
+            }
+        }
+        writer.finalize().unwrap();
+    }
+
+    fn float_spec(channels: u16) -> hound::WavSpec {
+        hound::WavSpec {
+            channels,
+            sample_rate: 48_000,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        }
+    }
+
+    /// A saved session whose audio file can then be replaced.
+    fn saved_one(dir: &TempDir) -> (SessionStore, SlotAddr) {
+        let store = SessionStore::new(&dir.0);
+        let held = clip(128, 0);
+        store
+            .save(
+                addr(0, 0),
+                &data(vec![SavedClip {
+                    addr: addr(0, 0),
+                    playing: true,
+                    gain_step: UNITY_STEP,
+                    launch_anchor: None,
+                    clip: &held,
+                }]),
+            )
+            .unwrap();
+        (store, addr(0, 0))
+    }
+
+    #[test]
+    fn an_audio_file_shorter_than_the_manifest_is_refused() {
+        let dir = TempDir::new("short-wav");
+        let (store, pad) = saved_one(&dir);
+        overwrite_audio(&store.dir(pad), pad, 64, float_spec(CH));
+
+        assert!(
+            store.load(pad, 48_000, CH).is_err(),
+            "would have become silence padded"
+        );
+    }
+
+    #[test]
+    fn an_audio_file_longer_than_the_manifest_is_refused() {
+        let dir = TempDir::new("long-wav");
+        let (store, pad) = saved_one(&dir);
+        overwrite_audio(&store.dir(pad), pad, 256, float_spec(CH));
+
+        assert!(store.load(pad, 48_000, CH).is_err(), "would have been cut");
+    }
+
+    #[test]
+    fn an_integer_audio_file_is_refused_before_anything_is_allocated() {
+        let dir = TempDir::new("int-wav");
+        let (store, pad) = saved_one(&dir);
+        overwrite_audio(
+            &store.dir(pad),
+            pad,
+            128,
+            hound::WavSpec {
+                channels: CH,
+                sample_rate: 48_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        );
+
+        let refused = store.load(pad, 48_000, CH);
+        assert!(
+            matches!(refused, Err(SessionError::Invalid(_))),
+            "not a read failure"
+        );
+    }
+
+    #[test]
+    fn an_audio_file_with_the_wrong_channel_count_is_refused() {
+        let dir = TempDir::new("mono-wav");
+        let (store, pad) = saved_one(&dir);
+        overwrite_audio(&store.dir(pad), pad, 128, float_spec(1));
+
+        assert!(store.load(pad, 48_000, CH).is_err());
+    }
+
     #[test]
     fn a_session_left_mid_swap_is_put_back() {
         let dir = TempDir::new("recover");
@@ -690,6 +817,17 @@ mod tests {
         store.recover();
         assert!(store.exists(addr(0, 0)), "back where it belongs");
         assert_eq!(store.load(addr(0, 0), 48_000, 2).unwrap().clips.len(), 1);
+    }
+
+    #[test]
+    fn recovery_clears_staging_left_by_an_interrupted_write() {
+        let dir = TempDir::new("recover-staging");
+        let store = SessionStore::new(&dir.0);
+        let abandoned = dir.0.join(".34.saving");
+        std::fs::create_dir_all(abandoned.join("junk")).unwrap();
+
+        assert!(store.recover().is_empty(), "nothing went wrong");
+        assert!(!abandoned.exists(), "the space is given back");
     }
 
     #[test]
