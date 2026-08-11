@@ -49,10 +49,10 @@ pub struct Audio {
     pub buffer_frames: Option<u32>,
     /// Channels to request. Empty asks for stereo.
     pub channels: Option<u16>,
-    /// Device input channel carrying the instrument.
+    /// Input channel every track starts recording, changeable from the grid.
     ///
-    /// Empty takes channels in order. Set it when one instrument is in one jack of a
-    /// multi-input interface, or the loop comes back on one side only.
+    /// Empty starts them on the whole input, which is right for a stereo source. Set it
+    /// when one instrument is in one jack of a multi-input interface.
     pub input_channel: Option<usize>,
     /// Blocks of capture buffered before the output starts consuming.
     pub cushion_blocks: u32,
@@ -206,10 +206,8 @@ impl Config {
             sample_rate: self.audio.sample_rate,
             buffer_frames: self.audio.buffer_frames,
             channels: self.audio.channels,
-            input_source: match self.audio.input_channel {
-                Some(channel) => InputSource::Mono(channel),
-                None => InputSource::Direct,
-            },
+            // Every input channel reaches the engine, which picks one per track.
+            input_source: InputSource::Direct,
             cushion_blocks: self.audio.cushion_blocks,
             capture_offset: self.audio.capture_offset_frames,
         }
@@ -367,10 +365,10 @@ mod tests {
     #[test]
     fn an_input_channel_becomes_a_mono_source() {
         let config = Config::parse("[audio]\ninput_channel = 1\n").unwrap();
-        assert_eq!(config.audio().input_source, InputSource::Mono(1));
+        assert_eq!(config.track_input(), TrackInput::Mono(1));
 
         let config = Config::parse("").unwrap();
-        assert_eq!(config.audio().input_source, InputSource::Direct);
+        assert_eq!(config.track_input(), TrackInput::Stereo);
     }
 
     #[test]

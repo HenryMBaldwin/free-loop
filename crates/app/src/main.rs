@@ -95,8 +95,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         negotiated.cushion_frames
     );
     match config.audio.input_channel {
-        Some(channel) => println!("capturing device input channel {channel} onto every side"),
-        None => println!("capturing device input channels in order"),
+        Some(channel) => println!("tracks start on input channel {channel}"),
+        None => println!("tracks start on the whole input"),
     }
 
     let (engine, mut housekeeping) =
