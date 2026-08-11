@@ -47,8 +47,7 @@ pub enum Event {
     },
     /// The tempo the transport is running at.
     ///
-    /// Sent on a resync, so a reader that missed a refusal is not left showing its own
-    /// optimistic value.
+    /// Sent whenever it is set or refused, and on a resync.
     Tempo {
         /// Beats per minute.
         bpm: f64,

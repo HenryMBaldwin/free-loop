@@ -804,8 +804,7 @@ impl Engine {
         let before = self.session;
         let Self { audio, loads, .. } = self;
 
-        // Staged rather than applied as it arrives: the callback would otherwise clear the
-        // grid and render whatever subset of a load had turned up so far.
+        // Staged, not applied as it arrives: the grid changes once, when all of it is in.
         let mut complete = false;
         while let Some(message) = loads.pop() {
             match message {
