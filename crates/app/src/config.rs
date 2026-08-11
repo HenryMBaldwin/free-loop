@@ -115,8 +115,8 @@ impl Default for Transport {
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Engine {
-    /// Segments to allocate. The ceiling on total recorded audio, about 1.4 s each at
-    /// 48 kHz.
+    /// Segments to allocate. The ceiling on total recorded audio, about 1.4 s and half a
+    /// megabyte each, shared across every pad.
     pub segment_pool: usize,
     /// Frames a level takes to travel the full gain range. 5 ms at 48 kHz.
     pub declick_frames: u64,
@@ -132,9 +132,9 @@ pub struct Engine {
 impl Default for Engine {
     fn default() -> Self {
         Self {
-            segment_pool: 64,
+            segment_pool: 2_048,
             declick_frames: free_loop_engine::DEFAULT_DECLICK.0,
-            load_segments: 256,
+            load_segments: 8_192,
         }
     }
 }
@@ -227,10 +227,13 @@ impl Config {
 
     /// The most segments a loaded session may hold.
     ///
+    /// Never below `segment_pool`: a session can be recorded up to the pool's size, and one
+    /// that cannot be loaded back is worse than one that was never allowed.
+    ///
     /// Counted the way the loader allocates: one buffer per clip, each rounded up to whole
     /// segments.
     pub fn load_budget(&self) -> usize {
-        self.engine.load_segments
+        self.engine.load_segments.max(self.engine.segment_pool)
     }
 
     /// Where every track's clips start out being anchored.
@@ -325,8 +328,9 @@ max_bars = 32
 restart_clips = false
 
 [engine]
-# About 1.4 s of stereo audio each at 48 kHz.
-segment_pool = 64
+# About 1.4 s of stereo audio and half a megabyte each, shared across every pad. Allocated at
+# startup, so this is resident memory: 2048 is roughly 46 minutes for just over a gigabyte.
+segment_pool = 2048
 # Frames a level takes to travel the full gain range. 5 ms at 48 kHz.
 declick_frames = 240
 
@@ -347,11 +351,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_load_budget_never_falls_below_the_recording_pool() {
+        let config = Config::parse("[engine]\nsegment_pool = 4096\nload_segments = 8\n").unwrap();
+        assert_eq!(
+            config.load_budget(),
+            4096,
+            "a session recorded to the pool's size has to load back"
+        );
+    }
+
+    #[test]
     fn the_load_budget_follows_the_recording_pool() {
         let config = Config::parse("[engine]\nsegment_pool = 4\n").unwrap();
         assert_eq!(
             config.load_budget(),
-            256,
+            8_192,
             "a load is bounded on its own, not by the recording pool"
         );
     }
@@ -380,7 +394,7 @@ mod tests {
             config.transport.beats_per_bar, 4,
             "untouched keys keep defaults"
         );
-        assert_eq!(config.engine.segment_pool, 64);
+        assert_eq!(config.engine.segment_pool, 2_048);
     }
 
     #[test]
