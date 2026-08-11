@@ -211,6 +211,7 @@ impl Opened {
             errors: Arc::new(AtomicU64::new(0)),
             lost: Arc::new(AtomicBool::new(false)),
             starved: Arc::new(AtomicU32::new(0)),
+            dropped_events: Arc::new(AtomicU64::new(0)),
         };
         let input_latency = Arc::new(AtomicU32::new(0));
         let capture_offset = Arc::new(AtomicU32::new(0));
@@ -223,7 +224,7 @@ impl Opened {
             captured: vec![0.0; MAX_BLOCK_FRAMES * negotiated.channels],
             rendered: vec![0.0; MAX_BLOCK_FRAMES * negotiated.channels],
             channels: negotiated.channels,
-            dropped_events: 0,
+            dropped_events: Arc::clone(&health.dropped_events),
         }));
 
         let mut io = AudioIo {
@@ -500,6 +501,13 @@ impl AudioIo {
         self.capture_offset.load(Ordering::Relaxed)
     }
 
+    /// Reports the engine could not fit onto the event ring since the streams started.
+    ///
+    /// A reader that sees this rise has missed something and should ask for a resync.
+    pub fn dropped_events(&self) -> u64 {
+        self.health.dropped_events.load(Ordering::Relaxed)
+    }
+
     /// Errors either device has reported since the streams started.
     pub fn device_errors(&self) -> u64 {
         self.health.errors.load(Ordering::Relaxed)
@@ -535,13 +543,13 @@ impl AudioIo {
 /// Pushes engine reports onto the event ring, counting any that do not fit.
 struct RingSink<'a> {
     events: &'a mut Producer<Event>,
-    dropped: &'a mut u64,
+    dropped: &'a AtomicU64,
 }
 
 impl EventSink for RingSink<'_> {
     fn event(&mut self, event: Event) {
         if self.events.push(event).is_err() {
-            *self.dropped += 1;
+            self.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -559,7 +567,8 @@ struct Shared {
     captured: Vec<f32>,
     rendered: Vec<f32>,
     channels: usize,
-    dropped_events: u64,
+    /// Shared with [`AudioIo`], so a reader can tell it has missed reports.
+    dropped_events: Arc<AtomicU64>,
 }
 
 /// The output callback's state.
@@ -792,6 +801,8 @@ struct Health {
     lost: Arc<AtomicBool>,
     /// Frames the capture has delivered nothing for, in a row.
     starved: Arc<AtomicU32>,
+    /// Reports the engine could not fit onto the event ring.
+    dropped_events: Arc<AtomicU64>,
 }
 
 /// Counts a stream error, and flags the ones that mean the stream has to be rebuilt.
@@ -871,6 +882,7 @@ mod tests {
             errors: Arc::new(AtomicU64::new(0)),
             lost: Arc::new(AtomicBool::new(false)),
             starved: Arc::new(AtomicU32::new(0)),
+            dropped_events: Arc::new(AtomicU64::new(0)),
         }
     }
 
