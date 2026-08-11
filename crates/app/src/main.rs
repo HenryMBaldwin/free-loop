@@ -568,6 +568,7 @@ fn settings(controller: &Controller) -> Settings {
         tracks: core::array::from_fn(|track| TrackSettings {
             input: inputs[track].column(),
             restart: modes[track].restarts(),
+            gain_step: controller.gains()[track],
         }),
     }
 }

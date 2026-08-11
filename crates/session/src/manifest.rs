@@ -72,6 +72,12 @@ pub struct TrackEntry {
     /// Whether launching a clip plays it from its start.
     #[serde(default)]
     pub restart: bool,
+    /// The step on the gain ladder the track plays at.
+    ///
+    /// Absent in a session saved before tracks carried their own level, where the levels
+    /// on the clips stand in.
+    #[serde(default)]
+    pub gain_step: Option<u8>,
 }
 
 /// Everything a session holds apart from the audio itself.
@@ -150,6 +156,12 @@ impl Manifest {
 
             if entry.input > SLOT_COUNT {
                 return Err("a track's input is not a column");
+            }
+            if entry
+                .gain_step
+                .is_some_and(|step| usize::from(step) >= GAIN_STEPS)
+            {
+                return Err("a track's level is off the ladder");
             }
         }
 
@@ -252,9 +264,22 @@ mod tests {
             track: 3,
             input: 1,
             restart: false,
+            gain_step: None,
         };
         broken.tracks = vec![entry, entry];
         assert_eq!(broken.validate(), Err("two entries for one track"));
+    }
+
+    #[test]
+    fn a_track_level_off_the_ladder_is_refused() {
+        let mut broken = manifest();
+        broken.tracks = vec![TrackEntry {
+            track: 3,
+            input: 0,
+            restart: false,
+            gain_step: Some(200),
+        }];
+        assert_eq!(broken.validate(), Err("a track's level is off the ladder"));
     }
 
     #[test]
@@ -264,6 +289,7 @@ mod tests {
             track: 99,
             input: 0,
             restart: false,
+            gain_step: None,
         }];
         assert!(broken.validate().is_err());
     }
@@ -283,6 +309,7 @@ mod tests {
             track: 7,
             input: 2,
             restart: true,
+            gain_step: Some(3),
         }];
         let written = toml::to_string(&manifest).unwrap();
         let read: Manifest = toml::from_str(&written).unwrap();
