@@ -21,8 +21,11 @@ pub enum Event {
     },
     /// MIDI clock ticks have passed.
     Clock {
-        /// How many since the last report.
-        ticks: u32,
+        /// How many the transport has produced since the engine was built.
+        ///
+        /// Never goes backwards, and a rewind produces none. Send on the difference from
+        /// the last total taken, so a report that never arrives costs no ticks.
+        total: u64,
     },
     /// The transport crossed a beat.
     Beat {
