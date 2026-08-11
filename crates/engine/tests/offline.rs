@@ -820,16 +820,108 @@ fn a_load_leaves_less_room_to_record() {
     // A take now has nowhere to go.
     harness.command(Command::SetPaused(false));
     harness.drain_events();
-    harness.command(Command::Press(addr(7, 7)));
+    let spare = addr(7, 7);
+    harness.command(Command::Press(spare));
     harness.run_to(2 * BAR);
 
     assert!(
-        harness.drain_events().iter().any(|e| matches!(
-            e,
-            Event::RecordBufferLow { .. } | Event::RecordingRefused { .. }
-        )),
-        "recording is refused the way a dry pool refuses it"
+        harness
+            .drain_events()
+            .iter()
+            .any(|e| matches!(e, Event::RecordingRefused { addr } if *addr == spare)),
+        "refused before capture, the way a dry pool refuses it"
     );
+    assert_eq!(
+        harness.engine.state(spare),
+        SlotState::Empty,
+        "so the grid cannot grow past the pool"
+    );
+}
+
+#[test]
+fn replacing_a_loaded_session_keeps_the_reservation_exact() {
+    let mut harness = Harness::new(128);
+    let available = harness.engine.segments_available();
+    let last = addr(7, 7);
+    let first = addr(0, 0);
+
+    // A session filling the pool, on the pad the walk reaches last.
+    load_one(&mut harness, last, available);
+    assert_eq!(harness.engine.segments_available(), 0);
+
+    // Replaced by one of the same size on the pad the walk reaches first, so the incoming
+    // reservation is made before the outgoing one is released.
+    load_one(&mut harness, first, available);
+    assert_eq!(
+        harness.engine.segments_available(),
+        0,
+        "the incoming clip is still accounted for"
+    );
+
+    harness.command(Command::Clear(first));
+    harness.run_frames(128);
+    harness.housekeeping.recycler.run();
+    assert_eq!(harness.engine.segments_available(), available);
+}
+
+#[test]
+fn a_load_is_accounted_for_while_a_snapshot_holds_the_old_storage() {
+    let mut harness = Harness::new(128);
+    let available = harness.engine.segments_available();
+
+    // Four two-bar takes at three segments each, so nothing is free.
+    for track in 0..4 {
+        harness.command(Command::Press(addr(track, 0)));
+    }
+    harness.run_to(2 * BAR);
+    for track in 0..4 {
+        harness.command(Command::Press(addr(track, 0)));
+    }
+    harness.run_to(2 * BAR + 1);
+    assert_eq!(harness.engine.segments_available(), 0);
+
+    // The snapshot holds every clip, so retiring the old grid puts nothing back before
+    // the incoming load is accounted for.
+    harness.command(Command::Snapshot { request: 1 });
+    harness.drain_events();
+
+    load_one(&mut harness, addr(7, 7), 2);
+    assert_eq!(
+        harness.engine.segments_available(),
+        0,
+        "charged in full, not against what happened to be free"
+    );
+
+    // Once the held storage comes back, only the load stays reserved.
+    harness.housekeeping.snapshots.drain(drop);
+    harness.run_frames(128);
+    harness.housekeeping.recycler.run();
+    harness.run_frames(128);
+    assert_eq!(harness.engine.segments_available(), available - 2);
+}
+
+/// Loads a session of one clip costing `segments`, onto `pad`.
+fn load_one(harness: &mut Harness, pad: SlotAddr, segments: usize) {
+    let frames = segments as u64 * free_loop_clip::SEGMENT_FRAMES as u64;
+    harness
+        .housekeeping
+        .loader
+        .send(LoadMessage::Begin {
+            tempo: Tempo::new(120.0).unwrap(),
+        })
+        .unwrap();
+    harness
+        .housekeeping
+        .loader
+        .send(LoadMessage::Clip {
+            addr: pad,
+            clip: lent_clip(frames, 0),
+            playing: false,
+            launch_anchor: None,
+        })
+        .unwrap();
+    harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+    harness.run_frames(128);
 }
 
 #[test]
@@ -1658,31 +1750,27 @@ mod snapshots {
 mod resources {
     use super::*;
 
+    /// Records four two-bar takes, which is three segments each and the whole pool.
+    fn fill_the_pool(harness: &mut Harness) {
+        for track in 0..4 {
+            harness.command(Command::Press(addr(track, 0)));
+        }
+        harness.run_to(2 * BAR);
+        for track in 0..4 {
+            harness.command(Command::Press(addr(track, 0)));
+        }
+        harness.run_to(2 * BAR + 1);
+
+        assert_eq!(harness.engine.segments_available(), 0, "the pool is empty");
+        harness.drain_events();
+    }
+
     #[test]
     fn every_pad_refused_on_one_boundary_is_put_back() {
         let mut harness = Harness::new(512);
-        // Fill the pool: one shell per pad, and a sealed take keeps the one it was given.
-        for slot in 0..u8::try_from(free_loop_core::SLOT_COUNT).unwrap() {
-            for track in 0..u8::try_from(free_loop_core::TRACK_COUNT).unwrap() {
-                harness.command(Command::Press(addr(track, slot)));
-            }
-            let until = (harness.position() / BAR + 2) * BAR;
-            harness.run_to(until);
-            for track in 0..u8::try_from(free_loop_core::TRACK_COUNT).unwrap() {
-                harness.command(Command::Press(addr(track, slot)));
-            }
-            harness.run_to(until + 1);
-        }
+        fill_the_pool(&mut harness);
 
-        // Clearing hands shells to the recycler rather than back, so several arms on one
-        // boundary all have nowhere to write.
-        harness.command(Command::Snapshot { request: 1 });
-        let spares = [addr(0, 0), addr(1, 0), addr(2, 0)];
-        for spare in spares {
-            harness.command(Command::Clear(spare));
-        }
-        harness.drain_events();
-
+        let spares = [addr(5, 0), addr(6, 0), addr(7, 0)];
         for spare in spares {
             harness.command(Command::Press(spare));
         }
@@ -1706,29 +1794,9 @@ mod resources {
     #[test]
     fn a_pad_with_no_storage_left_is_put_back_rather_than_left_playing() {
         let mut harness = Harness::new(512);
+        fill_the_pool(&mut harness);
 
-        // One shell per pad, and a sealed take keeps the one it was given, so the pool is
-        // only empty once every pad holds a clip. One slot per track records at a time.
-        for slot in 0..u8::try_from(free_loop_core::SLOT_COUNT).unwrap() {
-            for track in 0..u8::try_from(free_loop_core::TRACK_COUNT).unwrap() {
-                harness.command(Command::Press(addr(track, slot)));
-            }
-            let until = (harness.position() / BAR + 2) * BAR;
-            harness.run_to(until);
-            for track in 0..u8::try_from(free_loop_core::TRACK_COUNT).unwrap() {
-                harness.command(Command::Press(addr(track, slot)));
-            }
-            harness.run_to(until + 1);
-        }
-        harness.drain_events();
-
-        // Clearing hands the shell to the recycler rather than straight back, so the next
-        // arm has nowhere to write.
-        let spare = addr(0, 0);
-        harness.command(Command::Snapshot { request: 1 });
-        harness.command(Command::Clear(spare));
-        harness.drain_events();
-
+        let spare = addr(7, 7);
         harness.command(Command::Press(spare));
         let until = (harness.position() / BAR + 2) * BAR;
         harness.run_to(until);
@@ -1743,6 +1811,44 @@ mod resources {
             SlotState::Empty,
             "left empty rather than claiming to hold a take"
         );
+    }
+
+    #[test]
+    fn a_take_that_runs_out_part_way_is_not_sealed() {
+        let mut harness = Harness::new(512);
+
+        // Three takes leave three segments, and a four-bar take needs six.
+        for track in 0..3 {
+            harness.command(Command::Press(addr(track, 0)));
+        }
+        harness.run_to(2 * BAR);
+        for track in 0..3 {
+            harness.command(Command::Press(addr(track, 0)));
+        }
+        harness.run_to(2 * BAR + 1);
+        assert_eq!(harness.engine.segments_available(), 3);
+        harness.drain_events();
+
+        let long = addr(7, 7);
+        harness.command(Command::Press(long));
+        harness.run_to(6 * BAR);
+        harness.command(Command::Press(long));
+        harness.run_to(6 * BAR + 1);
+
+        let events = harness.drain_events();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::RecordBufferLow { addr } if *addr == long)),
+            "it was warned on the way"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::ClipRecorded { .. })),
+            "and no clip was sealed from a take with silence in its tail"
+        );
+        assert_eq!(harness.engine.state(long), SlotState::Empty);
     }
 }
 

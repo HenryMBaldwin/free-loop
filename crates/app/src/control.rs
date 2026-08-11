@@ -34,8 +34,8 @@ pub const TEMPO_HOLD_DELAY: Duration = Duration::from_millis(400);
 /// How often a held tempo button repeats.
 pub const TEMPO_HOLD_INTERVAL: Duration = Duration::from_millis(120);
 
-/// How long the grid holds the colour that answers a save.
-pub const SAVE_FLASH: Duration = Duration::from_millis(250);
+/// How long the grid holds the colour that answers a save or a load.
+pub const RESULT_FLASH: Duration = Duration::from_millis(250);
 
 /// How long the bpm stays up before the grid comes back.
 ///
@@ -101,11 +101,13 @@ struct TempoHold {
 }
 
 /// The grid lit one colour to answer something the performer asked for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Flash {
     color: LedColor,
     /// When the grid goes back to showing the loops.
     until: Duration,
+    /// Scrolled once the colour has been held.
+    then: Option<String>,
 }
 
 /// Something for the surface to display.
@@ -429,32 +431,36 @@ impl Controller {
         self.sessions |= bit(addr);
         self.current = Some(addr);
         self.mode = Mode::Perform;
-        self.show(LedColor::Green, now);
+        self.show(LedColor::Green, now, None);
     }
 
     /// Leaves the picker and says on the grid that nothing was written.
     pub fn save_failed(&mut self, now: Duration) {
         self.mode = Mode::Perform;
-        self.show(LedColor::Red, now);
+        self.show(LedColor::Red, now, None);
     }
 
     /// Leaves the picker and says on the grid that nothing was loaded.
     ///
-    /// `code` is scrolled after the flash, for a refusal with a number worth reading.
+    /// `code` is scrolled once the colour has been held, for a refusal with a number
+    /// worth reading.
     pub fn load_failed(&mut self, now: Duration, code: Option<String>) {
         self.mode = Mode::Perform;
-        self.show(LedColor::Red, now);
-        if let Some(code) = code {
-            self.text = Some(TextUpdate::Show(code));
-            self.text_until = Some(now + TEXT_DURATION);
-        }
+        self.show(LedColor::Red, now, code);
     }
 
-    /// Holds the grid at one colour for [`SAVE_FLASH`].
-    fn show(&mut self, color: LedColor, now: Duration) {
+    /// Holds the grid at one colour for [`RESULT_FLASH`], then scrolls `then`.
+    ///
+    /// Text already on the grid is stopped first.
+    fn show(&mut self, color: LedColor, now: Duration, then: Option<String>) {
+        if self.text_running || self.text_until.is_some() {
+            self.text = Some(TextUpdate::Stop);
+            self.text_until = None;
+        }
         self.flash = Some(Flash {
             color,
-            until: now + SAVE_FLASH,
+            until: now + RESULT_FLASH,
+            then,
         });
         self.dirty = true;
     }
@@ -574,8 +580,11 @@ impl Controller {
     pub fn tick(&mut self, now: Duration) {
         self.repeat_tempo(now);
 
-        if self.flash.is_some_and(|flash| now >= flash.until) {
-            self.flash = None;
+        if let Some(flash) = self.flash.take_if(|flash| now >= flash.until) {
+            if let Some(text) = flash.then {
+                self.text = Some(TextUpdate::Show(text));
+                self.text_until = Some(now + TEXT_DURATION);
+            }
             self.dirty = true;
         }
 
@@ -817,9 +826,10 @@ impl Controller {
         };
 
         self.overlay();
-        if let Some(flash) = self.flash {
+        if let Some(flash) = self.flash.as_ref() {
+            let led = Led::solid(flash.color);
             for addr in SlotAddr::all() {
-                self.frame.set_pad(addr, Led::solid(flash.color));
+                self.frame.set_pad(addr, led);
             }
         }
         self.dirty = false;
@@ -1428,16 +1438,34 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_load_turns_the_grid_red_and_scrolls_its_code() {
+    fn a_failed_load_scrolls_its_code_only_once_the_red_has_been_held() {
         let mut controller = controller();
         controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
         controller.load_failed(T0, Some("2600".to_owned()));
 
         assert_eq!(controller.mode(), Mode::Perform);
+        assert_eq!(controller.take_text(), None, "nothing over the answer yet");
+
+        controller.tick(T0 + RESULT_FLASH);
         assert_eq!(
             controller.take_text(),
             Some(TextUpdate::Show("2600".to_owned())),
             "the pool size the session needs"
+        );
+    }
+
+    #[test]
+    fn a_result_cuts_text_that_is_already_scrolling() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
+        controller.on_surface(SurfaceEvent::ControlReleased(Control::TempoUp), T0);
+        assert!(matches!(controller.take_text(), Some(TextUpdate::Show(_))));
+
+        controller.session_saved(addr(0, 0), T0);
+        assert_eq!(
+            controller.take_text(),
+            Some(TextUpdate::Stop),
+            "or the scroll would suppress every frame until it finished"
         );
     }
 
@@ -1457,10 +1485,10 @@ mod tests {
         controller.session_saved(addr(1, 1), T0);
         controller.take_frame();
 
-        controller.tick(T0 + SAVE_FLASH / 2);
+        controller.tick(T0 + RESULT_FLASH / 2);
         assert!(controller.take_frame().is_none(), "still answering");
 
-        controller.tick(T0 + SAVE_FLASH);
+        controller.tick(T0 + RESULT_FLASH);
         let frame = controller.take_frame().unwrap();
         assert!(SlotAddr::all().all(|a| !frame.pad(a).is_lit()), "the loops");
     }

@@ -136,9 +136,10 @@ impl SegmentPool {
 
     /// Holds `count` segments back for audio stored outside the pool.
     ///
-    /// Clamped to the pool's size, so a reservation can empty it but not overdraw it.
+    /// Exactly undone by [`SegmentPool::release`] of the same count. The reservation may
+    /// exceed what is free, which reads as nothing available until enough comes back.
     pub fn reserve(&mut self, count: usize) {
-        self.reserved = self.reserved.saturating_add(count).min(self.free.len());
+        self.reserved = self.reserved.saturating_add(count);
     }
 
     /// Gives `count` reserved segments back.
@@ -572,13 +573,47 @@ mod tests {
     }
 
     #[test]
-    fn a_reservation_stops_at_the_pool_size() {
+    fn a_reservation_survives_being_made_before_the_one_it_replaces_is_released() {
+        let mut pool = SegmentPool::new(4, CH);
+        pool.reserve(4);
+
+        // A replacement reserves the incoming clip before retiring the outgoing one, so
+        // the two overlap.
+        pool.reserve(4);
+        pool.release(4);
+
+        assert_eq!(
+            pool.reserved(),
+            4,
+            "the incoming clip is still accounted for"
+        );
+        assert_eq!(pool.available(), 0);
+    }
+
+    #[test]
+    fn a_reservation_past_the_pool_leaves_nothing_available() {
         let mut pool = SegmentPool::new(2, CH);
         pool.reserve(100);
-        assert_eq!(pool.reserved(), 2, "it cannot owe segments");
+        assert_eq!(pool.available(), 0);
+        assert_eq!(pool.reserved(), 100, "the count stays exact");
 
-        pool.release(2);
-        assert_eq!(pool.available(), 2);
+        pool.release(100);
+        assert_eq!(pool.available(), 2, "and is exactly undone");
+    }
+
+    #[test]
+    fn segments_out_on_loan_do_not_shrink_a_reservation() {
+        let mut pool = SegmentPool::new(4, CH);
+        let mut held = AudioBuffer::new(2, CH);
+        held.write(0, &ramp(SEGMENT_FRAMES + 1, 0), &mut pool);
+        assert_eq!(pool.available(), 2, "two segments are out");
+
+        // A load arriving while a snapshot still holds owned storage.
+        pool.reserve(2);
+        assert_eq!(pool.available(), 0);
+
+        held.drain_into(&mut pool);
+        assert_eq!(pool.available(), 2, "what came back is not the reservation");
     }
 
     #[test]

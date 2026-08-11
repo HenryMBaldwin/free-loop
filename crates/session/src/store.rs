@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use free_loop_clip::{AudioBuffer, Clip, Ramp, SEGMENT_FRAMES, SegmentPool};
+use free_loop_clip::{AudioBuffer, Clip, Ramp, SEGMENT_FRAMES, SegmentPool, segments_for};
 use free_loop_core::{Frames, SLOT_COUNT, SlotAddr, TRACK_COUNT, UNITY_STEP};
 
 use crate::manifest::{ClipEntry, MANIFEST, Manifest, TrackEntry};
@@ -235,7 +235,7 @@ impl Inspected {
         // Segments rather than frames: every clip gets its own buffer and rounds up to a
         // whole segment, so a grid of one-frame clips costs a segment each.
         let wanted = self.manifest.clips.iter().fold(0_usize, |total, entry| {
-            total.saturating_add(as_segments(entry.len_frames))
+            total.saturating_add(segments_for(Frames(entry.len_frames)))
         });
         if wanted > segments {
             return Err(SessionError::TooLarge {
@@ -405,7 +405,7 @@ impl SessionStore {
         load_budget: usize,
     ) -> Result<(), SessionError> {
         let wanted = data.clips.iter().fold(0_usize, |total, saved| {
-            total.saturating_add(as_segments(saved.clip.len().0))
+            total.saturating_add(saved.clip.segments())
         });
         if wanted > load_budget {
             return Err(SessionError::TooLarge {
@@ -582,11 +582,6 @@ fn phase_of(clip: &Clip) -> u64 {
 /// Where `anchor` sits inside a loop of `len`.
 fn phase_in(anchor: Frames, len: Frames) -> u64 {
     if len.0 == 0 { 0 } else { anchor.0 % len.0 }
-}
-
-/// Segments a clip of `frames` needs. Each clip is held in its own buffer.
-fn as_segments(frames: u64) -> usize {
-    usize::try_from(frames.div_ceil(SEGMENT_FRAMES as u64)).unwrap_or(usize::MAX)
 }
 
 /// Removes a directory if it is there, reporting anything other than its absence.
