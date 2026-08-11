@@ -1459,6 +1459,23 @@ mod resync {
     use super::*;
 
     #[test]
+    fn a_resync_reports_the_tempo_the_engine_is_running_at() {
+        let mut harness = Harness::new(128);
+        harness.command(Command::SetTempo(Tempo::new(90.0).unwrap()));
+        harness.drain_events();
+
+        harness.command(Command::Resync);
+        let reported = harness
+            .drain_events()
+            .into_iter()
+            .find_map(|event| match event {
+                Event::Tempo { bpm } => Some(bpm),
+                _ => None,
+            });
+        assert_eq!(reported, Some(90.0), "so a missed refusal cannot linger");
+    }
+
+    #[test]
     fn a_resync_reports_every_pad_as_it_stands() {
         let mut harness = Harness::new(128);
         let playing = addr(0, 0);

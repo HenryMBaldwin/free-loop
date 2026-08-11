@@ -5,7 +5,7 @@ use crate::slot::SlotState;
 use crate::time::Frames;
 
 /// Something the realtime side observed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Event {
     /// A slot moved to a new state.
     SlotChanged {
@@ -44,6 +44,14 @@ pub enum Event {
     ClipReleased {
         /// The clip that was let go.
         clip: ClipId,
+    },
+    /// The tempo the transport is running at.
+    ///
+    /// Sent on a resync, so a reader that missed a refusal is not left showing its own
+    /// optimistic value.
+    Tempo {
+        /// Beats per minute.
+        bpm: f64,
     },
     /// A recording could not start because no storage was free. The pad is left empty.
     RecordingRefused {

@@ -651,6 +651,9 @@ impl Engine {
             Command::ClearAll => self.defer(Deferred::ClearAll, sink),
             Command::Rewind => self.defer(Deferred::Rewind, sink),
             Command::Resync => {
+                sink.event(Event::Tempo {
+                    bpm: self.grid.tempo().bpm(),
+                });
                 for addr in SlotAddr::all() {
                     sink.event(Event::SlotChanged {
                         addr,
