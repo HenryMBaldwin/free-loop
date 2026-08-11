@@ -34,6 +34,9 @@ pub const TEMPO_HOLD_DELAY: Duration = Duration::from_millis(400);
 /// How often a held tempo button repeats.
 pub const TEMPO_HOLD_INTERVAL: Duration = Duration::from_millis(120);
 
+/// How long the grid holds the colour that answers a save.
+pub const SAVE_FLASH: Duration = Duration::from_millis(250);
+
 /// How long the bpm stays up before the grid comes back.
 ///
 /// The device says nothing when its scroll finishes, so the time is waited out.
@@ -97,6 +100,14 @@ struct TempoHold {
     started_at: f64,
 }
 
+/// The grid lit one colour to answer something the performer asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Flash {
+    color: LedColor,
+    /// When the grid goes back to showing the loops.
+    until: Duration,
+}
+
 /// Something for the surface to display.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TextUpdate {
@@ -148,6 +159,8 @@ pub struct Controller {
     text_until: Option<Duration>,
     /// Whether text is on the grid now, as opposed to merely queued.
     text_running: bool,
+    /// A colour answering a save, over the whole grid until it expires.
+    flash: Option<Flash>,
     mode: Mode,
     /// A bit per pad that holds a session.
     sessions: u64,
@@ -192,6 +205,7 @@ impl Controller {
             text: None,
             text_until: None,
             text_running: false,
+            flash: None,
             mode: Mode::Perform,
             sessions: 0,
             current: None,
@@ -410,11 +424,26 @@ impl Controller {
         self.dirty = true;
     }
 
-    /// Records which session is in use, and leaves the picker.
-    pub fn session_saved(&mut self, addr: SlotAddr) {
+    /// Records which session is in use, leaves the picker, and says so on the grid.
+    pub fn session_saved(&mut self, addr: SlotAddr, now: Duration) {
         self.sessions |= bit(addr);
         self.current = Some(addr);
         self.mode = Mode::Perform;
+        self.show(LedColor::Green, now);
+    }
+
+    /// Leaves the picker and says on the grid that nothing was written.
+    pub fn save_failed(&mut self, now: Duration) {
+        self.mode = Mode::Perform;
+        self.show(LedColor::Red, now);
+    }
+
+    /// Holds the grid at one colour for [`SAVE_FLASH`].
+    fn show(&mut self, color: LedColor, now: Duration) {
+        self.flash = Some(Flash {
+            color,
+            until: now + SAVE_FLASH,
+        });
         self.dirty = true;
     }
 
@@ -532,6 +561,11 @@ impl Controller {
     /// arrives.
     pub fn tick(&mut self, now: Duration) {
         self.repeat_tempo(now);
+
+        if self.flash.is_some_and(|flash| now >= flash.until) {
+            self.flash = None;
+            self.dirty = true;
+        }
 
         if self.text_until.is_some_and(|until| now >= until) {
             self.text_until = None;
@@ -771,6 +805,11 @@ impl Controller {
         };
 
         self.overlay();
+        if let Some(flash) = self.flash {
+            for addr in SlotAddr::all() {
+                self.frame.set_pad(addr, Led::solid(flash.color));
+            }
+        }
         self.dirty = false;
         Some(&self.frame)
     }
@@ -1345,10 +1384,49 @@ mod tests {
     fn a_completed_save_leaves_the_picker_and_marks_the_session() {
         let mut controller = controller();
         controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
-        controller.session_saved(addr(1, 1));
+        controller.session_saved(addr(1, 1), T0);
 
         assert_eq!(controller.mode(), Mode::Perform);
         assert_eq!(controller.current_session(), Some(addr(1, 1)));
+    }
+
+    #[test]
+    fn a_saved_session_turns_the_grid_green() {
+        let mut controller = controller();
+        controller.session_saved(addr(1, 1), T0);
+
+        let frame = controller.take_frame().unwrap();
+        assert!(
+            SlotAddr::all().all(|a| frame.pad(a) == Led::solid(LedColor::Green)),
+            "the whole grid answers"
+        );
+    }
+
+    #[test]
+    fn a_failed_save_turns_the_grid_red_and_leaves_the_picker() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        controller.save_failed(T0);
+
+        assert_eq!(controller.mode(), Mode::Perform);
+        assert_eq!(controller.current_session(), None, "nothing was written");
+
+        let frame = controller.take_frame().unwrap();
+        assert!(SlotAddr::all().all(|a| frame.pad(a) == Led::solid(LedColor::Red)));
+    }
+
+    #[test]
+    fn the_grid_comes_back_after_the_flash() {
+        let mut controller = controller();
+        controller.session_saved(addr(1, 1), T0);
+        controller.take_frame();
+
+        controller.tick(T0 + SAVE_FLASH / 2);
+        assert!(controller.take_frame().is_none(), "still answering");
+
+        controller.tick(T0 + SAVE_FLASH);
+        let frame = controller.take_frame().unwrap();
+        assert!(SlotAddr::all().all(|a| !frame.pad(a).is_lit()), "the loops");
     }
 
     #[test]
