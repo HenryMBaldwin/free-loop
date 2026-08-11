@@ -264,24 +264,22 @@ fn run(s: Session<'_>) {
         clipping.note(clipped, now);
         xruns.note(short_frames, now);
 
-        // Keeps the device's flash and pulse animations on the transport's tempo.
-        let ticks = clock_total.map_or(0, |total| {
-            let ticks = total.saturating_sub(clock_sent);
-            clock_sent = total;
-            u32::try_from(ticks).unwrap_or(u32::MAX)
-        });
-        if ticks > 0
-            && let Err(error) = surface.send_clock(ticks)
-        {
-            eprintln!("surface: {error}");
-        }
+        clock_sent = forward_clock(surface, clock_total, clock_sent);
         collect_snapshots(
             &mut housekeeping.snapshots,
             pending_save.as_ref(),
             &mut snapshots,
         );
         let outcome = resolve_save(&mut pending_save, answered, now);
-        if carry_out_save(outcome, store, config, &negotiated, &snapshots, controller) {
+        if carry_out_save(
+            outcome,
+            store,
+            config,
+            &negotiated,
+            &snapshots,
+            controller,
+            now,
+        ) {
             snapshots.clear();
         }
 
@@ -408,11 +406,12 @@ fn ask_for_snapshot(
     io: &mut AudioIo,
     request: u32,
     addr: free_loop_core::SlotAddr,
-    controller: &Controller,
+    controller: &mut Controller,
     now: Duration,
 ) -> Option<PendingSave> {
     if io.send(Command::Snapshot { request }).is_err() {
         eprintln!("could not ask for a snapshot");
+        controller.save_failed(now);
         return None;
     }
     Some(PendingSave {
@@ -446,11 +445,12 @@ fn carry_out_save(
     negotiated: &Negotiated,
     snapshots: &[Snapshot],
     controller: &mut Controller,
+    now: Duration,
 ) -> bool {
     match outcome {
         SaveOutcome::Waiting => false,
         SaveOutcome::Answered(save) => {
-            settle_save(store, &save, config, negotiated, snapshots, controller);
+            settle_save(store, &save, config, negotiated, snapshots, controller, now);
             true
         }
         SaveOutcome::Expired(addr) => {
@@ -459,7 +459,7 @@ fn carry_out_save(
                 addr.track.index(),
                 addr.slot.index()
             );
-            controller.cancel_picker();
+            controller.save_failed(now);
             true
         }
     }
@@ -522,16 +522,17 @@ fn settle_save(
     negotiated: &Negotiated,
     snapshots: &[Snapshot],
     controller: &mut Controller,
+    now: Duration,
 ) {
     if save.clips != save.expected {
         eprintln!(
             "save abandoned: {} of {} pads arrived",
             save.clips, save.expected
         );
-        controller.cancel_picker();
+        controller.save_failed(now);
         return;
     }
-    write_session(store, save, config, negotiated, snapshots, controller);
+    write_session(store, save, config, negotiated, snapshots, controller, now);
 }
 
 /// A save waiting on the engine to publish its clips.
@@ -703,6 +704,7 @@ fn write_session(
     negotiated: &Negotiated,
     snapshots: &[Snapshot],
     controller: &mut Controller,
+    now: Duration,
 ) {
     let addr = save_to.addr;
     match save(
@@ -715,10 +717,28 @@ fn write_session(
     ) {
         Ok(()) => {
             println!("saved session {}{}", addr.track.index(), addr.slot.index());
-            controller.session_saved(addr);
+            controller.session_saved(addr, now);
         }
-        Err(error) => eprintln!("save failed: {error}"),
+        Err(error) => {
+            eprintln!("save failed: {error}");
+            controller.save_failed(now);
+        }
     }
+}
+
+/// Passes on the pulses the device has not had yet, returning the new total sent.
+///
+/// Keeps the device's flash and pulse animations on the transport's tempo.
+fn forward_clock(surface: &mut dyn ControlSurface, total: Option<u64>, sent: u64) -> u64 {
+    let Some(total) = total else { return sent };
+
+    let ticks = u32::try_from(total.saturating_sub(sent)).unwrap_or(u32::MAX);
+    if ticks > 0
+        && let Err(error) = surface.send_clock(ticks)
+    {
+        eprintln!("surface: {error}");
+    }
+    total
 }
 
 /// What one pass of the engine's reports added up to.
@@ -912,6 +932,34 @@ mod tests {
             array[kind.index()] = *count;
         }
         DroppedEvents::from(array)
+    }
+
+    #[test]
+    fn the_device_gets_the_pulses_it_has_not_had() {
+        let mut surface = free_loop_surface::MockSurface::new();
+
+        assert_eq!(forward_clock(&mut surface, Some(24), 0), 24);
+        assert_eq!(surface.clock(), 24);
+
+        assert_eq!(forward_clock(&mut surface, Some(30), 24), 30, "the delta");
+        assert_eq!(surface.clock(), 30);
+    }
+
+    #[test]
+    fn a_dropped_clock_report_still_delivers_its_pulses() {
+        let mut surface = free_loop_surface::MockSurface::new();
+
+        // The report carrying 24 never arrived; the next one carries both.
+        assert_eq!(forward_clock(&mut surface, Some(48), 0), 48);
+        assert_eq!(surface.clock(), 48);
+    }
+
+    #[test]
+    fn a_pass_with_no_clock_report_sends_nothing() {
+        let mut surface = free_loop_surface::MockSurface::new();
+
+        assert_eq!(forward_clock(&mut surface, None, 17), 17);
+        assert_eq!(surface.clock(), 0);
     }
 
     #[test]
