@@ -174,6 +174,45 @@ struct Recording {
     starved: bool,
 }
 
+/// One pad's worth of a load that has not been put in place yet.
+#[derive(Debug)]
+struct StagedClip {
+    clip: Arc<Clip>,
+    playing: bool,
+    launch_anchor: Option<Frames>,
+}
+
+/// A load being assembled.
+#[derive(Debug)]
+struct Staging {
+    tempo: Option<Tempo>,
+    clips: [[Option<StagedClip>; SLOT_COUNT]; TRACK_COUNT],
+}
+
+impl Staging {
+    fn new() -> Self {
+        Self {
+            tempo: None,
+            clips: core::array::from_fn(|_| core::array::from_fn(|_| None)),
+        }
+    }
+
+    /// Gives up a load that never finished arriving.
+    ///
+    /// The storage belongs to whoever sent it, so it goes back through the recycler rather
+    /// than being dropped here.
+    fn abandon(&mut self, retirement: &mut Retirement) {
+        self.tempo = None;
+        for row in &mut self.clips {
+            for slot in row {
+                if let Some(staged) = slot.take() {
+                    retirement.retire(staged.clip);
+                }
+            }
+        }
+    }
+}
+
 /// Everything that owns audio memory.
 ///
 /// Split out from [`Engine`] so effects can be applied while [`SessionModel`] is
@@ -198,6 +237,8 @@ struct Audio {
     anchors: [[Option<Frames>; SLOT_COUNT]; TRACK_COUNT],
     /// A pad whose capture could not be given storage, for the engine to put back.
     refused: Option<SlotAddr>,
+    /// A load being assembled, put in place only once all of it has arrived.
+    staged: Staging,
 }
 
 impl Audio {
@@ -441,6 +482,7 @@ impl Engine {
                 launch_modes: [config.launch_mode; TRACK_COUNT],
                 anchors: core::array::from_fn(|_| core::array::from_fn(|_| None)),
                 refused: None,
+                staged: Staging::new(),
             },
             click: Click::new(config.click, config.sample_rate),
             loads,
@@ -741,28 +783,15 @@ impl Engine {
     /// Installs anything the loader has queued.
     fn apply_loads(&mut self, sink: &mut impl EventSink) {
         let before = self.session;
-        let mut pause = false;
-        let mut tempo = None;
+        let Self { audio, loads, .. } = self;
 
-        let Self {
-            session,
-            audio,
-            loads,
-            ..
-        } = self;
-
+        // Staged rather than applied as it arrives: the callback would otherwise clear the
+        // grid and render whatever subset of a load had turned up so far.
+        let mut complete = false;
         loads.drain(|message| match message {
-            LoadMessage::Begin { tempo: wanted } => {
-                tempo = Some(wanted);
-                for addr in SlotAddr::all() {
-                    // A take left running would write live input into whatever the load
-                    // puts on that pad.
-                    audio.stop_recording(addr);
-                    if let Some(held) = audio.take_clip(addr) {
-                        audio.retire(held);
-                    }
-                    session.mirror(addr, SlotState::Empty);
-                }
+            LoadMessage::Begin { tempo } => {
+                audio.staged.abandon(&mut audio.retirement);
+                audio.staged.tempo = Some(tempo);
             }
             LoadMessage::Clip {
                 addr,
@@ -775,31 +804,61 @@ impl Engine {
                 if let Some(inner) = Arc::get_mut(&mut clip) {
                     inner.set_borrowed(true);
                 }
-                let id = audio.next_clip_id;
-                audio.next_clip_id = id.next();
-                audio.put_clip(addr, clip);
-                audio.anchors[addr.track.index()][addr.slot.index()] = launch_anchor;
+                audio.staged.clips[addr.track.index()][addr.slot.index()] = Some(StagedClip {
+                    clip,
+                    playing,
+                    launch_anchor,
+                });
+            }
+            LoadMessage::End => complete = true,
+        });
 
-                let state = if playing {
+        if !complete {
+            return;
+        }
+        self.commit_load(sink);
+        self.emit_changes(&before, sink);
+    }
+
+    /// Puts a fully arrived load in place of whatever is loaded now.
+    fn commit_load(&mut self, sink: &mut impl EventSink) {
+        let Self { session, audio, .. } = self;
+
+        for addr in SlotAddr::all() {
+            // A take left running would write live input into whatever the load puts on
+            // that pad.
+            audio.stop_recording(addr);
+            if let Some(held) = audio.take_clip(addr) {
+                audio.retire(held);
+            }
+            audio.anchors[addr.track.index()][addr.slot.index()] = None;
+            session.mirror(addr, SlotState::Empty);
+
+            let Some(staged) = audio.staged.clips[addr.track.index()][addr.slot.index()].take()
+            else {
+                continue;
+            };
+            let id = audio.next_clip_id;
+            audio.next_clip_id = id.next();
+            audio.put_clip(addr, staged.clip);
+            audio.anchors[addr.track.index()][addr.slot.index()] = staged.launch_anchor;
+            session.mirror(
+                addr,
+                if staged.playing {
                     SlotState::Playing { clip: id }
                 } else {
                     SlotState::Stopped { clip: id }
-                };
-                session.mirror(addr, state);
-            }
-            LoadMessage::End => pause = true,
-        });
+                },
+            );
+        }
 
-        if let Some(tempo) = tempo {
+        if let Some(tempo) = self.audio.staged.tempo.take() {
             self.set_tempo_unchecked(tempo);
         }
-        if pause {
-            self.paused = true;
-            // Starting a loaded session part way through its loops is never what was
-            // wanted, so it begins at the beginning.
-            self.rewind(sink);
-        }
-        self.emit_changes(&before, sink);
+        // A load arrives against a grid the performer has not heard yet, so it waits.
+        self.paused = true;
+        self.levels = [[0.0; SLOT_COUNT]; TRACK_COUNT];
+        self.rewind(sink);
     }
 
     /// Sets the tempo without the guard that protects existing clips.
