@@ -944,6 +944,58 @@ mod tests {
         DroppedEvents::from(array)
     }
 
+    /// Drives `repaint` the way the control loop does: frame first, then text.
+    fn shown(surface: &mut free_loop_surface::MockSurface, controller: &mut Controller) {
+        repaint(surface, controller);
+    }
+
+    #[test]
+    fn a_size_refusal_holds_the_red_before_it_scrolls() {
+        let mut surface = free_loop_surface::MockSurface::new();
+        let mut controller = Controller::new(120.0, 4, true);
+        controller.load_failed(Duration::ZERO, Some("2600".to_owned()));
+
+        shown(&mut surface, &mut controller);
+        let frame = surface.frames().last().unwrap();
+        assert!(
+            free_loop_core::SlotAddr::all().all(|a| frame.pad(a).is_lit()),
+            "the answer is on the grid"
+        );
+        assert!(surface.texts().is_empty(), "with nothing scrolling over it");
+
+        controller.tick(free_loop::control::RESULT_FLASH);
+        shown(&mut surface, &mut controller);
+        assert_eq!(surface.texts(), [Some("2600".to_owned())]);
+    }
+
+    #[test]
+    fn a_result_cuts_a_scroll_before_taking_the_grid() {
+        let mut surface = free_loop_surface::MockSurface::new();
+        let mut controller = Controller::new(120.0, 4, true);
+
+        controller.on_surface(
+            SurfaceEvent::ControlPressed(free_loop_surface::Control::TempoUp),
+            Duration::ZERO,
+        );
+        controller.on_surface(
+            SurfaceEvent::ControlReleased(free_loop_surface::Control::TempoUp),
+            Duration::ZERO,
+        );
+        shown(&mut surface, &mut controller);
+        assert_eq!(surface.texts().len(), 1, "the bpm is scrolling");
+
+        controller.session_saved(pad(0, 0), Duration::ZERO);
+        shown(&mut surface, &mut controller);
+        assert_eq!(surface.texts().last(), Some(&None), "the scroll is stopped");
+
+        shown(&mut surface, &mut controller);
+        let frame = surface.frames().last().unwrap();
+        assert!(
+            free_loop_core::SlotAddr::all().all(|a| frame.pad(a).is_lit()),
+            "and the answer reaches the grid"
+        );
+    }
+
     #[test]
     fn a_session_too_large_reports_the_number_to_raise_the_pool_to() {
         let error: Box<dyn Error> = Box::new(free_loop_session::SessionError::TooLarge {

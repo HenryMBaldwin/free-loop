@@ -20,7 +20,7 @@ use crate::click::{Click, ClickConfig};
 use crate::load::{LoadInbox, LoadMessage, Loader};
 use crate::recycle::{Recycler, Retirement, channel};
 use crate::snapshot::{Snapshot, SnapshotReader, SnapshotWriter};
-use free_loop_clip::{Clip, Ramp, SEGMENT_FRAMES, SegmentPool};
+use free_loop_clip::{Clip, Ramp, SEGMENT_FRAMES, SegmentPool, segments_for};
 
 /// Frames a level travels the full gain range in by default. 5 ms at 48 kHz.
 pub const DEFAULT_DECLICK: Frames = Frames(240);
@@ -233,6 +233,8 @@ struct Audio {
     next_clip_id: ClipId,
     /// The round trip a sealed take is stamped as having started before.
     capture_offset: Frames,
+    /// Frames in a bar, which is the shortest take.
+    bar_frames: u64,
     /// Which input each track records.
     inputs: [TrackInput; TRACK_COUNT],
     /// Where each track's clips are anchored when launched.
@@ -311,6 +313,12 @@ impl Audio {
     fn apply(&mut self, addr: SlotAddr, effect: Effect, sink: &mut impl EventSink) {
         match effect {
             Effect::StartCapture { .. } => {
+                // A take is at least one bar; less storage than that cannot produce a
+                // clip.
+                if self.segments.available() < segments_for(Frames(self.bar_frames)) {
+                    self.refused |= pad_bit(addr);
+                    return;
+                }
                 // The shell pool holds one clip per pad, so this only comes up empty when
                 // the recycler is behind. The slot is put back rather than left claiming
                 // to hold a take it has nowhere to write.
@@ -331,10 +339,17 @@ impl Audio {
                 started_at,
                 at,
             } => {
-                if self.recordings[addr.track.index()][addr.slot.index()]
-                    .take()
-                    .is_none()
-                {
+                let Some(recording) = self.recordings[addr.track.index()][addr.slot.index()].take()
+                else {
+                    return;
+                };
+                // A take that ran out holds silence from where it did, and its length
+                // counts storage it never got. It goes back.
+                if recording.starved {
+                    if let Some(held) = self.clips[addr.track.index()][addr.slot.index()].take() {
+                        self.retire(held);
+                    }
+                    self.refused |= pad_bit(addr);
                     return;
                 }
                 let Some(held) = self.clips[addr.track.index()][addr.slot.index()].as_mut() else {
@@ -488,6 +503,7 @@ impl Engine {
                 snapshots,
                 next_clip_id: ClipId(0),
                 capture_offset: config.capture_offset,
+                bar_frames: grid.bars(1).0,
                 inputs: [config.input; TRACK_COUNT],
                 launch_modes: [config.launch_mode; TRACK_COUNT],
                 anchors: core::array::from_fn(|_| core::array::from_fn(|_| None)),
@@ -539,6 +555,11 @@ impl Engine {
     /// Segments still available for recording.
     pub fn segments_available(&self) -> usize {
         self.audio.segments.available()
+    }
+
+    /// Segments charged to loaded audio, which is stored outside the pool.
+    pub fn segments_reserved(&self) -> usize {
+        self.audio.segments.reserved()
     }
 
     /// Whether the transport is frozen.
@@ -917,9 +938,15 @@ impl Engine {
     fn set_tempo_unchecked(&mut self, tempo: Tempo) {
         if let Ok(grid) = BarGrid::new(self.sample_rate, tempo, self.time_signature) {
             self.position = self.grid.rebase_onto(self.position, grid);
-            self.grid = grid;
+            self.set_grid(grid);
             self.resync_clock();
         }
+    }
+
+    /// Takes a new bar grid, keeping anything measured against it in step.
+    fn set_grid(&mut self, grid: BarGrid) {
+        self.grid = grid;
+        self.audio.bar_frames = grid.bars(1).0;
     }
 
     /// Publishes a reference to every pad that holds a clip.
@@ -985,7 +1012,7 @@ impl Engine {
         // Move the transport with the grid, or the same frame count would land on a
         // different beat and the click would jump instead of changing interval.
         self.position = self.grid.rebase_onto(self.position, grid);
-        self.grid = grid;
+        self.set_grid(grid);
         self.resync_clock();
         // Reported on success as well as refusal, so a resync answer queued earlier cannot
         // end up as the last word on the tempo.
