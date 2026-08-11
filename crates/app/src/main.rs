@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use free_loop::config::{self, Config};
 use free_loop::control::{Controller, Request, TextUpdate};
-use free_loop_audio::{AudioIo, DeviceChange, Negotiated, open};
+use free_loop_audio::{AudioIo, DeviceChange, DroppedEvents, Negotiated, open};
 use free_loop_core::{Command, Event};
 use free_loop_engine::{Engine, Housekeeping, LoadMessage, Loader, Snapshot};
 use free_loop_session::{SavedClip, SessionData, SessionStore, TrackSettings};
@@ -195,7 +195,7 @@ fn run(s: Session<'_>) {
     let mut reported_latency = false;
     let mut connected = surface.is_connected();
     // Reports that never arrived leave the grid showing what a pad used to be doing.
-    let mut missed_reports = 0_u64;
+    let mut missed_reports = DroppedEvents::default();
     // Clock ticks the device has had, against the running total the engine reports.
     let mut clock_sent = 0_u64;
 
@@ -758,21 +758,43 @@ fn drain_engine(io: &mut AudioIo, controller: &mut Controller) -> Drained {
     drained
 }
 
-/// Asks the engine to report every pad again if any of its reports were lost.
+/// Asks the engine to report every pad again if a report a resync repairs was lost.
 ///
-/// The controller paints from a mirror kept in step by those reports.
-fn resync_after_loss(io: &mut AudioIo, seen: u64) -> u64 {
+/// The controller paints from a mirror kept in step by those reports. Kinds a resync
+/// cannot repair are said aloud and otherwise left: a lost beat is corrected by the next
+/// one, and a lost clock report by the running total the one after it carries.
+fn resync_after_loss(io: &mut AudioIo, seen: DroppedEvents) -> DroppedEvents {
     let dropped = io.dropped_events();
     if dropped == seen {
         return seen;
     }
+    eprintln!("missed engine reports: {}", lost_report(&dropped, &seen));
 
-    eprintln!("missed {} engine reports; asking again", dropped - seen);
+    if !needs_resync(&dropped, &seen) {
+        return dropped;
+    }
     if io.send(Command::Resync).is_err() {
         // The queue is full as well, so leave the count alone and try again next pass.
         return seen;
     }
     dropped
+}
+
+/// Whether asking the engine again would put any of what was lost right.
+fn needs_resync(dropped: &DroppedEvents, seen: &DroppedEvents) -> bool {
+    dropped.since(seen).any(|(kind, _)| kind.is_replayed())
+}
+
+/// Names what was lost between two counts, as `1 slot change, 3 beats`.
+fn lost_report(dropped: &DroppedEvents, seen: &DroppedEvents) -> String {
+    dropped
+        .since(seen)
+        .map(|(kind, count)| {
+            let plural = if count == 1 { "" } else { "s" };
+            format!("{count} {}{plural}", kind.name())
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Lets the audio devices come back after being unplugged, reporting what changed.
@@ -885,6 +907,47 @@ mod tests {
     use super::*;
 
     const DEADLINE: Duration = Duration::from_secs(2);
+
+    fn dropped(counts: &[(free_loop_core::EventKind, u64)]) -> DroppedEvents {
+        let mut array = [0; free_loop_core::EventKind::COUNT];
+        for (kind, count) in counts {
+            array[kind.index()] = *count;
+        }
+        DroppedEvents::from(array)
+    }
+
+    #[test]
+    fn a_lost_beat_does_not_cost_a_replay() {
+        use free_loop_core::EventKind;
+
+        let seen = DroppedEvents::default();
+        let now = dropped(&[(EventKind::Beat, 4), (EventKind::Clock, 2)]);
+
+        assert!(!needs_resync(&now, &seen), "both correct themselves");
+        assert_eq!(lost_report(&now, &seen), "2 clock ticks, 4 beats");
+    }
+
+    #[test]
+    fn a_lost_slot_change_asks_for_a_replay() {
+        use free_loop_core::EventKind;
+
+        let seen = dropped(&[(EventKind::Beat, 4)]);
+        let now = dropped(&[(EventKind::Beat, 9), (EventKind::SlotChanged, 1)]);
+
+        assert!(needs_resync(&now, &seen));
+        assert_eq!(lost_report(&now, &seen), "1 slot change, 5 beats");
+    }
+
+    #[test]
+    fn a_lost_tempo_refusal_asks_for_a_replay() {
+        use free_loop_core::EventKind;
+
+        let now = dropped(&[(EventKind::TempoRejected, 1)]);
+        assert!(
+            needs_resync(&now, &DroppedEvents::default()),
+            "a resync republishes the tempo the engine is actually at"
+        );
+    }
 
     fn pad(track: u8, slot: u8) -> free_loop_core::SlotAddr {
         free_loop_core::SlotAddr::new(

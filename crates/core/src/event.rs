@@ -88,3 +88,132 @@ pub enum Event {
         expected: u32,
     },
 }
+
+/// Which report an [`Event`] is, without its payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EventKind {
+    /// [`Event::SlotChanged`].
+    SlotChanged,
+    /// [`Event::Bar`].
+    Bar,
+    /// [`Event::Clock`].
+    Clock,
+    /// [`Event::Beat`].
+    Beat,
+    /// [`Event::ClipRecorded`].
+    ClipRecorded,
+    /// [`Event::ClipReleased`].
+    ClipReleased,
+    /// [`Event::Tempo`].
+    Tempo,
+    /// [`Event::RecordingRefused`].
+    RecordingRefused,
+    /// [`Event::RecordBufferLow`].
+    RecordBufferLow,
+    /// [`Event::Clipped`].
+    Clipped,
+    /// [`Event::Xrun`].
+    Xrun,
+    /// [`Event::TempoRejected`].
+    TempoRejected,
+    /// [`Event::SnapshotComplete`].
+    SnapshotComplete,
+}
+
+impl EventKind {
+    /// Every kind, in the order they index a per-kind count.
+    pub const ALL: [Self; 13] = [
+        Self::SlotChanged,
+        Self::Bar,
+        Self::Clock,
+        Self::Beat,
+        Self::ClipRecorded,
+        Self::ClipReleased,
+        Self::Tempo,
+        Self::RecordingRefused,
+        Self::RecordBufferLow,
+        Self::Clipped,
+        Self::Xrun,
+        Self::TempoRejected,
+        Self::SnapshotComplete,
+    ];
+
+    /// How many kinds there are.
+    pub const COUNT: usize = Self::ALL.len();
+
+    /// Its place in a per-kind count.
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    /// Whether [`crate::Command::Resync`] puts a lost one right.
+    ///
+    /// A resync republishes every pad's state and the tempo the transport is actually
+    /// running at. The rest are transient or carry their own recovery.
+    pub fn is_replayed(self) -> bool {
+        matches!(self, Self::SlotChanged | Self::Tempo | Self::TempoRejected)
+    }
+
+    /// What to call one of these when saying which reports were lost.
+    ///
+    /// Singular, and takes a plain `s` in the plural.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::SlotChanged => "slot change",
+            Self::Bar => "bar",
+            Self::Clock => "clock tick",
+            Self::Beat => "beat",
+            Self::ClipRecorded => "recording",
+            Self::ClipReleased => "clip release",
+            Self::Tempo => "tempo report",
+            Self::RecordingRefused => "recording refusal",
+            Self::RecordBufferLow => "buffer warning",
+            Self::Clipped => "clipping report",
+            Self::Xrun => "short capture report",
+            Self::TempoRejected => "tempo refusal",
+            Self::SnapshotComplete => "snapshot completion",
+        }
+    }
+}
+
+impl Event {
+    /// Which report this is.
+    pub fn kind(&self) -> EventKind {
+        match self {
+            Self::SlotChanged { .. } => EventKind::SlotChanged,
+            Self::Bar { .. } => EventKind::Bar,
+            Self::Clock { .. } => EventKind::Clock,
+            Self::Beat { .. } => EventKind::Beat,
+            Self::ClipRecorded { .. } => EventKind::ClipRecorded,
+            Self::ClipReleased { .. } => EventKind::ClipReleased,
+            Self::Tempo { .. } => EventKind::Tempo,
+            Self::RecordingRefused { .. } => EventKind::RecordingRefused,
+            Self::RecordBufferLow { .. } => EventKind::RecordBufferLow,
+            Self::Clipped { .. } => EventKind::Clipped,
+            Self::Xrun { .. } => EventKind::Xrun,
+            Self::TempoRejected => EventKind::TempoRejected,
+            Self::SnapshotComplete { .. } => EventKind::SnapshotComplete,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_kind_has_its_own_index() {
+        for (index, kind) in EventKind::ALL.iter().enumerate() {
+            assert_eq!(kind.index(), index, "{kind:?} is out of place");
+        }
+    }
+
+    #[test]
+    fn a_resync_covers_the_state_the_controller_mirrors() {
+        assert!(EventKind::SlotChanged.is_replayed());
+        assert!(EventKind::Tempo.is_replayed());
+        assert!(EventKind::TempoRejected.is_replayed());
+        assert!(!EventKind::Beat.is_replayed(), "the next beat corrects it");
+        assert!(!EventKind::Clock.is_replayed(), "the total corrects itself");
+    }
+}
