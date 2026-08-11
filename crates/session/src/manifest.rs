@@ -1,6 +1,9 @@
 //! What a session records besides its audio.
 
-use free_loop_core::{IndexOutOfRange, SlotAddr, SlotId, TrackId, UNITY_STEP};
+use free_loop_core::{
+    GAIN_STEPS, IndexOutOfRange, SLOT_COUNT, SlotAddr, SlotId, TRACK_COUNT, TrackId, UNITY_STEP,
+    pad_bit,
+};
 use serde::{Deserialize, Serialize};
 
 /// Level for a clip saved before levels were recorded.
@@ -96,6 +99,66 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    /// Whether this file describes something loadable.
+    ///
+    /// Checked before anything is allocated, since the numbers in here decide how much.
+    ///
+    /// # Errors
+    ///
+    /// A short reason if the file is self-contradictory or asks for more than is possible.
+    pub fn validate(&self, max_frames: u64) -> Result<(), &'static str> {
+        if self.clips.len() > TRACK_COUNT * SLOT_COUNT {
+            return Err("more clips than the grid has pads");
+        }
+
+        let mut seen = 0_u64;
+        for entry in &self.clips {
+            let addr = entry.addr().map_err(|_| "a clip is off the grid")?;
+            let bit = pad_bit(addr);
+            if seen & bit != 0 {
+                return Err("two clips on one pad");
+            }
+            seen |= bit;
+
+            if entry.len_frames == 0 {
+                return Err("a clip has no length");
+            }
+            if entry.len_frames > max_frames {
+                return Err("a clip is longer than the loader allows");
+            }
+            if entry.phase_frames >= entry.len_frames {
+                return Err("a clip's phase is outside its own length");
+            }
+            if entry
+                .launch_phase_frames
+                .is_some_and(|at| at >= entry.len_frames)
+            {
+                return Err("a clip's launch phase is outside its own length");
+            }
+            if usize::from(entry.gain_step) >= GAIN_STEPS {
+                return Err("a clip's level is off the ladder");
+            }
+        }
+
+        let mut tracks = 0_u32;
+        for entry in &self.tracks {
+            if usize::from(entry.track) >= TRACK_COUNT {
+                return Err("a track entry is off the grid");
+            }
+            let bit = 1_u32 << entry.track;
+            if tracks & bit != 0 {
+                return Err("two entries for one track");
+            }
+            tracks |= bit;
+
+            if entry.input > SLOT_COUNT {
+                return Err("a track's input is not a column");
+            }
+        }
+
+        Ok(())
+    }
+
     /// The audio file name for a pad.
     pub fn file_name(addr: SlotAddr) -> String {
         format!("t{}s{}.wav", addr.track.index(), addr.slot.index())
@@ -153,6 +216,69 @@ mod tests {
         let mut entry = manifest().clips[0].clone();
         entry.track = 9;
         assert!(entry.addr().is_err());
+    }
+
+    #[test]
+    fn a_sound_manifest_validates() {
+        assert!(manifest().validate(48_000 * 60).is_ok());
+    }
+
+    #[test]
+    fn two_clips_on_one_pad_are_refused() {
+        let mut broken = manifest();
+        broken.clips.push(broken.clips[0].clone());
+        assert_eq!(broken.validate(48_000 * 60), Err("two clips on one pad"));
+    }
+
+    #[test]
+    fn a_length_beyond_the_ceiling_is_refused() {
+        let mut broken = manifest();
+        broken.clips[0].len_frames = u64::MAX;
+        assert!(broken.validate(48_000 * 60).is_err(), "would size the pool");
+    }
+
+    #[test]
+    fn a_phase_outside_the_clip_is_refused() {
+        let mut broken = manifest();
+        broken.clips[0].phase_frames = broken.clips[0].len_frames;
+        assert!(broken.validate(48_000 * 60).is_err());
+
+        let mut broken = manifest();
+        broken.clips[0].launch_phase_frames = Some(broken.clips[0].len_frames + 1);
+        assert!(broken.validate(48_000 * 60).is_err());
+    }
+
+    #[test]
+    fn a_level_off_the_ladder_is_refused() {
+        let mut broken = manifest();
+        broken.clips[0].gain_step = 200;
+        assert!(broken.validate(48_000 * 60).is_err());
+    }
+
+    #[test]
+    fn two_entries_for_one_track_are_refused() {
+        let mut broken = manifest();
+        let entry = TrackEntry {
+            track: 3,
+            input: 1,
+            restart: false,
+        };
+        broken.tracks = vec![entry, entry];
+        assert_eq!(
+            broken.validate(48_000 * 60),
+            Err("two entries for one track")
+        );
+    }
+
+    #[test]
+    fn a_track_off_the_grid_is_refused() {
+        let mut broken = manifest();
+        broken.tracks = vec![TrackEntry {
+            track: 99,
+            input: 0,
+            restart: false,
+        }];
+        assert!(broken.validate(48_000 * 60).is_err());
     }
 
     #[test]
