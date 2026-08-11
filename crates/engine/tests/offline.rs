@@ -1356,6 +1356,77 @@ mod starvation {
     }
 }
 
+mod inputs {
+    use super::*;
+    use free_loop_core::TrackInput;
+
+    fn set(harness: &mut Harness, track: usize, input: TrackInput) {
+        let mut inputs = [TrackInput::Stereo; free_loop_core::TRACK_COUNT];
+        inputs[track] = input;
+        harness.command(Command::SetInputs(inputs));
+    }
+
+    /// Every frame of `out`, as (channel 0, channel 1) pairs.
+    fn pairs(out: &[f32]) -> Vec<(f32, f32)> {
+        out.chunks_exact(CHANNELS).map(|f| (f[0], f[1])).collect()
+    }
+
+    #[test]
+    fn a_track_set_to_one_input_records_it_on_both_channels() {
+        let mut harness = Harness::new(128);
+        let pad = addr(0, 0);
+        set(&mut harness, 0, TrackInput::Mono(1));
+        let (start, end) = record(&mut harness, pad, 0, 1);
+        let len = end - start;
+
+        let from = harness.position();
+        let out = harness.run_to(from + len);
+        for (i, (left, right)) in pairs(&out).into_iter().enumerate() {
+            let frame = from + i as u64;
+            let played = signal(start + (frame - start) % len, 1);
+            assert_eq!(left, played, "frame {frame} left");
+            assert_eq!(right, played, "frame {frame} right");
+        }
+    }
+
+    #[test]
+    fn the_stereo_default_keeps_the_channels_apart() {
+        let mut harness = Harness::new(128);
+        let (start, end) = record(&mut harness, addr(0, 0), 0, 1);
+
+        let phase = (harness.position() - start) % (end - start);
+        let out = harness.run_frames(64);
+        let (left, right) = pairs(&out)[0];
+        assert_eq!(left, signal(start + phase, 0));
+        assert_eq!(right, signal(start + phase, 1), "not a copy of the left");
+    }
+
+    #[test]
+    fn a_take_keeps_the_input_it_started_on() {
+        let mut harness = Harness::new(128);
+        let pad = addr(0, 0);
+        set(&mut harness, 0, TrackInput::Mono(1));
+
+        harness.command(Command::Press(pad));
+        harness.run_to(BAR / 2);
+        // Changed mid take, which the take in progress must not pick up.
+        set(&mut harness, 0, TrackInput::Mono(0));
+        harness.run_to(BAR);
+        harness.command(Command::Press(pad));
+        harness.run_to(BAR + 1);
+
+        let phase = harness.position() % BAR;
+        let out = harness.run_frames(64);
+        let (left, right) = pairs(&out)[0];
+        assert_eq!(left, right, "a mono take is the same on both");
+        assert_eq!(
+            left,
+            signal(phase, 1),
+            "still input 1, not the one set later"
+        );
+    }
+}
+
 mod declick {
     use super::*;
     use free_loop_core::row_mask;

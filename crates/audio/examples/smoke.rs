@@ -73,6 +73,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         capture_offset: Frames::ZERO,
         click: ClickConfig::default(),
         declick: free_loop_engine::DEFAULT_DECLICK,
+        input: free_loop_core::TrackInput::default(),
     })?;
     let frames_per_bar = engine.grid().frames_per_bar().0;
 

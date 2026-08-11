@@ -199,3 +199,33 @@ mod tests {
         }
     }
 }
+
+/// Which input a track records.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TrackInput {
+    /// Input channels in order, so a stereo source stays stereo.
+    #[default]
+    Stereo,
+    /// One input channel on every channel of the clip.
+    Mono(u8),
+}
+
+impl TrackInput {
+    /// The column that stands for this input on a row of pads.
+    ///
+    /// Column zero is the stereo pair; the rest are one input each.
+    pub fn column(self) -> usize {
+        match self {
+            Self::Stereo => 0,
+            Self::Mono(channel) => usize::from(channel) + 1,
+        }
+    }
+
+    /// The input a column stands for.
+    pub fn from_column(column: usize) -> Self {
+        match column {
+            0 => Self::Stereo,
+            other => Self::Mono(u8::try_from(other - 1).unwrap_or(u8::MAX)),
+        }
+    }
+}

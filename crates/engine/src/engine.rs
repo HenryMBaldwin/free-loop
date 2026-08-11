@@ -10,8 +10,8 @@
 
 use free_loop_core::{
     BarGrid, ClipId, Command, Ctx, Effect, Event, Frames, MIN_BPM, PadMask, SLOT_COUNT, SampleRate,
-    SessionModel, SlotAddr, SlotState, TRACK_COUNT, Tempo, TimeError, TimeSignature, UNITY_STEP,
-    gain_for_step, pad_bit,
+    SessionModel, SlotAddr, SlotState, TRACK_COUNT, Tempo, TimeError, TimeSignature, TrackInput,
+    UNITY_STEP, gain_for_step, pad_bit,
 };
 
 use std::sync::Arc;
@@ -112,6 +112,8 @@ pub struct EngineConfig {
     pub capture_offset: Frames,
     /// Click settings.
     pub click: ClickConfig,
+    /// Input every track starts on.
+    pub input: TrackInput,
     /// Frames a level takes to travel the full gain range. Zero switches instead.
     pub declick: Frames,
 }
@@ -133,6 +135,7 @@ impl EngineConfig {
             capture_offset: Frames::ZERO,
             click: ClickConfig::default(),
             declick: DEFAULT_DECLICK,
+            input: TrackInput::default(),
         })
     }
 }
@@ -162,6 +165,8 @@ impl EventSink for Vec<Event> {
 struct Recording {
     /// Frames of transport elapsed since capture began, written or not.
     frames: u64,
+    /// The input this take is capturing, fixed when it began.
+    input: TrackInput,
     /// Whether the segment pool ran dry part way through.
     starved: bool,
 }
@@ -182,6 +187,8 @@ struct Audio {
     next_clip_id: ClipId,
     /// Copy of [`Engine::capture_offset`], since effects are applied from here.
     capture_offset: Frames,
+    /// Copy of [`Engine::inputs`], for the same reason.
+    inputs: [TrackInput; TRACK_COUNT],
 }
 
 impl Audio {
@@ -248,6 +255,7 @@ impl Audio {
                     self.recordings[addr.track.index()][addr.slot.index()] = Some(Recording {
                         frames: 0,
                         starved: false,
+                        input: self.inputs[addr.track.index()],
                     });
                 }
             }
@@ -332,6 +340,8 @@ pub struct Engine {
     soloed: PadMask,
     /// How loud each track plays, as a step on the gain ladder.
     gains: [u8; TRACK_COUNT],
+    /// Which input each track records.
+    inputs: [TrackInput; TRACK_COUNT],
     /// The gain each pad is mixing at, which slides toward what it should be.
     levels: [[f32; SLOT_COUNT]; TRACK_COUNT],
     /// Frames a level takes to travel the full gain range.
@@ -398,6 +408,7 @@ impl Engine {
                 snapshots,
                 next_clip_id: ClipId(0),
                 capture_offset: config.capture_offset,
+                inputs: [config.input; TRACK_COUNT],
             },
             click: Click::new(config.click, config.sample_rate),
             loads,
@@ -407,6 +418,7 @@ impl Engine {
             muted: 0,
             soloed: 0,
             gains: [UNITY_STEP; TRACK_COUNT],
+            inputs: [config.input; TRACK_COUNT],
             levels: [[0.0; SLOT_COUNT]; TRACK_COUNT],
             declick: as_usize(config.declick.0),
             pending: None,
@@ -561,6 +573,11 @@ impl Engine {
                 self.soloed = soloed;
             }
             Command::SetGains(gains) => self.gains = gains,
+            // Takes in progress keep the input they started on.
+            Command::SetInputs(inputs) => {
+                self.inputs = inputs;
+                self.audio.inputs = inputs;
+            }
             Command::ClearAll => self.defer(Deferred::ClearAll, sink),
             Command::Rewind => self.defer(Deferred::Rewind, sink),
             Command::Snapshot => self.publish_snapshot(sink),
@@ -916,6 +933,7 @@ impl Engine {
         //
         // A device that delivers nothing at all leaves `input` empty, so the range can
         // start past its end.
+        let channels = self.channels;
         let available = input_frames.saturating_sub(offset).min(run);
         let captured = input
             .get(offset * self.channels..(offset + available) * self.channels)
@@ -936,7 +954,16 @@ impl Engine {
                 .as_mut()
                 .and_then(Arc::get_mut)
                 .filter(|_| available > 0)
-                .map_or(0, |clip| clip.write(recording.frames, captured, segments));
+                .map_or(0, |clip| match recording.input {
+                    TrackInput::Stereo => clip.write(recording.frames, captured, segments),
+                    TrackInput::Mono(channel) => clip.write_channel(
+                        recording.frames,
+                        captured,
+                        channels,
+                        usize::from(channel),
+                        segments,
+                    ),
+                });
 
             if available > 0 && written < available && !recording.starved {
                 recording.starved = true;
