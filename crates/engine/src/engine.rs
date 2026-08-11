@@ -273,6 +273,9 @@ impl Audio {
     /// Borrowed storage always goes back to whoever supplied it, so repeated loads cannot
     /// grow the engine's pools.
     fn retire(&mut self, mut clip: Arc<Clip>) {
+        if clip.is_borrowed() {
+            self.segments.release(clip.segments());
+        }
         let mine = !clip.is_borrowed() && self.shells.len() < TRACK_COUNT * SLOT_COUNT;
         match Arc::get_mut(&mut clip).filter(|_| mine) {
             Some(inner) => {
@@ -881,6 +884,9 @@ impl Engine {
             };
             let id = audio.next_clip_id;
             audio.next_clip_id = id.next();
+            // Loaded audio is stored outside the pool but counts against it, so the grid
+            // is bounded by one number however it got there.
+            audio.segments.reserve(staged.clip.segments());
             audio.put_clip(addr, staged.clip);
             audio.anchors[addr.track.index()][addr.slot.index()] = staged.launch_anchor;
             session.mirror(

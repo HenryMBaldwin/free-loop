@@ -77,6 +77,13 @@ impl Ramp {
     }
 }
 
+/// Segments `frames` of audio occupies, rounded up the way storage is allocated.
+///
+/// The one definition of that rounding, so recording, saving and loading agree.
+pub fn segments_for(frames: Frames) -> usize {
+    as_usize(frames.0.div_ceil(SEGMENT_FRAMES_U64))
+}
+
 /// Splits a frame position into a segment index and an offset within it.
 fn split(frame: u64) -> (usize, usize) {
     (
@@ -101,10 +108,15 @@ impl Segment {
 }
 
 /// A pool of segments, drawn from and returned to without allocating.
+///
+/// Capacity can be held back for audio the pool did not allocate, so it counts against
+/// the same ceiling.
 #[derive(Debug)]
 pub struct SegmentPool {
     free: Vec<Segment>,
     channels: usize,
+    /// Segments accounted to storage held elsewhere, which are never handed out.
+    reserved: usize,
 }
 
 impl SegmentPool {
@@ -113,12 +125,30 @@ impl SegmentPool {
         Self {
             free: (0..count).map(|_| Segment::new(channels)).collect(),
             channels,
+            reserved: 0,
         }
     }
 
-    /// Segments currently available.
+    /// Segments currently available, which is what is free less what is reserved.
     pub fn available(&self) -> usize {
-        self.free.len()
+        self.free.len().saturating_sub(self.reserved)
+    }
+
+    /// Holds `count` segments back for audio stored outside the pool.
+    ///
+    /// Clamped to the pool's size, so a reservation can empty it but not overdraw it.
+    pub fn reserve(&mut self, count: usize) {
+        self.reserved = self.reserved.saturating_add(count).min(self.free.len());
+    }
+
+    /// Gives `count` reserved segments back.
+    pub fn release(&mut self, count: usize) {
+        self.reserved = self.reserved.saturating_sub(count);
+    }
+
+    /// Segments held back for storage the pool did not allocate.
+    pub fn reserved(&self) -> usize {
+        self.reserved
     }
 
     /// Channel count every segment in this pool was allocated for.
@@ -127,6 +157,9 @@ impl SegmentPool {
     }
 
     fn take(&mut self) -> Option<Segment> {
+        if self.free.len() <= self.reserved {
+            return None;
+        }
         self.free.pop()
     }
 
@@ -291,6 +324,11 @@ impl Clip {
     /// Length of the loop.
     pub fn len(&self) -> Frames {
         self.len
+    }
+
+    /// Segments this clip's audio costs, wherever its storage came from.
+    pub fn segments(&self) -> usize {
+        segments_for(self.len)
     }
 
     /// The transport position capture began at. Fixes the loop's phase against the grid.
@@ -503,6 +541,52 @@ mod tests {
         let mut out = vec![0.0; 200 * CH];
         clip.mix_into(Frames(at), &mut out, Ramp::UNITY);
         assert_eq!(out, src);
+    }
+
+    #[test]
+    fn a_reservation_takes_segments_out_of_reach() {
+        let mut pool = SegmentPool::new(4, CH);
+        pool.reserve(3);
+        assert_eq!(pool.available(), 1);
+        assert_eq!(pool.reserved(), 3);
+
+        let mut buffer = AudioBuffer::new(4, CH);
+        let src = ramp(SEGMENT_FRAMES + 10, 0);
+        assert_eq!(
+            buffer.write(0, &src, &mut pool),
+            SEGMENT_FRAMES,
+            "one segment, then the reservation stops it"
+        );
+        assert_eq!(pool.available(), 0);
+    }
+
+    #[test]
+    fn releasing_a_reservation_puts_the_segments_back() {
+        let mut pool = SegmentPool::new(4, CH);
+        pool.reserve(4);
+        assert_eq!(pool.available(), 0);
+
+        pool.release(4);
+        assert_eq!(pool.available(), 4);
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    #[test]
+    fn a_reservation_stops_at_the_pool_size() {
+        let mut pool = SegmentPool::new(2, CH);
+        pool.reserve(100);
+        assert_eq!(pool.reserved(), 2, "it cannot owe segments");
+
+        pool.release(2);
+        assert_eq!(pool.available(), 2);
+    }
+
+    #[test]
+    fn a_clip_costs_whole_segments() {
+        assert_eq!(segments_for(Frames(0)), 0);
+        assert_eq!(segments_for(Frames(1)), 1);
+        assert_eq!(segments_for(Frames(SEGMENT_FRAMES as u64)), 1);
+        assert_eq!(segments_for(Frames(SEGMENT_FRAMES as u64 + 1)), 2);
     }
 
     #[test]
