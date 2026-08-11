@@ -183,7 +183,6 @@ impl Controller {
             beats_per_bar,
             click_enabled,
             paused: false,
-            device_lost: false,
             axis: Axis::Row,
             muted: 0,
             soloed: 0,
@@ -236,16 +235,9 @@ impl Controller {
         self.chrome.paused
     }
 
-    /// Marks the audio device as gone, which the transport button shows until it is back.
-    pub fn device_lost(&mut self) {
-        self.chrome.device_lost = true;
-        self.dirty = true;
-    }
-
-    /// Takes the mark off once the device is running again.
-    pub fn device_back(&mut self) {
-        self.chrome.device_lost = false;
-        self.dirty = true;
+    /// Says on the grid that the audio device has gone away.
+    pub fn device_lost(&mut self, now: Duration) {
+        self.show(LedColor::Red, now, Some("NO AUDIO".to_owned()));
     }
 
     /// Freezes the transport without a press, for something the performer did not ask for.
@@ -1512,25 +1504,19 @@ mod tests {
     }
 
     #[test]
-    fn a_device_that_went_away_is_told_apart_from_a_press() {
+    fn a_lost_device_says_so_after_the_red() {
         let mut controller = controller();
-        let by_hand = paint::pause_button(Chrome {
-            paused: true,
-            ..Chrome::default()
-        });
+        controller.device_lost(T0);
 
-        controller.pause();
-        controller.device_lost();
         let frame = controller.take_frame().unwrap();
-        assert_ne!(
-            frame.side(PAUSE_SIDE),
-            by_hand,
-            "not the same as pausing it"
+        assert!(SlotAddr::all().all(|a| frame.pad(a) == Led::solid(LedColor::Red)));
+        assert_eq!(controller.take_text(), None, "nothing over the answer yet");
+
+        controller.tick(T0 + RESULT_FLASH);
+        assert_eq!(
+            controller.take_text(),
+            Some(TextUpdate::Show("NO AUDIO".to_owned()))
         );
-
-        controller.device_back();
-        let frame = controller.take_frame().unwrap();
-        assert_eq!(frame.side(PAUSE_SIDE), by_hand, "and back to a plain pause");
     }
 
     #[test]
