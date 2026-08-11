@@ -600,6 +600,13 @@ fn report(event: Event) {
             );
         }
 
+        Event::RecordingRefused { addr } => {
+            eprintln!(
+                "no recording space free for track {} slot {}; the pad is left empty",
+                addr.track.index(),
+                addr.slot.index()
+            );
+        }
         Event::RecordBufferLow { addr } => {
             eprintln!(
                 "out of recording space on track {} slot {}",

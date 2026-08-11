@@ -196,6 +196,8 @@ struct Audio {
     launch_modes: [LaunchMode; TRACK_COUNT],
     /// Where a launch put each pad's clip, for the pads whose track restarts them.
     anchors: [[Option<Frames>; SLOT_COUNT]; TRACK_COUNT],
+    /// A pad whose capture could not be given storage, for the engine to put back.
+    refused: Option<SlotAddr>,
 }
 
 impl Audio {
@@ -261,15 +263,18 @@ impl Audio {
         match effect {
             Effect::StartCapture { .. } => {
                 // The shell pool holds one clip per pad, so this only comes up empty when
-                // the recycler is behind.
-                if let Some(shell) = self.shells.pop() {
-                    self.clips[addr.track.index()][addr.slot.index()] = Some(shell);
-                    self.recordings[addr.track.index()][addr.slot.index()] = Some(Recording {
-                        frames: 0,
-                        starved: false,
-                        input: self.inputs[addr.track.index()],
-                    });
-                }
+                // the recycler is behind. The slot is put back rather than left claiming
+                // to hold a take it has nowhere to write.
+                let Some(shell) = self.shells.pop() else {
+                    self.refused = Some(addr);
+                    return;
+                };
+                self.clips[addr.track.index()][addr.slot.index()] = Some(shell);
+                self.recordings[addr.track.index()][addr.slot.index()] = Some(Recording {
+                    frames: 0,
+                    starved: false,
+                    input: self.inputs[addr.track.index()],
+                });
             }
 
             Effect::FinishCapture {
@@ -435,6 +440,7 @@ impl Engine {
                 inputs: [config.input; TRACK_COUNT],
                 launch_modes: [config.launch_mode; TRACK_COUNT],
                 anchors: core::array::from_fn(|_| core::array::from_fn(|_| None)),
+                refused: None,
             },
             click: Click::new(config.click, config.sample_rate),
             loads,
@@ -604,7 +610,20 @@ impl Engine {
             Command::SetTempo(tempo) => self.set_tempo(tempo, sink),
         }
 
+        self.settle_refusals(sink);
         self.emit_changes(&before, sink);
+    }
+
+    /// Empties any pad that was armed but could not be given storage.
+    fn settle_refusals(&mut self, sink: &mut impl EventSink) {
+        let Some(addr) = self.audio.refused.take() else {
+            return;
+        };
+        let ctx = self.ctx();
+        self.with_session(|session, audio| {
+            session.clear(addr, &ctx, &mut |a, e| audio.apply(a, e, sink));
+        });
+        sink.event(Event::RecordingRefused { addr });
     }
 
     /// Queues a transport move behind a fade. With no ramp it lands at once.
@@ -945,6 +964,7 @@ impl Engine {
         self.with_session(|session, audio| {
             session.advance(&ctx, &mut |a, e| audio.apply(a, e, sink));
         });
+        self.settle_refusals(sink);
         self.emit_changes(&before, sink);
     }
 
