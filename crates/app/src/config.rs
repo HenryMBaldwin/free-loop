@@ -217,13 +217,13 @@ impl Config {
         }
     }
 
-    /// The most audio a loaded session may hold.
+    /// The most segments a loaded session may hold.
     ///
     /// A session brings its own storage, so the engine's pools do not bound it. This does,
-    /// and it is expressed in the same currency: as many frames as the recording pool holds.
-    pub fn load_budget(&self) -> free_loop_core::Frames {
-        let per_segment = free_loop_engine::SEGMENT_FRAMES as u64;
-        free_loop_core::Frames(self.engine.segment_pool as u64 * per_segment)
+    /// counted the way the loader allocates: one buffer per clip, each rounded up to whole
+    /// segments.
+    pub fn load_budget(&self) -> usize {
+        self.engine.segment_pool
     }
 
     /// Where every track's clips start out being anchored.
@@ -343,9 +343,9 @@ mod tests {
     fn the_load_budget_follows_the_recording_pool() {
         let config = Config::parse("[engine]\nsegment_pool = 4\n").unwrap();
         assert_eq!(
-            config.load_budget().0,
-            4 * free_loop_engine::SEGMENT_FRAMES as u64,
-            "a load may hold as much as a recording could"
+            config.load_budget(),
+            4,
+            "a load may hold as many segments as a recording could"
         );
     }
 

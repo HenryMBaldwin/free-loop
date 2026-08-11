@@ -102,14 +102,11 @@ impl Manifest {
     /// Whether this file describes something loadable.
     ///
     /// Checked before anything is allocated, since the numbers in here decide how much.
-    /// `max_frames` bounds the whole session rather than one clip, because every clip is
-    /// held at once.
-    ///
     /// # Errors
     ///
-    /// A short reason if the file is self-contradictory or asks for more than is possible.
-    pub fn validate(&self, max_frames: u64) -> Result<(), &'static str> {
-        let mut total = 0_u64;
+    /// A short reason if the file is self-contradictory. How much storage it asks for is
+    /// bounded separately, in the currency the loader allocates in.
+    pub fn validate(&self) -> Result<(), &'static str> {
         if self.clips.len() > TRACK_COUNT * SLOT_COUNT {
             return Err("more clips than the grid has pads");
         }
@@ -126,10 +123,7 @@ impl Manifest {
             if entry.len_frames == 0 {
                 return Err("a clip has no length");
             }
-            total = total.saturating_add(entry.len_frames);
-            if total > max_frames {
-                return Err("the session holds more audio than the loader allows");
-            }
+
             if entry.phase_frames >= entry.len_frames {
                 return Err("a clip's phase is outside its own length");
             }
@@ -224,55 +218,32 @@ mod tests {
 
     #[test]
     fn a_sound_manifest_validates() {
-        assert!(manifest().validate(48_000 * 60).is_ok());
+        assert!(manifest().validate().is_ok());
     }
 
     #[test]
     fn two_clips_on_one_pad_are_refused() {
         let mut broken = manifest();
         broken.clips.push(broken.clips[0].clone());
-        assert_eq!(broken.validate(48_000 * 60), Err("two clips on one pad"));
-    }
-
-    #[test]
-    fn a_length_beyond_the_ceiling_is_refused() {
-        let mut broken = manifest();
-        broken.clips[0].len_frames = u64::MAX;
-        assert!(broken.validate(48_000 * 60).is_err(), "would size the pool");
-    }
-
-    #[test]
-    fn clips_that_only_add_up_to_too_much_are_refused() {
-        let mut broken = manifest();
-        let one = broken.clips[0].clone();
-        // Each is inside the ceiling; together they are not.
-        for slot in 1..8 {
-            let mut next = one.clone();
-            next.slot = slot;
-            broken.clips.push(next);
-        }
-        assert!(
-            broken.validate(one.len_frames * 4).is_err(),
-            "every clip is held at once"
-        );
+        assert_eq!(broken.validate(), Err("two clips on one pad"));
     }
 
     #[test]
     fn a_phase_outside_the_clip_is_refused() {
         let mut broken = manifest();
         broken.clips[0].phase_frames = broken.clips[0].len_frames;
-        assert!(broken.validate(48_000 * 60).is_err());
+        assert!(broken.validate().is_err());
 
         let mut broken = manifest();
         broken.clips[0].launch_phase_frames = Some(broken.clips[0].len_frames + 1);
-        assert!(broken.validate(48_000 * 60).is_err());
+        assert!(broken.validate().is_err());
     }
 
     #[test]
     fn a_level_off_the_ladder_is_refused() {
         let mut broken = manifest();
         broken.clips[0].gain_step = 200;
-        assert!(broken.validate(48_000 * 60).is_err());
+        assert!(broken.validate().is_err());
     }
 
     #[test]
@@ -284,10 +255,7 @@ mod tests {
             restart: false,
         };
         broken.tracks = vec![entry, entry];
-        assert_eq!(
-            broken.validate(48_000 * 60),
-            Err("two entries for one track")
-        );
+        assert_eq!(broken.validate(), Err("two entries for one track"));
     }
 
     #[test]
@@ -298,7 +266,7 @@ mod tests {
             input: 0,
             restart: false,
         }];
-        assert!(broken.validate(48_000 * 60).is_err());
+        assert!(broken.validate().is_err());
     }
 
     #[test]
