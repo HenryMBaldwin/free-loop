@@ -72,9 +72,8 @@ pub trait ControlSurface {
 
     /// Passes on MIDI clock ticks, if the device uses them.
     ///
-    /// `ticks` is how many pulses the device has still to be given, not a total: a device
-    /// keeps no count and one that has been away cannot be caught up. Devices that animate
-    /// to their own clock ignore them.
+    /// `ticks` is how many pulses the device has still to be given, not a total. Devices
+    /// that animate to their own clock ignore them.
     ///
     /// # Errors
     ///

@@ -1055,7 +1055,7 @@ impl Engine {
     /// Takes the clock count from wherever the transport now is.
     ///
     /// Called after anything that moves the transport other than playing. The running
-    /// total is left alone: a move produces no pulses.
+    /// total is left alone.
     fn resync_clock(&mut self) {
         self.last_clock = self.grid.clock_ticks_at(self.position);
     }

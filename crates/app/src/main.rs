@@ -242,8 +242,7 @@ fn run(s: Session<'_>) {
         // Storage the engine has finished with comes back here to be dropped.
         housekeeping.recycler.take_borrowed().for_each(drop);
 
-        // Ahead of the commands, and never refused: the slot holds one value, so there is
-        // nothing to drop.
+        // Ahead of the commands, and never refused.
         if let Some(settings) = controller.take_settings() {
             io.publish_settings(settings);
         }
@@ -747,7 +746,6 @@ fn drain_engine(io: &mut AudioIo, controller: &mut Controller) -> Drained {
                 clips,
                 expected,
             } => drained.answered = Some((request, clips, expected)),
-            // The latest total covers every one before it, dropped or drained.
             Event::Clock { total } => drained.clock_total = Some(total),
             Event::Clipped { samples } => drained.clipped += samples,
             Event::Xrun { frames } => drained.short_frames += frames,
@@ -762,8 +760,7 @@ fn drain_engine(io: &mut AudioIo, controller: &mut Controller) -> Drained {
 /// Asks the engine to report every pad again if a report a resync repairs was lost.
 ///
 /// The controller paints from a mirror kept in step by those reports. Kinds a resync
-/// cannot repair are said aloud and otherwise left: a lost beat is corrected by the next
-/// one, and a lost clock report by the running total the one after it carries.
+/// cannot repair are reported and otherwise left.
 fn resync_after_loss(io: &mut AudioIo, seen: DroppedEvents) -> DroppedEvents {
     let dropped = io.dropped_events();
     if dropped == seen {

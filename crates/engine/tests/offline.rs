@@ -35,7 +35,7 @@ struct Harness {
     housekeeping: Housekeeping,
     events: Vec<Event>,
     block: usize,
-    /// What the engine has been told, so one setting can be changed at a time.
+    /// What the engine has been told.
     settings: Settings,
 }
 
@@ -202,7 +202,6 @@ fn a_discarded_clock_report_costs_no_ticks() {
     let seen = clock_totals(&mut harness).last().copied().unwrap();
     assert_eq!(seen, TICKS_PER_BAR / 2);
 
-    // Thrown away the way a full event ring throws them.
     harness.run_to(BAR - 1_000);
     harness.drain_events();
 

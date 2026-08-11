@@ -3,7 +3,7 @@
 use crate::gain::UNITY_STEP;
 use crate::ids::{LaunchMode, PadMask, TRACK_COUNT, TrackInput};
 
-/// Everything the controller sets outright rather than by increment.
+/// Everything the controller sets as a whole value.
 ///
 /// Delivered latest-wins: an unread copy is replaced, not queued.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
