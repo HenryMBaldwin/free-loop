@@ -847,10 +847,11 @@ fn report(event: Event) {
             );
         }
         Event::TempoRejected => eprintln!("tempo is locked while clips exist"),
-        Event::Tempo { bpm } => println!("transport is at {bpm:.1} bpm"),
         // Clipping and short capture report per block, too often to print. `ClipReport`
-        // and `XrunReport` throttle them.
-        Event::Clipped { .. }
+        // and `XrunReport` throttle them. The tempo reports on every nudge, which a held
+        // button repeats eight times a second; the controller wants it, a reader does not.
+        Event::Tempo { .. }
+        | Event::Clipped { .. }
         | Event::Xrun { .. }
         | Event::SnapshotComplete { .. }
         | Event::Clock { .. }
@@ -863,11 +864,7 @@ fn report(event: Event) {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::unnecessary_wraps,
-        reason = "tests should fail loudly, and build the state under test directly"
-    )]
+    #![allow(clippy::unwrap_used, reason = "tests should fail loudly")]
 
     use super::*;
 
@@ -880,8 +877,8 @@ mod tests {
         )
     }
 
-    fn waiting(request: u32) -> Option<PendingSave> {
-        Some(PendingSave {
+    fn waiting(request: u32) -> PendingSave {
+        PendingSave {
             deadline: DEADLINE,
             request,
             addr: pad(1, 2),
@@ -890,12 +887,12 @@ mod tests {
                 gains: [free_loop_core::UNITY_STEP; free_loop_core::TRACK_COUNT],
                 tracks: [TrackSettings::default(); free_loop_core::TRACK_COUNT],
             },
-        })
+        }
     }
 
     #[test]
     fn a_save_with_no_answer_yet_keeps_waiting() {
-        let mut pending = waiting(1);
+        let mut pending = Some(waiting(1));
         let outcome = resolve_save(&mut pending, None, Duration::from_secs(1));
 
         assert!(matches!(outcome, SaveOutcome::Waiting));
@@ -904,7 +901,7 @@ mod tests {
 
     #[test]
     fn an_answer_to_this_save_finishes_it() {
-        let mut pending = waiting(7);
+        let mut pending = Some(waiting(7));
         let outcome = resolve_save(&mut pending, Some((7, 3, 3)), Duration::from_secs(1));
 
         let answered = match outcome {
@@ -918,7 +915,7 @@ mod tests {
 
     #[test]
     fn an_answer_to_a_superseded_save_is_not_this_one() {
-        let mut pending = waiting(9);
+        let mut pending = Some(waiting(9));
         let outcome = resolve_save(&mut pending, Some((8, 3, 3)), Duration::from_secs(1));
 
         assert!(matches!(outcome, SaveOutcome::Waiting));
@@ -927,7 +924,7 @@ mod tests {
 
     #[test]
     fn a_save_whose_answer_never_came_expires() {
-        let mut pending = waiting(1);
+        let mut pending = Some(waiting(1));
         let outcome = resolve_save(&mut pending, None, DEADLINE);
 
         assert!(matches!(outcome, SaveOutcome::Expired(addr) if addr == pad(1, 2)));
@@ -937,7 +934,7 @@ mod tests {
     /// The answer cannot be asked for again, so it has to win.
     #[test]
     fn an_answer_arriving_on_the_deadline_still_wins() {
-        let mut pending = waiting(4);
+        let mut pending = Some(waiting(4));
         let outcome = resolve_save(&mut pending, Some((4, 2, 2)), DEADLINE);
 
         assert!(
