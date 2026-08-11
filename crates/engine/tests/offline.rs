@@ -1455,6 +1455,39 @@ mod load_protocol {
     }
 }
 
+mod resync {
+    use super::*;
+
+    #[test]
+    fn a_resync_reports_every_pad_as_it_stands() {
+        let mut harness = Harness::new(128);
+        let playing = addr(0, 0);
+        record(&mut harness, playing, 0, 1);
+        harness.drain_events();
+
+        harness.command(Command::Resync);
+        let reported: Vec<(SlotAddr, SlotState)> = harness
+            .drain_events()
+            .iter()
+            .filter_map(|event| match event {
+                Event::SlotChanged { addr, state } => Some((*addr, *state)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            reported.len(),
+            free_loop_core::TRACK_COUNT * free_loop_core::SLOT_COUNT,
+            "every pad, not just the ones that changed"
+        );
+        let sounding = reported
+            .iter()
+            .find(|(addr, _)| *addr == playing)
+            .map(|(_, state)| *state);
+        assert!(sounding.is_some_and(SlotState::is_sounding), "as it stands");
+    }
+}
+
 mod snapshots {
     use super::*;
 
