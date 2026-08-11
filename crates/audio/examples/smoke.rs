@@ -74,6 +74,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         click: ClickConfig::default(),
         declick: free_loop_engine::DEFAULT_DECLICK,
         input: free_loop_core::TrackInput::default(),
+        launch_mode: free_loop_core::LaunchMode::default(),
     })?;
     let frames_per_bar = engine.grid().frames_per_bar().0;
 

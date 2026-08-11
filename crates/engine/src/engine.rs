@@ -9,9 +9,9 @@
 //! exact frame it was scheduled for rather than at the next block edge.
 
 use free_loop_core::{
-    BarGrid, ClipId, Command, Ctx, Effect, Event, Frames, MIN_BPM, PadMask, SLOT_COUNT, SampleRate,
-    SessionModel, SlotAddr, SlotState, TRACK_COUNT, Tempo, TimeError, TimeSignature, TrackInput,
-    UNITY_STEP, gain_for_step, pad_bit,
+    BarGrid, ClipId, Command, Ctx, Effect, Event, Frames, LaunchMode, MIN_BPM, PadMask, SLOT_COUNT,
+    SampleRate, SessionModel, SlotAddr, SlotState, TRACK_COUNT, Tempo, TimeError, TimeSignature,
+    TrackInput, UNITY_STEP, gain_for_step, pad_bit,
 };
 
 use std::sync::Arc;
@@ -114,6 +114,8 @@ pub struct EngineConfig {
     pub click: ClickConfig,
     /// Input every track starts on.
     pub input: TrackInput,
+    /// Where every track's clips start out being anchored.
+    pub launch_mode: LaunchMode,
     /// Frames a level takes to travel the full gain range. Zero switches instead.
     pub declick: Frames,
 }
@@ -136,6 +138,7 @@ impl EngineConfig {
             click: ClickConfig::default(),
             declick: DEFAULT_DECLICK,
             input: TrackInput::default(),
+            launch_mode: LaunchMode::default(),
         })
     }
 }
@@ -189,11 +192,20 @@ struct Audio {
     capture_offset: Frames,
     /// Copy of [`Engine::inputs`], for the same reason.
     inputs: [TrackInput; TRACK_COUNT],
+    /// Copy of [`Engine::launch_modes`], for the same reason.
+    launch_modes: [LaunchMode; TRACK_COUNT],
+    /// Where a launch put each pad's clip, for the pads whose track restarts them.
+    anchors: [[Option<Frames>; SLOT_COUNT]; TRACK_COUNT],
 }
 
 impl Audio {
     fn clip(&self, addr: SlotAddr) -> Option<&Arc<Clip>> {
         self.clips[addr.track.index()][addr.slot.index()].as_ref()
+    }
+
+    /// Where a pad's clip is anchored: where it was launched, or where it was recorded.
+    fn anchor(&self, addr: SlotAddr, clip: &Clip) -> Frames {
+        self.anchors[addr.track.index()][addr.slot.index()].unwrap_or_else(|| clip.recorded_at())
     }
 
     fn take_clip(&mut self, addr: SlotAddr) -> Option<Arc<Clip>> {
@@ -304,9 +316,24 @@ impl Audio {
                 sink.event(Event::ClipReleased { clip });
             }
 
-            // Playback is a function of slot state and transport position, so there is
-            // no voice to start or stop.
-            Effect::StartPlayback { .. } | Effect::StopPlayback { .. } => {}
+            Effect::StartPlayback { at, .. } => {
+                let (track, slot) = (addr.track.index(), addr.slot.index());
+                if !self.launch_modes[track].restarts() {
+                    self.anchors[track][slot] = None;
+                    return;
+                }
+
+                // Frame zero of the buffer holds audio from `capture_offset` before the
+                // take's first beat, so anchoring on `at` would play that as pre-roll.
+                let offset = self.clips[track][slot]
+                    .as_ref()
+                    .map_or(Frames::ZERO, |clip| clip.capture_offset());
+                self.anchors[track][slot] = Some(Frames(at.0.saturating_sub(offset.0)));
+            }
+
+            // Playback is otherwise a function of slot state and transport position, so
+            // there is no voice to stop.
+            Effect::StopPlayback { .. } => {}
         }
     }
 }
@@ -342,6 +369,8 @@ pub struct Engine {
     gains: [u8; TRACK_COUNT],
     /// Which input each track records.
     inputs: [TrackInput; TRACK_COUNT],
+    /// Where each track's clips are anchored when launched.
+    launch_modes: [LaunchMode; TRACK_COUNT],
     /// The gain each pad is mixing at, which slides toward what it should be.
     levels: [[f32; SLOT_COUNT]; TRACK_COUNT],
     /// Frames a level takes to travel the full gain range.
@@ -409,6 +438,8 @@ impl Engine {
                 next_clip_id: ClipId(0),
                 capture_offset: config.capture_offset,
                 inputs: [config.input; TRACK_COUNT],
+                launch_modes: [config.launch_mode; TRACK_COUNT],
+                anchors: core::array::from_fn(|_| core::array::from_fn(|_| None)),
             },
             click: Click::new(config.click, config.sample_rate),
             loads,
@@ -419,6 +450,7 @@ impl Engine {
             soloed: 0,
             gains: [UNITY_STEP; TRACK_COUNT],
             inputs: [config.input; TRACK_COUNT],
+            launch_modes: [config.launch_mode; TRACK_COUNT],
             levels: [[0.0; SLOT_COUNT]; TRACK_COUNT],
             declick: as_usize(config.declick.0),
             pending: None,
@@ -485,12 +517,7 @@ impl Engine {
         if self.pending.is_some() {
             return 0.0;
         }
-        // A queued stop keeps sounding until its boundary arrives.
-        let sounding = matches!(
-            self.session.state(addr),
-            SlotState::Playing { .. } | SlotState::QueuedStop { .. }
-        );
-        if !sounding || !self.is_audible(addr) {
+        if !self.session.state(addr).is_sounding() || !self.is_audible(addr) {
             return 0.0;
         }
         self.gain(addr.track)
@@ -578,6 +605,11 @@ impl Engine {
                 self.inputs = inputs;
                 self.audio.inputs = inputs;
             }
+            // A clip already sounding keeps the anchor it was launched with.
+            Command::SetLaunchModes(modes) => {
+                self.launch_modes = modes;
+                self.audio.launch_modes = modes;
+            }
             Command::ClearAll => self.defer(Deferred::ClearAll, sink),
             Command::Rewind => self.defer(Deferred::Rewind, sink),
             Command::Snapshot => self.publish_snapshot(sink),
@@ -653,6 +685,18 @@ impl Engine {
         self.session.retarget_pending(Frames::ZERO);
 
         for addr in SlotAddr::all() {
+            // A pad that is not sounding takes a fresh anchor when it is next launched, so
+            // there is nothing to keep.
+            let (track, slot) = (addr.track.index(), addr.slot.index());
+            self.audio.anchors[track][slot] = self.audio.anchors[track][slot]
+                .filter(|_| self.session.state(addr).is_sounding())
+                .map(|anchor| {
+                    let len = self.audio.clips[track][slot]
+                        .as_ref()
+                        .map_or(Frames::ZERO, |clip| clip.len());
+                    shifted_anchor(anchor, len, shift)
+                });
+
             let Some(clip) = self.audio.clips[addr.track.index()][addr.slot.index()].as_mut()
             else {
                 continue;
@@ -670,10 +714,24 @@ impl Engine {
     ///
     /// The longest loop, earliest first, so the choice is stable across rewinds.
     fn reference_anchor(&self) -> Frames {
+        // Sounding pads first: a pad that is silent may hold an anchor from a launch that
+        // is over, or one it has not taken yet, and neither describes what is playing.
+        let sounding = self.longest_anchor(|addr| self.session.state(addr).is_sounding());
+        sounding.unwrap_or_else(|| self.longest_anchor(|_| true).unwrap_or(Frames::ZERO))
+    }
+
+    /// The anchor of the longest clip on a pad `wanted` accepts, earliest first.
+    fn longest_anchor(&self, wanted: impl Fn(SlotAddr) -> bool) -> Option<Frames> {
         SlotAddr::all()
-            .filter_map(|addr| self.audio.clip(addr))
-            .min_by_key(|clip| (core::cmp::Reverse(clip.len()), clip.recorded_at()))
-            .map_or(Frames::ZERO, |clip| clip.recorded_at())
+            .filter(|addr| wanted(*addr))
+            .filter_map(|addr| self.audio.clip(addr).map(|clip| (addr, clip)))
+            .min_by_key(|(addr, clip)| {
+                (
+                    core::cmp::Reverse(clip.len()),
+                    self.audio.anchor(*addr, clip),
+                )
+            })
+            .map(|(addr, clip)| self.audio.anchor(addr, clip))
     }
 
     /// Installs anything the loader has queued.
@@ -924,7 +982,8 @@ impl Engine {
             let (ramp, reached) = self.ramp_to(level, target, run);
             self.levels[track][slot] = reached;
             if let Some(clip) = self.audio.clip(addr) {
-                clip.mix_into(self.position, out, ramp);
+                let anchor = self.audio.anchor(addr, clip);
+                clip.mix_from(anchor, self.position, out, ramp);
             }
         }
 
