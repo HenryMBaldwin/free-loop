@@ -380,7 +380,11 @@ fn load_session(
             controller.session_loaded(addr, true);
         }
         Err(error) => {
-            eprintln!("load failed: {error}");
+            eprintln!(
+                "load of session {}{} failed: {error}",
+                addr.track.index(),
+                addr.slot.index()
+            );
             controller.cancel_picker();
         }
     }

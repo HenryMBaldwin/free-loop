@@ -120,6 +120,12 @@ pub struct Engine {
     pub segment_pool: usize,
     /// Frames a level takes to travel the full gain range. 5 ms at 48 kHz.
     pub declick_frames: u64,
+    /// Segments a loaded session may hold, about 1.4 s each at 48 kHz.
+    ///
+    /// Separate from `segment_pool`: a load brings its own storage rather than drawing on the
+    /// recording pool, so a session built up over several record and load passes is normally
+    /// larger than the pool ever held at once.
+    pub load_segments: usize,
 }
 
 impl Default for Engine {
@@ -127,6 +133,7 @@ impl Default for Engine {
         Self {
             segment_pool: 64,
             declick_frames: free_loop_engine::DEFAULT_DECLICK.0,
+            load_segments: 1_024,
         }
     }
 }
@@ -222,7 +229,7 @@ impl Config {
     /// Counted the way the loader allocates: one buffer per clip, each rounded up to whole
     /// segments.
     pub fn load_budget(&self) -> usize {
-        self.engine.segment_pool
+        self.engine.load_segments
     }
 
     /// Where every track's clips start out being anchored.
@@ -343,8 +350,8 @@ mod tests {
         let config = Config::parse("[engine]\nsegment_pool = 4\n").unwrap();
         assert_eq!(
             config.load_budget(),
-            4,
-            "a load may hold as many segments as a recording could"
+            1_024,
+            "a load is bounded on its own, not by the recording pool"
         );
     }
 
