@@ -569,8 +569,10 @@ fn load(
 
     // Everything a session can be refused for is settled before any of its audio is read,
     // so refusing one costs a single parse.
-    let checked = store.inspect(addr)?;
-    checked.accepts(negotiated.sample_rate, channels, config.load_budget())?;
+    let checked =
+        store
+            .inspect(addr)?
+            .accepts(negotiated.sample_rate, channels, config.load_budget())?;
 
     let wanted = config.time_signature()?;
     let manifest = checked.manifest();
@@ -587,7 +589,7 @@ fn load(
     }
     let tempo = free_loop_core::Tempo::new(manifest.tempo)?;
 
-    let session = checked.materialise(channels)?;
+    let session = checked.materialise()?;
     let restored = Restored {
         gains: session.gains(),
         tracks: session.tracks(),
