@@ -459,10 +459,11 @@ fn write_wav(
     })
 }
 
-/// The longest clip a session may claim, at half an hour.
+/// The most audio a session may claim in total, at half an hour.
 ///
-/// A length in the file decides how much is allocated before a byte is read, so it needs a
-/// ceiling well above any real take.
+/// The lengths in the file decide how much is allocated before a byte is read, so they need
+/// a ceiling. Half an hour across the whole grid is far more than the engine's own pools
+/// hold, so this only stops a file asking for the impossible.
 fn max_frames(sample_rate: u32) -> u64 {
     u64::from(sample_rate) * 60 * 30
 }
@@ -491,6 +492,16 @@ fn read_wav(
     }
     if spec.sample_rate != sample_rate {
         return Err(SessionError::Invalid("an audio file is at another rate"));
+    }
+    // A file shorter than the manifest claims would become silence-padded, and a longer one
+    // would be cut off without a word.
+    let held = reader.len() / u32::from(spec.channels.max(1));
+    if u64::from(held) != entry.len_frames {
+        return Err(SessionError::Mismatch {
+            what: "frames in an audio file",
+            wanted: u32::try_from(entry.len_frames).unwrap_or(u32::MAX),
+            found: held,
+        });
     }
 
     let channels = usize::from(channels);
