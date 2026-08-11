@@ -185,6 +185,8 @@ struct StagedClip {
 /// A load being assembled.
 #[derive(Debug)]
 struct Staging {
+    /// Whether a `Begin` has arrived and its `End` has not.
+    receiving: bool,
     tempo: Option<Tempo>,
     clips: [[Option<StagedClip>; SLOT_COUNT]; TRACK_COUNT],
 }
@@ -192,6 +194,7 @@ struct Staging {
 impl Staging {
     fn new() -> Self {
         Self {
+            receiving: false,
             tempo: None,
             clips: core::array::from_fn(|_| core::array::from_fn(|_| None)),
         }
@@ -202,6 +205,7 @@ impl Staging {
     /// The storage belongs to whoever sent it, so it goes back through the recycler rather
     /// than being dropped here.
     fn abandon(&mut self, retirement: &mut Retirement) {
+        self.receiving = false;
         self.tempo = None;
         for row in &mut self.clips {
             for slot in row {
@@ -227,16 +231,17 @@ struct Audio {
     retirement: Retirement,
     snapshots: SnapshotWriter,
     next_clip_id: ClipId,
-    /// Copy of [`Engine::capture_offset`], since effects are applied from here.
+    /// The round trip a sealed take is stamped as having started before.
     capture_offset: Frames,
-    /// Copy of [`Engine::inputs`], for the same reason.
+    /// Which input each track records.
     inputs: [TrackInput; TRACK_COUNT],
-    /// Copy of [`Engine::launch_modes`], for the same reason.
+    /// Where each track's clips are anchored when launched.
     launch_modes: [LaunchMode; TRACK_COUNT],
     /// Where a launch put each pad's clip, for the pads whose track restarts them.
     anchors: [[Option<Frames>; SLOT_COUNT]; TRACK_COUNT],
-    /// A pad whose capture could not be given storage, for the engine to put back.
-    refused: Option<SlotAddr>,
+    /// Pads whose capture could not be given storage, for the engine to put back. Several
+    /// can be refused on one boundary.
+    refused: PadMask,
     /// A load being assembled, put in place only once all of it has arrived.
     staged: Staging,
 }
@@ -307,7 +312,7 @@ impl Audio {
                 // the recycler is behind. The slot is put back rather than left claiming
                 // to hold a take it has nowhere to write.
                 let Some(shell) = self.shells.pop() else {
-                    self.refused = Some(addr);
+                    self.refused |= pad_bit(addr);
                     return;
                 };
                 self.clips[addr.track.index()][addr.slot.index()] = Some(shell);
@@ -481,7 +486,7 @@ impl Engine {
                 inputs: [config.input; TRACK_COUNT],
                 launch_modes: [config.launch_mode; TRACK_COUNT],
                 anchors: core::array::from_fn(|_| core::array::from_fn(|_| None)),
-                refused: None,
+                refused: 0,
                 staged: Staging::new(),
             },
             click: Click::new(config.click, config.sample_rate),
@@ -658,14 +663,17 @@ impl Engine {
 
     /// Empties any pad that was armed but could not be given storage.
     fn settle_refusals(&mut self, sink: &mut impl EventSink) {
-        let Some(addr) = self.audio.refused.take() else {
+        let refused = core::mem::take(&mut self.audio.refused);
+        if refused == 0 {
             return;
-        };
-        let ctx = self.ctx();
-        self.with_session(|session, audio| {
-            session.clear(addr, &ctx, &mut |a, e| audio.apply(a, e, sink));
-        });
-        sink.event(Event::RecordingRefused { addr });
+        }
+        for addr in SlotAddr::all().filter(|addr| refused & pad_bit(*addr) != 0) {
+            let ctx = self.ctx();
+            self.with_session(|session, audio| {
+                session.clear(addr, &ctx, &mut |a, e| audio.apply(a, e, sink));
+            });
+            sink.event(Event::RecordingRefused { addr });
+        }
     }
 
     /// Queues a transport move behind a fade. With no ramp it lands at once.
@@ -788,30 +796,47 @@ impl Engine {
         // Staged rather than applied as it arrives: the callback would otherwise clear the
         // grid and render whatever subset of a load had turned up so far.
         let mut complete = false;
-        loads.drain(|message| match message {
-            LoadMessage::Begin { tempo } => {
-                audio.staged.abandon(&mut audio.retirement);
-                audio.staged.tempo = Some(tempo);
-            }
-            LoadMessage::Clip {
-                addr,
-                mut clip,
-                playing,
-                launch_anchor,
-            } => {
-                // The loader keeps the storage, so mark it before the engine sees it as
-                // one of its own.
-                if let Some(inner) = Arc::get_mut(&mut clip) {
-                    inner.set_borrowed(true);
+        while let Some(message) = loads.pop() {
+            match message {
+                LoadMessage::Begin { tempo } => {
+                    // Anything staged belongs to a load that never finished arriving.
+                    audio.staged.abandon(&mut audio.retirement);
+                    audio.staged.receiving = true;
+                    audio.staged.tempo = Some(tempo);
                 }
-                audio.staged.clips[addr.track.index()][addr.slot.index()] = Some(StagedClip {
-                    clip,
+                LoadMessage::Clip {
+                    addr,
+                    mut clip,
                     playing,
                     launch_anchor,
-                });
+                } => {
+                    // The loader keeps the storage, so mark it before the engine sees it as
+                    // one of its own.
+                    if let Some(inner) = Arc::get_mut(&mut clip) {
+                        inner.set_borrowed(true);
+                    }
+                    if audio.staged.receiving {
+                        audio.staged.clips[addr.track.index()][addr.slot.index()] =
+                            Some(StagedClip {
+                                clip,
+                                playing,
+                                launch_anchor,
+                            });
+                    } else {
+                        // No transaction to belong to, so it goes straight back.
+                        audio.retirement.retire(clip);
+                    }
+                }
+                // An `End` with nothing open would otherwise commit an empty staging area
+                // and clear whatever is loaded. Anything queued behind it is the next
+                // load, left for the next block so this one goes in first.
+                LoadMessage::End => {
+                    complete = audio.staged.receiving;
+                    audio.staged.receiving = false;
+                    break;
+                }
             }
-            LoadMessage::End => complete = true,
-        });
+        }
 
         if !complete {
             return;
@@ -855,6 +880,9 @@ impl Engine {
         if let Some(tempo) = self.audio.staged.tempo.take() {
             self.set_tempo_unchecked(tempo);
         }
+        // A rewind or clear queued against the session just replaced would run against the
+        // new one, and the commit has already zeroed the levels it was waiting on.
+        self.pending = None;
         // A load arrives against a grid the performer has not heard yet, so it waits.
         self.paused = true;
         self.levels = [[0.0; SLOT_COUNT]; TRACK_COUNT];
