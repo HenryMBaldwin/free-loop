@@ -104,8 +104,7 @@ impl Manifest {
     /// Checked before anything is allocated, since the numbers in here decide how much.
     /// # Errors
     ///
-    /// A short reason if the file is self-contradictory. How much storage it asks for is
-    /// bounded separately, in the currency the loader allocates in.
+    /// A short reason if the file is self-contradictory.
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.clips.len() > TRACK_COUNT * SLOT_COUNT {
             return Err("more clips than the grid has pads");

@@ -461,8 +461,8 @@ enum SaveOutcome {
 
 /// Decides what to do with the save that is waiting.
 ///
-/// An answer that arrived wins over the deadline, even on the pass the deadline falls on: it
-/// is the result being waited for, and the engine will not send it again.
+/// An answer that arrived wins over the deadline, even on the pass the deadline falls on:
+/// the engine will not send it again.
 fn resolve_save(
     pending: &mut Option<PendingSave>,
     answered: Option<(u32, u32, u32)>,
@@ -522,8 +522,7 @@ fn settle_save(
 struct PendingSave {
     /// When the answer stops being expected.
     ///
-    /// A completion is a reply, not a state, so a lost one cannot be replayed. The save is
-    /// abandoned instead of waiting for something that is not coming.
+    /// A completion is a reply, not a state, so a lost one cannot be replayed.
     deadline: Duration,
     /// The request the engine will tag its answer with.
     request: u32,
@@ -743,8 +742,7 @@ fn drain_engine(io: &mut AudioIo, controller: &mut Controller) -> Drained {
 
 /// Asks the engine to report every pad again if any of its reports were lost.
 ///
-/// The controller paints from a mirror kept in step by those reports, so one missing leaves
-/// a pad showing the wrong thing until something else changes it.
+/// The controller paints from a mirror kept in step by those reports.
 fn resync_after_loss(io: &mut AudioIo, seen: u64) -> u64 {
     let dropped = io.dropped_events();
     if dropped == seen {

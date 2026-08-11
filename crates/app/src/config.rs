@@ -219,8 +219,7 @@ impl Config {
 
     /// The most segments a loaded session may hold.
     ///
-    /// A session brings its own storage, so the engine's pools do not bound it. This does,
-    /// counted the way the loader allocates: one buffer per clip, each rounded up to whole
+    /// Counted the way the loader allocates: one buffer per clip, each rounded up to whole
     /// segments.
     pub fn load_budget(&self) -> usize {
         self.engine.segment_pool
