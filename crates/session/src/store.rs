@@ -117,11 +117,59 @@ pub struct LoadedClip {
     pub clip: Clip,
 }
 
-/// A session's manifest, read and structurally sound, with its audio still on disk.
+/// A session's manifest, read but not yet checked, with its audio still on disk.
 #[derive(Debug)]
 pub struct Inspected {
     manifest: Manifest,
     dir: PathBuf,
+}
+
+/// A session that can be played on the device it was checked against.
+///
+/// Only reachable through [`Inspected::accepts`], so the audio cannot be read before the
+/// checks have passed, nor read for a different device than was checked.
+#[derive(Debug)]
+pub struct Accepted {
+    manifest: Manifest,
+    dir: PathBuf,
+    /// The channel count the checks were made against.
+    channels: u16,
+}
+
+impl Accepted {
+    /// What the file says.
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
+    /// Reads the audio in, into storage the caller owns.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError`] if a file cannot be read.
+    pub fn materialise(self) -> Result<LoadedSession, SessionError> {
+        let mut clips = Vec::with_capacity(self.manifest.clips.len());
+        for entry in &self.manifest.clips {
+            let pad = entry.addr()?;
+            clips.push(LoadedClip {
+                addr: pad,
+                playing: entry.playing,
+                gain_step: entry.gain_step,
+                launch_anchor: entry.launch_phase_frames.map(Frames),
+                // Generated from the pad rather than taken from the file, which could name
+                // anything, including a path out of the session directory.
+                clip: read_wav(
+                    &self.dir.join(Manifest::file_name(pad)),
+                    entry,
+                    self.channels,
+                )?,
+            });
+        }
+        Ok(LoadedSession {
+            manifest: self.manifest,
+            clips,
+        })
+    }
 }
 
 impl Inspected {
@@ -140,11 +188,11 @@ impl Inspected {
     /// [`SessionError`] if the session was recorded for another device, asks for more audio
     /// than `budget` allows, or its files do not hold what it claims.
     pub fn accepts(
-        &self,
+        self,
         sample_rate: u32,
         channels: u16,
         segments: usize,
-    ) -> Result<(), SessionError> {
+    ) -> Result<Accepted, SessionError> {
         if self.manifest.sample_rate != sample_rate {
             return Err(SessionError::Mismatch {
                 what: "Hz",
@@ -185,33 +233,11 @@ impl Inspected {
                 sample_rate,
             )?;
         }
-        Ok(())
-    }
 
-    /// Reads the audio in, into storage the caller owns.
-    ///
-    /// The second half of a load. Call [`Inspected::accepts`] first.
-    ///
-    /// # Errors
-    ///
-    /// [`SessionError`] if a file cannot be read.
-    pub fn materialise(self, channels: u16) -> Result<LoadedSession, SessionError> {
-        let mut clips = Vec::with_capacity(self.manifest.clips.len());
-        for entry in &self.manifest.clips {
-            let pad = entry.addr()?;
-            clips.push(LoadedClip {
-                addr: pad,
-                playing: entry.playing,
-                gain_step: entry.gain_step,
-                launch_anchor: entry.launch_phase_frames.map(Frames),
-                // Generated from the pad rather than taken from the file, which could name
-                // anything, including a path out of the session directory.
-                clip: read_wav(&self.dir.join(Manifest::file_name(pad)), entry, channels)?,
-            });
-        }
-        Ok(LoadedSession {
+        Ok(Accepted {
             manifest: self.manifest,
-            clips,
+            dir: self.dir,
+            channels,
         })
     }
 }
@@ -460,19 +486,19 @@ impl SessionStore {
         channels: u16,
         segments: usize,
     ) -> Result<LoadedSession, SessionError> {
-        let checked = self.inspect(addr)?;
-        checked.accepts(sample_rate, channels, segments)?;
-        checked.materialise(channels)
+        self.inspect(addr)?
+            .accepts(sample_rate, channels, segments)?
+            .materialise()
     }
 
-    /// Reads and checks a pad's manifest without touching its audio.
+    /// Reads a pad's manifest without touching its audio.
     ///
-    /// The first half of a load. Everything a session can be refused for is decided from
-    /// here, before any storage is allocated.
+    /// The first of three steps. What it says is checked by [`Inspected::accepts`], which is
+    /// the only way to reach the audio.
     ///
     /// # Errors
     ///
-    /// [`SessionError`] if the manifest is missing, malformed or self-contradictory.
+    /// [`SessionError`] if the manifest is missing or not valid TOML.
     pub fn inspect(&self, addr: SlotAddr) -> Result<Inspected, SessionError> {
         Ok(Inspected {
             manifest: self.manifest(addr)?,
@@ -840,13 +866,14 @@ mod tests {
             .collect();
         store.save(addr(0, 0), &data(clips)).unwrap();
 
-        let checked = store.inspect(addr(0, 0)).unwrap();
         // Eight one-frame clips are a handful of frames but eight separate buffers.
+        let refused = store.inspect(addr(0, 0)).unwrap().accepts(48_000, CH, 4);
         assert!(
-            checked.accepts(48_000, CH, 4).is_err(),
+            refused.is_err(),
             "each clip rounds up to a whole segment of its own"
         );
-        assert!(checked.accepts(48_000, CH, 8).is_ok());
+        let accepted = store.inspect(addr(0, 0)).unwrap().accepts(48_000, CH, 8);
+        assert!(accepted.is_ok());
     }
 
     #[test]
@@ -856,8 +883,7 @@ mod tests {
         // Nothing to read at all: a refusal must not get as far as noticing.
         std::fs::remove_file(store.dir(pad).join(Manifest::file_name(pad))).unwrap();
 
-        let checked = store.inspect(pad).unwrap();
-        let refused = checked.accepts(44_100, CH, BUDGET);
+        let refused = store.inspect(pad).unwrap().accepts(44_100, CH, BUDGET);
         assert!(
             matches!(refused, Err(SessionError::Mismatch { what: "Hz", .. })),
             "refused on the manifest, not on the missing file"
