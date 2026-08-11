@@ -169,7 +169,7 @@ pub const SOLOED: LedColor = LedColor::Blue;
 pub const VOLUME_SIDE: usize = 0;
 
 /// The right-hand column button that opens the track inputs.
-pub const INPUT_SIDE: usize = 1;
+pub const INPUT_SIDE: usize = 2;
 
 /// The right-hand column button that runs the transport.
 pub const PAUSE_SIDE: usize = 4;
