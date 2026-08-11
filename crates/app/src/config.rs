@@ -333,6 +333,9 @@ restart_clips = false
 segment_pool = 2048
 # Frames a level takes to travel the full gain range. 5 ms at 48 kHz.
 declick_frames = 240
+# The most segments a saved session may load. A load brings its own storage, so this is a
+# ceiling on a file rather than a draw on the pool; never applied below segment_pool.
+load_segments = 8192
 
 [click]
 enabled = true
@@ -404,6 +407,7 @@ mod tests {
         assert_eq!(config.transport.tempo, defaults.transport.tempo);
         assert_eq!(config.transport.max_bars, defaults.transport.max_bars);
         assert_eq!(config.engine.segment_pool, defaults.engine.segment_pool);
+        assert_eq!(config.engine.load_segments, defaults.engine.load_segments);
         assert_eq!(config.click.level, defaults.click.level);
         assert_eq!(config.audio.cushion_blocks, defaults.audio.cushion_blocks);
     }
