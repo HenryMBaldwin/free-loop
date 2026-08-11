@@ -367,10 +367,6 @@ pub struct Engine {
     soloed: PadMask,
     /// How loud each track plays, as a step on the gain ladder.
     gains: [u8; TRACK_COUNT],
-    /// Which input each track records.
-    inputs: [TrackInput; TRACK_COUNT],
-    /// Where each track's clips are anchored when launched.
-    launch_modes: [LaunchMode; TRACK_COUNT],
     /// The gain each pad is mixing at, which slides toward what it should be.
     levels: [[f32; SLOT_COUNT]; TRACK_COUNT],
     /// Frames a level takes to travel the full gain range.
@@ -381,7 +377,6 @@ pub struct Engine {
     last_boundary: Option<Frames>,
     /// MIDI clock ticks already reported.
     last_clock: u64,
-    capture_offset: Frames,
     sample_rate: SampleRate,
     time_signature: TimeSignature,
 }
@@ -449,14 +444,11 @@ impl Engine {
             muted: 0,
             soloed: 0,
             gains: [UNITY_STEP; TRACK_COUNT],
-            inputs: [config.input; TRACK_COUNT],
-            launch_modes: [config.launch_mode; TRACK_COUNT],
             levels: [[0.0; SLOT_COUNT]; TRACK_COUNT],
             declick: as_usize(config.declick.0),
             pending: None,
             last_boundary: None,
             last_clock: 0,
-            capture_offset: config.capture_offset,
             sample_rate: config.sample_rate,
             time_signature: config.time_signature,
         };
@@ -551,7 +543,7 @@ impl Engine {
 
     /// The round-trip latency being compensated for.
     pub fn capture_offset(&self) -> Frames {
-        self.capture_offset
+        self.audio.capture_offset
     }
 
     /// Sets the round-trip latency to compensate for.
@@ -561,7 +553,6 @@ impl Engine {
     ///
     /// Takes effect on the next recording sealed.
     pub fn set_capture_offset(&mut self, offset: Frames) {
-        self.capture_offset = offset;
         self.audio.capture_offset = offset;
     }
 
@@ -601,15 +592,9 @@ impl Engine {
             }
             Command::SetGains(gains) => self.gains = gains,
             // Takes in progress keep the input they started on.
-            Command::SetInputs(inputs) => {
-                self.inputs = inputs;
-                self.audio.inputs = inputs;
-            }
+            Command::SetInputs(inputs) => self.audio.inputs = inputs,
             // A clip already sounding keeps the anchor it was launched with.
-            Command::SetLaunchModes(modes) => {
-                self.launch_modes = modes;
-                self.audio.launch_modes = modes;
-            }
+            Command::SetLaunchModes(modes) => self.audio.launch_modes = modes,
             Command::ClearAll => self.defer(Deferred::ClearAll, sink),
             Command::Rewind => self.defer(Deferred::Rewind, sink),
             Command::Snapshot => self.publish_snapshot(sink),
