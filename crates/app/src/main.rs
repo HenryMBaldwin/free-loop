@@ -216,7 +216,7 @@ fn run(s: Session<'_>) {
                 Request::SaveSession(addr) => {
                     next_request = next_request.wrapping_add(1);
                     snapshots.clear();
-                    pending_save = ask_for_snapshot(io, next_request, addr);
+                    pending_save = ask_for_snapshot(io, next_request, addr, controller);
                 }
                 Request::LoadSession(addr) => {
                     load_session(
@@ -225,6 +225,7 @@ fn run(s: Session<'_>) {
                         &mut housekeeping.loader,
                         &negotiated,
                         controller,
+                        config,
                     );
                 }
             }
@@ -359,8 +360,9 @@ fn load_session(
     loader: &mut Loader,
     negotiated: &Negotiated,
     controller: &mut Controller,
+    config: &Config,
 ) {
-    match load(store, addr, loader, negotiated) {
+    match load(store, addr, loader, negotiated, config) {
         Ok(restored) => {
             println!("loaded session {}{}", addr.track.index(), addr.slot.index());
             controller.set_gains(restored.gains);
@@ -389,12 +391,17 @@ fn ask_for_snapshot(
     io: &mut AudioIo,
     request: u32,
     addr: free_loop_core::SlotAddr,
+    controller: &Controller,
 ) -> Option<PendingSave> {
     if io.send(Command::Snapshot { request }).is_err() {
         eprintln!("could not ask for a snapshot");
         return None;
     }
-    Some(PendingSave { request, addr })
+    Some(PendingSave {
+        request,
+        addr,
+        settings: settings(controller),
+    })
 }
 
 /// Takes the snapshots belonging to the save that is waiting, dropping stale ones.
@@ -424,6 +431,7 @@ fn finished_save(
     let save = pending.take()?;
     Some(Answered {
         addr: save.addr,
+        settings: save.settings,
         clips,
         expected,
     })
@@ -432,6 +440,8 @@ fn finished_save(
 /// A save whose snapshots have all been accounted for.
 struct Answered {
     addr: free_loop_core::SlotAddr,
+    /// What was set when the snapshot was asked for.
+    settings: Settings,
     /// Pads that arrived.
     clips: u32,
     /// Pads there were to send. More than `clips` means some were lost on the way.
@@ -455,7 +465,7 @@ fn settle_save(
         controller.cancel_picker();
         return;
     }
-    write_session(store, save.addr, config, negotiated, snapshots, controller);
+    write_session(store, save, config, negotiated, snapshots, controller);
 }
 
 /// A save waiting on the engine to publish its clips.
@@ -464,6 +474,9 @@ struct PendingSave {
     request: u32,
     /// Where the session goes.
     addr: free_loop_core::SlotAddr,
+    /// Taken when the snapshot was asked for, so the audio and the settings describe the
+    /// same moment.
+    settings: Settings,
 }
 
 /// What a save records besides the audio.
@@ -554,9 +567,26 @@ fn load(
     addr: free_loop_core::SlotAddr,
     loader: &mut Loader,
     negotiated: &Negotiated,
+    config: &Config,
 ) -> Result<Restored, Box<dyn Error>> {
     let channels = u16::try_from(negotiated.channels).unwrap_or(2);
     let session = store.load(addr, negotiated.sample_rate, channels)?;
+
+    // The engine's grid is fixed at startup, so a session in another meter would be laid
+    // against bars it was never played to.
+    let wanted = config.time_signature()?;
+    if session.manifest.beats_per_bar != wanted.beats_per_bar()
+        || session.manifest.beat_unit != wanted.beat_unit()
+    {
+        return Err(format!(
+            "session is in {}/{} but the transport is {}/{}",
+            session.manifest.beats_per_bar,
+            session.manifest.beat_unit,
+            wanted.beats_per_bar(),
+            wanted.beat_unit()
+        )
+        .into());
+    }
     let tempo = free_loop_core::Tempo::new(session.manifest.tempo)?;
     let restored = Restored {
         gains: session.gains(),
@@ -591,19 +621,20 @@ struct Restored {
 /// Writes a snapshot to a pad and tells the controller it landed.
 fn write_session(
     store: &SessionStore,
-    addr: free_loop_core::SlotAddr,
+    save_to: &Answered,
     config: &Config,
     negotiated: &Negotiated,
     snapshots: &[Snapshot],
     controller: &mut Controller,
 ) {
+    let addr = save_to.addr;
     match save(
         store,
         addr,
         config,
         negotiated,
         snapshots,
-        &settings(controller),
+        &save_to.settings,
     ) {
         Ok(()) => {
             println!("saved session {}{}", addr.track.index(), addr.slot.index());
