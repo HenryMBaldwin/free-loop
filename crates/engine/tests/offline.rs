@@ -259,7 +259,7 @@ fn a_clip_records_the_offset_it_was_sealed_with() {
     let mut harness = Harness::with_offset(128, Frames(LATENCY));
     let pad = addr(0, 0);
     record(&mut harness, pad, 1_000, 1);
-    harness.command(Command::Snapshot);
+    harness.command(Command::Snapshot { request: 1 });
 
     let mut seen = Vec::new();
     harness.housekeeping.snapshots.drain(|s| seen.push(s));
@@ -529,7 +529,7 @@ fn a_snapshot_publishes_every_pad_that_holds_audio() {
     harness.command(Command::Press(stopped));
     harness.run_to(harness.position() + BAR + 1);
 
-    harness.command(Command::Snapshot);
+    harness.command(Command::Snapshot { request: 1 });
 
     let mut seen: Vec<Snapshot> = Vec::new();
     harness.housekeeping.snapshots.drain(|s| seen.push(s));
@@ -549,7 +549,7 @@ fn a_pad_still_recording_is_not_published() {
     harness.run_to(2 * BAR);
     assert!(harness.engine.state(pad).is_recording());
 
-    harness.command(Command::Snapshot);
+    harness.command(Command::Snapshot { request: 1 });
     let mut count = 0;
     harness.housekeeping.snapshots.drain(|_| count += 1);
     assert_eq!(count, 0, "an unfinished take has no length yet");
@@ -562,7 +562,7 @@ fn a_held_snapshot_delays_reclaiming_the_pad() {
 
     let available = harness.engine.segments_available();
     record(&mut harness, pad, 0, 1);
-    harness.command(Command::Snapshot);
+    harness.command(Command::Snapshot { request: 1 });
 
     let mut held = Vec::new();
     harness.housekeeping.snapshots.drain(|s| held.push(s));
@@ -896,7 +896,7 @@ fn recording_after_a_snapshot_still_captures() {
     record(&mut harness, first, 0, 1);
 
     // A save holds a snapshot while the next take is recorded.
-    harness.command(Command::Snapshot);
+    harness.command(Command::Snapshot { request: 1 });
     let mut held = Vec::new();
     harness.housekeeping.snapshots.drain(|s| held.push(s));
 
@@ -1297,6 +1297,47 @@ fn a_quiet_mix_is_left_alone() {
     assert!(!clipped);
 }
 
+mod snapshots {
+    use super::*;
+
+    #[test]
+    fn a_completion_reports_what_it_published_and_what_it_meant_to() {
+        let mut harness = Harness::new(128);
+        record(&mut harness, addr(0, 0), 0, 1);
+        let at = harness.position();
+        record(&mut harness, addr(1, 0), at, 1);
+        harness.drain_events();
+
+        harness.command(Command::Snapshot { request: 7 });
+        let done = harness
+            .drain_events()
+            .into_iter()
+            .find_map(|event| match event {
+                Event::SnapshotComplete {
+                    request,
+                    clips,
+                    expected,
+                } => Some((request, clips, expected)),
+                _ => None,
+            });
+        assert_eq!(done, Some((7, 2, 2)), "both pads, under the request given");
+    }
+
+    #[test]
+    fn every_snapshot_carries_the_request_that_asked_for_it() {
+        let mut harness = Harness::new(128);
+        record(&mut harness, addr(0, 0), 0, 1);
+        harness.command(Command::Snapshot { request: 42 });
+
+        let mut seen = Vec::new();
+        harness
+            .housekeeping
+            .snapshots
+            .drain(|s| seen.push(s.request));
+        assert_eq!(seen, vec![42]);
+    }
+}
+
 mod resources {
     use super::*;
 
@@ -1322,7 +1363,7 @@ mod resources {
         // Clearing hands the shell to the recycler rather than straight back, so the next
         // arm has nowhere to write.
         let spare = addr(0, 0);
-        harness.command(Command::Snapshot);
+        harness.command(Command::Snapshot { request: 1 });
         harness.command(Command::Clear(spare));
         harness.drain_events();
 

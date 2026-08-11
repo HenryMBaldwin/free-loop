@@ -27,7 +27,12 @@ pub enum Command {
     /// Set where each track's clips are anchored when launched.
     SetLaunchModes([LaunchMode; TRACK_COUNT]),
     /// Publish a reference to every pad that holds a clip.
-    Snapshot,
+    /// Publish every pad holding a clip, tagged with `request` so a reader can tell one
+    /// answer from another.
+    Snapshot {
+        /// Identifies this request.
+        request: u32,
+    },
     /// Set which pads are silenced and which are soloed. Sent whole, not as toggles.
     SetMutes {
         /// Pads that do not sound.

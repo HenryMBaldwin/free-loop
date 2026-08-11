@@ -181,7 +181,9 @@ fn run(s: Session<'_>) {
 
     let mut events: Vec<SurfaceEvent> = Vec::new();
     let mut snapshots: Vec<Snapshot> = Vec::new();
-    let mut pending_save: Option<free_loop_core::SlotAddr> = None;
+    // A save waits on the answer to one request; anything tagged otherwise is stale.
+    let mut pending_save: Option<PendingSave> = None;
+    let mut next_request = 0_u32;
     let mut clipping = ClipReport::default();
     let mut xruns = XrunReport::default();
     let started = Instant::now();
@@ -212,12 +214,9 @@ fn run(s: Session<'_>) {
         for request in requests {
             match request {
                 Request::SaveSession(addr) => {
-                    pending_save = Some(addr);
+                    next_request = next_request.wrapping_add(1);
                     snapshots.clear();
-                    if io.send(Command::Snapshot).is_err() {
-                        eprintln!("could not ask for a snapshot");
-                        pending_save = None;
-                    }
+                    pending_save = ask_for_snapshot(io, next_request, addr);
                 }
                 Request::LoadSession(addr) => {
                     load_session(
@@ -240,13 +239,17 @@ fn run(s: Session<'_>) {
             }
         }
 
-        let mut snapshot_ready = false;
+        let mut answered: Option<(u32, u32, u32)> = None;
         let mut clock_ticks = 0;
         let mut clipped = 0_u32;
         let mut short_frames = 0_u64;
         io.drain_events(|event| {
             match event {
-                Event::SnapshotComplete { .. } => snapshot_ready = true,
+                Event::SnapshotComplete {
+                    request,
+                    clips,
+                    expected,
+                } => answered = Some((request, clips, expected)),
                 Event::Clock { ticks } => clock_ticks += ticks,
                 Event::Clipped { samples } => clipped += samples,
                 Event::Xrun { frames } => short_frames += frames,
@@ -264,12 +267,13 @@ fn run(s: Session<'_>) {
         {
             eprintln!("surface: {error}");
         }
-        housekeeping
-            .snapshots
-            .drain(|snapshot| snapshots.push(snapshot));
-
-        if snapshot_ready && let Some(addr) = pending_save.take() {
-            write_session(store, addr, config, &negotiated, &snapshots, controller);
+        collect_snapshots(
+            &mut housekeeping.snapshots,
+            pending_save.as_ref(),
+            &mut snapshots,
+        );
+        if let Some(save) = finished_save(&mut pending_save, answered) {
+            settle_save(store, &save, config, &negotiated, &snapshots, controller);
             snapshots.clear();
         }
 
@@ -378,6 +382,88 @@ fn load_session(
             controller.cancel_picker();
         }
     }
+}
+
+/// Asks the engine to publish its clips for a save.
+fn ask_for_snapshot(
+    io: &mut AudioIo,
+    request: u32,
+    addr: free_loop_core::SlotAddr,
+) -> Option<PendingSave> {
+    if io.send(Command::Snapshot { request }).is_err() {
+        eprintln!("could not ask for a snapshot");
+        return None;
+    }
+    Some(PendingSave { request, addr })
+}
+
+/// Takes the snapshots belonging to the save that is waiting, dropping stale ones.
+fn collect_snapshots(
+    reader: &mut free_loop_engine::SnapshotReader,
+    pending: Option<&PendingSave>,
+    into: &mut Vec<Snapshot>,
+) {
+    let wanted = pending.map(|save| save.request);
+    reader.drain(|snapshot| {
+        // An answer to a request that has been superseded is not part of this save.
+        if Some(snapshot.request) == wanted {
+            into.push(snapshot);
+        }
+    });
+}
+
+/// The save a completion finishes, if it is the one being waited on.
+fn finished_save(
+    pending: &mut Option<PendingSave>,
+    answered: Option<(u32, u32, u32)>,
+) -> Option<Answered> {
+    let (request, clips, expected) = answered?;
+    if pending.as_ref().is_none_or(|save| save.request != request) {
+        return None;
+    }
+    let save = pending.take()?;
+    Some(Answered {
+        addr: save.addr,
+        clips,
+        expected,
+    })
+}
+
+/// A save whose snapshots have all been accounted for.
+struct Answered {
+    addr: free_loop_core::SlotAddr,
+    /// Pads that arrived.
+    clips: u32,
+    /// Pads there were to send. More than `clips` means some were lost on the way.
+    expected: u32,
+}
+
+/// Writes a save, or reports that not all of it arrived.
+fn settle_save(
+    store: &SessionStore,
+    save: &Answered,
+    config: &Config,
+    negotiated: &Negotiated,
+    snapshots: &[Snapshot],
+    controller: &mut Controller,
+) {
+    if save.clips != save.expected {
+        eprintln!(
+            "save abandoned: {} of {} pads arrived",
+            save.clips, save.expected
+        );
+        controller.cancel_picker();
+        return;
+    }
+    write_session(store, save.addr, config, negotiated, snapshots, controller);
+}
+
+/// A save waiting on the engine to publish its clips.
+struct PendingSave {
+    /// The request the engine will tag its answer with.
+    request: u32,
+    /// Where the session goes.
+    addr: free_loop_core::SlotAddr,
 }
 
 /// What a save records besides the audio.

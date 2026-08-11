@@ -18,6 +18,8 @@ const SLOTS: usize = 128;
 /// One pad's contents at the moment of a request.
 #[derive(Debug)]
 pub struct Snapshot {
+    /// Which request published it.
+    pub request: u32,
     /// Which pad.
     pub addr: SlotAddr,
     /// What the pad was doing.
@@ -36,11 +38,15 @@ pub struct SnapshotWriter {
 }
 
 impl SnapshotWriter {
-    /// Publishes one pad. Counts the snapshot as dropped if the reader is behind.
-    pub fn publish(&mut self, snapshot: Snapshot) {
+    /// Publishes one pad, reporting whether it fit.
+    ///
+    /// Counts the snapshot as dropped if the reader is behind.
+    pub fn publish(&mut self, snapshot: Snapshot) -> bool {
         if let Err(PushError::Full(_)) = self.out.push(snapshot) {
             self.dropped += 1;
+            return false;
         }
+        true
     }
 
     /// Snapshots that did not fit since the engine started.
@@ -80,6 +86,7 @@ mod tests {
 
     fn snapshot(track: u8, slot: u8) -> Snapshot {
         Snapshot {
+            request: 0,
             addr: SlotAddr::new(TrackId::new(track).unwrap(), SlotId::new(slot).unwrap()),
             state: SlotState::Stopped { clip: ClipId(0) },
             launch_anchor: None,
