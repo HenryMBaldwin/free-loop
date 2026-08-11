@@ -1297,6 +1297,52 @@ fn a_quiet_mix_is_left_alone() {
     assert!(!clipped);
 }
 
+mod resources {
+    use super::*;
+
+    #[test]
+    fn a_pad_with_no_storage_left_is_put_back_rather_than_left_playing() {
+        let mut harness = Harness::new(512);
+
+        // One shell per pad, and a sealed take keeps the one it was given, so the pool is
+        // only empty once every pad holds a clip. One slot per track records at a time.
+        for slot in 0..u8::try_from(free_loop_core::SLOT_COUNT).unwrap() {
+            for track in 0..u8::try_from(free_loop_core::TRACK_COUNT).unwrap() {
+                harness.command(Command::Press(addr(track, slot)));
+            }
+            let until = (harness.position() / BAR + 2) * BAR;
+            harness.run_to(until);
+            for track in 0..u8::try_from(free_loop_core::TRACK_COUNT).unwrap() {
+                harness.command(Command::Press(addr(track, slot)));
+            }
+            harness.run_to(until + 1);
+        }
+        harness.drain_events();
+
+        // Clearing hands the shell to the recycler rather than straight back, so the next
+        // arm has nowhere to write.
+        let spare = addr(0, 0);
+        harness.command(Command::Snapshot);
+        harness.command(Command::Clear(spare));
+        harness.drain_events();
+
+        harness.command(Command::Press(spare));
+        let until = (harness.position() / BAR + 2) * BAR;
+        harness.run_to(until);
+
+        let refused = harness
+            .drain_events()
+            .iter()
+            .any(|event| matches!(event, Event::RecordingRefused { addr } if *addr == spare));
+        assert!(refused, "the arm had nowhere to write and said so");
+        assert_eq!(
+            harness.engine.state(spare),
+            SlotState::Empty,
+            "left empty rather than claiming to hold a take"
+        );
+    }
+}
+
 mod starvation {
     use super::*;
 
