@@ -183,6 +183,7 @@ impl Controller {
             beats_per_bar,
             click_enabled,
             paused: false,
+            device_lost: false,
             axis: Axis::Row,
             muted: 0,
             soloed: 0,
@@ -233,6 +234,18 @@ impl Controller {
     /// Whether the transport is believed to be frozen.
     pub fn paused(&self) -> bool {
         self.chrome.paused
+    }
+
+    /// Marks the audio device as gone, which the transport button shows until it is back.
+    pub fn device_lost(&mut self) {
+        self.chrome.device_lost = true;
+        self.dirty = true;
+    }
+
+    /// Takes the mark off once the device is running again.
+    pub fn device_back(&mut self) {
+        self.chrome.device_lost = false;
+        self.dirty = true;
     }
 
     /// Freezes the transport without a press, for something the performer did not ask for.
@@ -706,7 +719,7 @@ impl Controller {
     }
 
     /// Handles something the engine reported.
-    pub fn on_engine(&mut self, event: Event) {
+    pub fn on_engine(&mut self, event: Event, now: Duration) {
         match event {
             Event::SlotChanged { addr, state } => {
                 self.session.mirror(addr, state);
@@ -733,13 +746,15 @@ impl Controller {
                 self.tempo_before_request = bpm;
                 self.dirty = true;
             }
+            // A take with nowhere to go says so on the whole grid: the session is full,
+            // not that pad.
+            Event::RecordingRefused { .. } => self.show(LedColor::Red, now, None),
             // Bars are already covered by the beat they start with, and the rest are for
             // logging rather than for the grid.
             Event::Bar { .. }
             | Event::ClipRecorded { .. }
             | Event::ClipReleased { .. }
             | Event::RecordBufferLow { .. }
-            | Event::RecordingRefused { .. }
             | Event::Xrun { .. }
             | Event::Clipped { .. }
             | Event::SnapshotComplete { .. }
@@ -990,10 +1005,13 @@ mod tests {
     #[test]
     fn the_grid_keeps_showing_the_loops_while_choosing_a_group() {
         let mut controller = controller();
-        controller.on_engine(Event::SlotChanged {
-            addr: addr(0, 0),
-            state: SlotState::Playing { clip: ClipId(0) },
-        });
+        controller.on_engine(
+            Event::SlotChanged {
+                addr: addr(0, 0),
+                state: SlotState::Playing { clip: ClipId(0) },
+            },
+            T0,
+        );
         let playing = controller.take_frame().unwrap().pad(addr(0, 0));
 
         controller.on_surface(side(MUTE_SIDE), T0);
@@ -1012,10 +1030,13 @@ mod tests {
     #[test]
     fn a_silenced_row_shows_on_the_grid_without_the_mode_open() {
         let mut controller = controller();
-        controller.on_engine(Event::SlotChanged {
-            addr: addr(0, 0),
-            state: SlotState::Playing { clip: ClipId(0) },
-        });
+        controller.on_engine(
+            Event::SlotChanged {
+                addr: addr(0, 0),
+                state: SlotState::Playing { clip: ClipId(0) },
+            },
+            T0,
+        );
 
         controller.on_surface(side(MUTE_SIDE), T0);
         press(&mut controller, addr(0, 0), T0);
@@ -1126,10 +1147,13 @@ mod tests {
     #[test]
     fn a_fresh_session_empties_everything() {
         let mut controller = controller();
-        controller.on_engine(Event::SlotChanged {
-            addr: addr(0, 0),
-            state: SlotState::Playing { clip: ClipId(0) },
-        });
+        controller.on_engine(
+            Event::SlotChanged {
+                addr: addr(0, 0),
+                state: SlotState::Playing { clip: ClipId(0) },
+            },
+            T0,
+        );
         controller.on_surface(side(MUTE_SIDE), T0);
         press(&mut controller, addr(0, 0), T0);
         controller.on_surface(side(MUTE_SIDE), T0);
@@ -1455,6 +1479,61 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_take_turns_the_grid_red() {
+        let mut controller = controller();
+        controller.on_engine(Event::RecordingRefused { addr: addr(3, 2) }, T0);
+
+        let frame = controller.take_frame().unwrap();
+        assert!(
+            SlotAddr::all().all(|a| frame.pad(a) == Led::solid(LedColor::Red)),
+            "the session is full, not that one pad"
+        );
+    }
+
+    #[test]
+    fn every_pad_refused_on_one_boundary_answers_once() {
+        let mut controller = controller();
+        for slot in 0..3 {
+            controller.on_engine(
+                Event::RecordingRefused {
+                    addr: addr(0, slot),
+                },
+                T0,
+            );
+        }
+
+        controller.take_frame();
+        controller.tick(T0 + RESULT_FLASH);
+        let frame = controller.take_frame().unwrap();
+        assert!(
+            SlotAddr::all().all(|a| !frame.pad(a).is_lit()),
+            "one answer, not three in a row"
+        );
+    }
+
+    #[test]
+    fn a_device_that_went_away_is_told_apart_from_a_press() {
+        let mut controller = controller();
+        let by_hand = paint::pause_button(Chrome {
+            paused: true,
+            ..Chrome::default()
+        });
+
+        controller.pause();
+        controller.device_lost();
+        let frame = controller.take_frame().unwrap();
+        assert_ne!(
+            frame.side(PAUSE_SIDE),
+            by_hand,
+            "not the same as pausing it"
+        );
+
+        controller.device_back();
+        let frame = controller.take_frame().unwrap();
+        assert_eq!(frame.side(PAUSE_SIDE), by_hand, "and back to a plain pause");
+    }
+
+    #[test]
     fn a_result_cuts_text_that_is_already_scrolling() {
         let mut controller = controller();
         controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
@@ -1508,10 +1587,13 @@ mod tests {
     #[test]
     fn the_picker_hides_the_loops() {
         let mut controller = controller();
-        controller.on_engine(Event::SlotChanged {
-            addr: addr(0, 0),
-            state: SlotState::Playing { clip: ClipId(0) },
-        });
+        controller.on_engine(
+            Event::SlotChanged {
+                addr: addr(0, 0),
+                state: SlotState::Playing { clip: ClipId(0) },
+            },
+            T0,
+        );
         controller.take_frame();
 
         controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
@@ -1578,10 +1660,13 @@ mod tests {
     #[test]
     fn a_locked_tempo_is_reported_rather_than_changed() {
         let mut controller = controller();
-        controller.on_engine(Event::SlotChanged {
-            addr: addr(0, 0),
-            state: SlotState::Stopped { clip: ClipId(0) },
-        });
+        controller.on_engine(
+            Event::SlotChanged {
+                addr: addr(0, 0),
+                state: SlotState::Stopped { clip: ClipId(0) },
+            },
+            T0,
+        );
 
         controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
 
@@ -1599,10 +1684,13 @@ mod tests {
     #[test]
     fn a_locked_tempo_does_not_start_a_repeat() {
         let mut controller = controller();
-        controller.on_engine(Event::SlotChanged {
-            addr: addr(0, 0),
-            state: SlotState::Stopped { clip: ClipId(0) },
-        });
+        controller.on_engine(
+            Event::SlotChanged {
+                addr: addr(0, 0),
+                state: SlotState::Stopped { clip: ClipId(0) },
+            },
+            T0,
+        );
 
         controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
         for at in (0..2_000).step_by(20) {
@@ -1626,7 +1714,7 @@ mod tests {
         controller.on_surface(SurfaceEvent::ControlReleased(Control::TempoUp), millis(80));
         controller.take_text();
 
-        controller.on_engine(Event::TempoRejected);
+        controller.on_engine(Event::TempoRejected, T0);
         assert_eq!(controller.tempo(), 120.0);
         assert_eq!(
             controller.take_text(),
@@ -1662,10 +1750,13 @@ mod tests {
     #[test]
     fn the_grid_comes_back_when_the_hold_ends() {
         let mut controller = controller();
-        controller.on_engine(Event::SlotChanged {
-            addr: addr(0, 0),
-            state: SlotState::Playing { clip: ClipId(0) },
-        });
+        controller.on_engine(
+            Event::SlotChanged {
+                addr: addr(0, 0),
+                state: SlotState::Playing { clip: ClipId(0) },
+            },
+            T0,
+        );
         controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
         controller.tick(millis(400));
         controller.take_frame();
@@ -1946,7 +2037,7 @@ mod tests {
         controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
         assert_eq!(controller.tempo(), 121.0, "assumed to land");
 
-        controller.on_engine(Event::TempoRejected);
+        controller.on_engine(Event::TempoRejected, T0);
         assert_eq!(
             controller.tempo(),
             120.0,
@@ -1959,10 +2050,13 @@ mod tests {
         let mut controller = controller();
         controller.take_frame();
 
-        controller.on_engine(Event::SlotChanged {
-            addr: addr(1, 2),
-            state: SlotState::Playing { clip: ClipId(0) },
-        });
+        controller.on_engine(
+            Event::SlotChanged {
+                addr: addr(1, 2),
+                state: SlotState::Playing { clip: ClipId(0) },
+            },
+            T0,
+        );
 
         let frame = controller.take_frame().expect("the grid changed");
         assert_eq!(frame.pad(addr(1, 2)), Led::pulse(LedColor::Green));
@@ -1974,13 +2068,13 @@ mod tests {
         assert!(controller.take_frame().is_some(), "the first frame is new");
         assert!(controller.take_frame().is_none());
 
-        controller.on_engine(Event::Xrun { frames: 128 });
+        controller.on_engine(Event::Xrun { frames: 128 }, T0);
         assert!(
             controller.take_frame().is_none(),
             "an xrun changes nothing on the grid"
         );
 
-        controller.on_engine(Event::Beat { bar: 0, beat: 1 });
+        controller.on_engine(Event::Beat { bar: 0, beat: 1 }, T0);
         assert!(controller.take_frame().is_some());
     }
 
@@ -1988,7 +2082,7 @@ mod tests {
     fn repeating_the_same_beat_does_not_force_a_repaint() {
         let mut controller = controller();
         controller.take_frame();
-        controller.on_engine(Event::Beat { bar: 0, beat: 0 });
+        controller.on_engine(Event::Beat { bar: 0, beat: 0 }, T0);
         assert!(controller.take_frame().is_none());
     }
 
@@ -1997,7 +2091,7 @@ mod tests {
         use free_loop_surface::FIRST_BEAT_LED;
 
         let mut controller = controller();
-        controller.on_engine(Event::Beat { bar: 3, beat: 2 });
+        controller.on_engine(Event::Beat { bar: 3, beat: 2 }, T0);
 
         let frame = controller.take_frame().unwrap();
         assert_eq!(
@@ -2012,13 +2106,16 @@ mod tests {
     #[test]
     fn a_recording_pad_shows_red_before_any_clip_exists() {
         let mut controller = controller();
-        controller.on_engine(Event::SlotChanged {
-            addr: addr(0, 0),
-            state: SlotState::Recording {
-                started_at: Frames(0),
-                ends_at: None,
+        controller.on_engine(
+            Event::SlotChanged {
+                addr: addr(0, 0),
+                state: SlotState::Recording {
+                    started_at: Frames(0),
+                    ends_at: None,
+                },
             },
-        });
+            T0,
+        );
 
         let frame = controller.take_frame().unwrap();
         assert_eq!(frame.pad(addr(0, 0)), Led::solid(LedColor::Red));
@@ -2079,10 +2176,13 @@ mod tests {
     fn a_hold_warns_before_it_empties() {
         let mut controller = controller();
         let pad = addr(4, 6);
-        controller.on_engine(Event::SlotChanged {
-            addr: pad,
-            state: SlotState::Playing { clip: ClipId(0) },
-        });
+        controller.on_engine(
+            Event::SlotChanged {
+                addr: pad,
+                state: SlotState::Playing { clip: ClipId(0) },
+            },
+            T0,
+        );
         controller.take_frame();
 
         press(&mut controller, pad, T0);
