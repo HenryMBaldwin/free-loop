@@ -43,6 +43,9 @@ pub enum SessionError {
         /// What the session holds.
         found: u32,
     },
+    /// The session file describes something that cannot be loaded.
+    #[error("session is not loadable: {0}")]
+    Invalid(&'static str),
     /// A manifest named a pad outside the grid.
     #[error("{0}")]
     OffGrid(#[from] free_loop_core::IndexOutOfRange),
@@ -333,15 +336,27 @@ impl SessionStore {
             });
         }
 
+        manifest
+            .validate(max_frames(sample_rate))
+            .map_err(SessionError::Invalid)?;
+
         let dir = self.dir(addr);
         let mut clips = Vec::with_capacity(manifest.clips.len());
         for entry in &manifest.clips {
+            let pad = entry.addr()?;
             clips.push(LoadedClip {
-                addr: entry.addr()?,
+                addr: pad,
                 playing: entry.playing,
                 gain_step: entry.gain_step,
                 launch_anchor: entry.launch_phase_frames.map(Frames),
-                clip: read_wav(&dir.join(&entry.file), entry, channels)?,
+                // Generated from the pad rather than taken from the file, which could name
+                // anything, including a path out of the session directory.
+                clip: read_wav(
+                    &dir.join(Manifest::file_name(pad)),
+                    entry,
+                    channels,
+                    sample_rate,
+                )?,
             });
         }
 
@@ -445,11 +460,38 @@ fn write_wav(
 }
 
 /// Reads one clip back into storage the caller owns.
-fn read_wav(path: &Path, entry: &ClipEntry, channels: u16) -> Result<Clip, SessionError> {
+/// The longest clip a session may claim, at half an hour.
+///
+/// A length in the file decides how much is allocated before a byte is read, so it needs a
+/// ceiling well above any real take.
+fn max_frames(sample_rate: u32) -> u64 {
+    u64::from(sample_rate) * 60 * 30
+}
+
+fn read_wav(
+    path: &Path,
+    entry: &ClipEntry,
+    channels: u16,
+    sample_rate: u32,
+) -> Result<Clip, SessionError> {
     let mut reader = hound::WavReader::open(path).map_err(|source| SessionError::Wav {
         path: path.display().to_string(),
         source,
     })?;
+
+    // The manifest is checked against the device before this, so an audio file that
+    // disagrees with the manifest would be read into the wrong shape.
+    let spec = reader.spec();
+    if spec.channels != channels {
+        return Err(SessionError::Mismatch {
+            what: "channels in an audio file",
+            wanted: u32::from(channels),
+            found: u32::from(spec.channels),
+        });
+    }
+    if spec.sample_rate != sample_rate {
+        return Err(SessionError::Invalid("an audio file is at another rate"));
+    }
 
     let channels = usize::from(channels);
     let frames = entry.len_frames;
