@@ -23,8 +23,6 @@ pub struct Chrome {
     pub click_enabled: bool,
     /// Whether the transport is frozen.
     pub paused: bool,
-    /// Whether the audio device has gone away.
-    pub device_lost: bool,
     /// Which way mute and solo group the grid.
     pub axis: Axis,
     /// Pads that do not sound.
@@ -93,7 +91,6 @@ impl Default for Chrome {
             beats_per_bar: 4,
             click_enabled: true,
             paused: false,
-            device_lost: false,
             axis: Axis::Row,
             muted: 0,
             soloed: 0,
@@ -201,10 +198,7 @@ pub const NEW_SIDE: usize = 7;
 
 /// How the transport button looks.
 pub fn pause_button(chrome: Chrome) -> Led {
-    // A device that has gone wins over the transport state.
-    if chrome.device_lost {
-        Led::flash(LedColor::Red)
-    } else if chrome.paused {
+    if chrome.paused {
         Led::flash(LedColor::Amber)
     } else {
         Led::dim(LedColor::Green)
