@@ -70,7 +70,11 @@ pub enum Event {
     TempoRejected,
     /// Every pad holding a clip has been published. Sent even when none did.
     SnapshotComplete {
-        /// How many pads were published.
+        /// Which request this answers.
+        request: u32,
+        /// How many pads were published and fit.
         clips: u32,
+        /// How many pads there were to publish. More than `clips` means some were lost.
+        expected: u32,
     },
 }
