@@ -396,6 +396,15 @@ impl Controller {
     }
 
     /// Records that a session was loaded, and leaves the picker.
+    /// Takes the tempo a loaded session came with.
+    ///
+    /// The engine took it from the load itself, so this only brings the display in step.
+    pub fn set_loaded_tempo(&mut self, bpm: f64) {
+        self.tempo = bpm;
+        self.tempo_before_request = bpm;
+        self.dirty = true;
+    }
+
     pub fn session_loaded(&mut self, addr: SlotAddr, paused: bool) {
         self.current = Some(addr);
         self.chrome.paused = paused;
@@ -1525,6 +1534,19 @@ mod tests {
         assert!(
             commands(&mut controller).is_empty(),
             "no second pause to send"
+        );
+    }
+
+    #[test]
+    fn a_loaded_tempo_reaches_the_display_without_a_second_command() {
+        let mut controller = controller();
+        let _ = commands(&mut controller);
+
+        controller.set_loaded_tempo(90.0);
+        assert_eq!(controller.tempo(), 90.0);
+        assert!(
+            commands(&mut controller).is_empty(),
+            "the engine took it from the load itself"
         );
     }
 
