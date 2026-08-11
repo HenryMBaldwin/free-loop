@@ -199,11 +199,12 @@ impl SessionStore {
     ///
     /// [`SessionError`] if the directory or any file cannot be written.
     pub fn save(&self, addr: SlotAddr, data: &SessionData<'_>) -> Result<(), SessionError> {
-        let dir = self.dir(addr);
+        // Written beside the real directory and swapped in once every file is on disk, so
+        // a failure part way through leaves the previous session as it was.
+        let staging = self.staging(addr);
+        let _ = std::fs::remove_dir_all(&staging);
+        let dir = staging.clone();
         create_dir(&dir)?;
-        // Audio from a previous session under this pad would otherwise linger and be
-        // listed by a manifest that no longer mentions it.
-        remove_wavs(&dir)?;
 
         let mut entries = Vec::with_capacity(data.clips.len());
         for saved in &data.clips {
@@ -258,7 +259,47 @@ impl SessionStore {
                 path: path.display().to_string(),
                 source,
             }
-        })
+        })?;
+
+        self.swap_in(addr, &staging)
+    }
+
+    /// Where a save is built before it replaces what is there.
+    fn staging(&self, addr: SlotAddr) -> PathBuf {
+        self.root.join(format!(
+            ".{}{}.saving",
+            addr.track.index(),
+            addr.slot.index()
+        ))
+    }
+
+    /// Replaces the pad's session with a finished staging directory.
+    ///
+    /// The old directory is moved aside first, so the window where neither is in place is
+    /// two renames rather than a whole session's worth of writing.
+    fn swap_in(&self, addr: SlotAddr, staging: &Path) -> Result<(), SessionError> {
+        let dir = self.dir(addr);
+        let previous = self.root.join(format!(
+            ".{}{}.previous",
+            addr.track.index(),
+            addr.slot.index()
+        ));
+        let _ = std::fs::remove_dir_all(&previous);
+
+        let had_previous = dir.is_dir();
+        if had_previous {
+            rename(&dir, &previous)?;
+        }
+        if let Err(error) = rename(staging, &dir) {
+            // Put back what was there rather than leaving the pad with nothing.
+            if had_previous {
+                let _ = std::fs::rename(&previous, &dir);
+            }
+            return Err(error);
+        }
+
+        let _ = std::fs::remove_dir_all(&previous);
+        Ok(())
     }
 
     /// Reads a session back.
@@ -340,29 +381,18 @@ fn phase_in(anchor: Frames, len: Frames) -> u64 {
     if len.0 == 0 { 0 } else { anchor.0 % len.0 }
 }
 
+fn rename(from: &Path, to: &Path) -> Result<(), SessionError> {
+    std::fs::rename(from, to).map_err(|source| SessionError::Io {
+        path: to.display().to_string(),
+        source,
+    })
+}
+
 fn create_dir(dir: &Path) -> Result<(), SessionError> {
     std::fs::create_dir_all(dir).map_err(|source| SessionError::Io {
         path: dir.display().to_string(),
         source,
     })
-}
-
-fn remove_wavs(dir: &Path) -> Result<(), SessionError> {
-    let listing = std::fs::read_dir(dir).map_err(|source| SessionError::Io {
-        path: dir.display().to_string(),
-        source,
-    })?;
-
-    for entry in listing.flatten() {
-        let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "wav") {
-            std::fs::remove_file(&path).map_err(|source| SessionError::Io {
-                path: path.display().to_string(),
-                source,
-            })?;
-        }
-    }
-    Ok(())
 }
 
 fn write_wav(
@@ -526,6 +556,61 @@ mod tests {
             channels: CH,
             clips,
         }
+    }
+
+    #[test]
+    fn a_failed_save_leaves_the_previous_session_in_place() {
+        let dir = TempDir::new("atomic-save");
+        let store = SessionStore::new(&dir.0);
+        let good = clip(128, 0);
+        let saved = |addr| {
+            vec![SavedClip {
+                addr,
+                playing: true,
+                gain_step: UNITY_STEP,
+                launch_anchor: None,
+                clip: &good,
+            }]
+        };
+
+        store.save(addr(0, 0), &data(saved(addr(0, 0)))).unwrap();
+
+        // A file where the staging directory has to go makes the save fail before it can
+        // touch what is already saved.
+        std::fs::write(dir.0.join(".00.saving"), b"in the way").unwrap();
+        assert!(store.save(addr(0, 0), &data(saved(addr(0, 1)))).is_err());
+
+        let read = store.load(addr(0, 0), 48_000, 2).unwrap();
+        assert_eq!(read.clips.len(), 1, "the first save is still there");
+        assert_eq!(read.clips[0].addr, addr(0, 0), "and it is the same clip");
+    }
+
+    #[test]
+    fn no_staging_directory_is_left_behind() {
+        let dir = TempDir::new("staging");
+        let store = SessionStore::new(&dir.0);
+        let held = clip(128, 0);
+
+        store
+            .save(
+                addr(1, 1),
+                &data(vec![SavedClip {
+                    addr: addr(1, 1),
+                    playing: false,
+                    gain_step: UNITY_STEP,
+                    launch_anchor: None,
+                    clip: &held,
+                }]),
+            )
+            .unwrap();
+
+        let leftovers: Vec<_> = std::fs::read_dir(&dir.0)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with('.'))
+            .collect();
+        assert!(leftovers.is_empty(), "found {leftovers:?}");
     }
 
     #[test]
