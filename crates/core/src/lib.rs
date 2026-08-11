@@ -20,7 +20,7 @@ pub mod slot;
 pub mod time;
 
 pub use command::Command;
-pub use event::Event;
+pub use event::{Event, EventKind};
 pub use gain::{GAIN_STEPS, UNITY_STEP, gain_for_step};
 pub use ids::{
     ClipId, IndexOutOfRange, LaunchMode, PadMask, SLOT_COUNT, SlotAddr, SlotId, TRACK_COUNT,
