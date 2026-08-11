@@ -9,7 +9,7 @@ use std::sync::Arc;
 use free_loop_core::{SlotAddr, SlotState};
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 
-use crate::buffer::Clip;
+use free_loop_clip::Clip;
 
 /// Snapshots that can be queued before the reader drains any. One per pad, plus room for
 /// a second request arriving before the first is read.
@@ -81,7 +81,7 @@ mod tests {
     #![allow(clippy::unwrap_used, reason = "tests should fail loudly")]
 
     use super::*;
-    use crate::buffer::AudioBuffer;
+    use free_loop_clip::AudioBuffer;
     use free_loop_core::{ClipId, Frames, SlotId, TrackId};
 
     fn snapshot(track: u8, slot: u8) -> Snapshot {

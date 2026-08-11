@@ -16,11 +16,11 @@ use free_loop_core::{
 
 use std::sync::Arc;
 
-use crate::buffer::{Clip, Ramp, SEGMENT_FRAMES, SegmentPool};
 use crate::click::{Click, ClickConfig};
 use crate::load::{LoadInbox, LoadMessage, Loader};
 use crate::recycle::{Recycler, Retirement, channel};
 use crate::snapshot::{Snapshot, SnapshotReader, SnapshotWriter};
+use free_loop_clip::{Clip, Ramp, SEGMENT_FRAMES, SegmentPool};
 
 /// Frames a level travels the full gain range in by default. 5 ms at 48 kHz.
 pub const DEFAULT_DECLICK: Frames = Frames(240);

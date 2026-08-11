@@ -1,8 +1,11 @@
 //! Audio storage for recorded clips.
 //!
 //! Memory is allocated when the pools are built and recycled through them afterwards.
-//! Nothing in this module allocates or frees once audio is running: buffers hand their
-//! segments back to the pool they came from instead of dropping them.
+//! Nothing here allocates or frees once audio is running: buffers hand their segments
+//! back to the pool they came from instead of dropping them.
+//!
+//! Shared by the engine, which records and mixes, and by persistence, which reads clips
+//! out and builds them back.
 
 use free_loop_core::Frames;
 
