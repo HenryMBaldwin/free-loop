@@ -9,11 +9,11 @@ use core::time::Duration;
 
 use free_loop_core::{
     Command, Event, MAX_BPM, MIN_BPM, SLOT_COUNT, SessionModel, SlotAddr, TRACK_COUNT, Tempo,
-    UNITY_STEP, column_mask, pad_bit, row_mask,
+    TrackInput, UNITY_STEP, column_mask, pad_bit, row_mask,
 };
 use free_loop_surface::{
-    Axis, Chrome, Control, Led, LedColor, LedFrame, MUTE_SIDE, NEW_SIDE, PAUSE_SIDE, SELECTED,
-    SOLO_SIDE, SurfaceEvent, VOLUME_SIDE, paint,
+    Axis, Chrome, Control, INPUT_SIDE, Led, LedColor, LedFrame, MUTE_SIDE, NEW_SIDE, PAUSE_SIDE,
+    SELECTED, SOLO_SIDE, SurfaceEvent, VOLUME_SIDE, paint,
 };
 
 /// Beats per minute one press of the tempo buttons moves.
@@ -59,6 +59,8 @@ pub enum Mode {
     Solo,
     /// How loud each track plays.
     Volume,
+    /// Which input each track records.
+    Input,
 }
 
 impl Mode {
@@ -68,7 +70,7 @@ impl Mode {
             Self::SavePicker => Some(Control::SaveSession),
             Self::LoadPicker => Some(Control::LoadSession),
             // Mute and solo open from the side column, not the top row.
-            Self::Perform | Self::Mute | Self::Solo | Self::Volume => None,
+            Self::Perform | Self::Mute | Self::Solo | Self::Volume | Self::Input => None,
         }
     }
 }
@@ -146,6 +148,8 @@ impl Controller {
     /// A controller for an empty session.
     pub fn new(tempo: f64, beats_per_bar: u32, click_enabled: bool) -> Self {
         let chrome = Chrome {
+            inputs: [TrackInput::Stereo; TRACK_COUNT],
+            input_count: 2,
             beat: 0,
             beats_per_bar,
             click_enabled,
@@ -234,6 +238,35 @@ impl Controller {
         let step = u8::try_from(addr.slot.index()).unwrap_or(UNITY_STEP);
         self.chrome.gains[addr.track.index()] = step;
         self.commands.push(Command::SetGains(self.chrome.gains));
+        self.dirty = true;
+    }
+
+    /// Sets which input the pad's track records, if the device offers it.
+    fn set_input(&mut self, addr: SlotAddr) {
+        let column = addr.slot.index();
+        if column > self.chrome.input_count {
+            return;
+        }
+        self.chrome.inputs[addr.track.index()] = TrackInput::from_column(column);
+        self.commands.push(Command::SetInputs(self.chrome.inputs));
+        self.dirty = true;
+    }
+
+    /// Tells the grid how many inputs the device offers.
+    pub fn set_input_count(&mut self, count: usize) {
+        self.chrome.input_count = count;
+        self.dirty = true;
+    }
+
+    /// Which input each track records.
+    pub fn inputs(&self) -> [TrackInput; TRACK_COUNT] {
+        self.chrome.inputs
+    }
+
+    /// Takes the inputs a loaded session came with.
+    pub fn set_inputs(&mut self, inputs: [TrackInput; TRACK_COUNT]) {
+        self.chrome.inputs = inputs;
+        self.commands.push(Command::SetInputs(inputs));
         self.dirty = true;
     }
 
@@ -357,6 +390,9 @@ impl Controller {
             SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::Volume => {
                 self.set_level(addr);
             }
+            SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::Input => {
+                self.set_input(addr);
+            }
             SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::LoadPicker => {
                 // Nothing to load from a pad that holds nothing.
                 if self.sessions & bit(addr) != 0 {
@@ -401,6 +437,9 @@ impl Controller {
             }
             SurfaceEvent::SidePressed { index } if usize::from(index) == VOLUME_SIDE => {
                 self.set_mode(Mode::Volume);
+            }
+            SurfaceEvent::SidePressed { index } if usize::from(index) == INPUT_SIDE => {
+                self.set_mode(Mode::Input);
             }
             SurfaceEvent::SidePressed { index } if usize::from(index) == MUTE_SIDE => {
                 self.set_mode(Mode::Mute);
@@ -597,6 +636,7 @@ impl Controller {
     fn overlay(&mut self) {
         match self.mode {
             Mode::Volume => self.frame.set_side(VOLUME_SIDE, Led::flash(SELECTED)),
+            Mode::Input => self.frame.set_side(INPUT_SIDE, Led::flash(SELECTED)),
             Mode::Mute => self.frame.set_side(MUTE_SIDE, Led::flash(SELECTED)),
             Mode::Solo => self.frame.set_side(SOLO_SIDE, Led::flash(SELECTED)),
             _ => {}
@@ -631,6 +671,8 @@ impl Controller {
 
         self.frame = if self.mode == Mode::Volume {
             paint::volumes(self.chrome)
+        } else if self.mode == Mode::Input {
+            paint::inputs(self.chrome)
         } else if self.tempo_repeating() {
             // A number cannot track a tempo that is still moving, so the grid shows it
             // instead until the button is let go.
@@ -1422,6 +1464,59 @@ mod tests {
             commands(&mut controller).is_empty(),
             "no second pause to send"
         );
+    }
+
+    #[test]
+    fn the_input_button_opens_a_row_per_track() {
+        let mut controller = controller();
+        controller.set_input_count(2);
+        controller.on_surface(SurfaceEvent::SidePressed { index: 1 }, T0);
+
+        let frame = controller.take_frame().unwrap();
+        let row = SlotAddr::new(TrackId::new(0).unwrap(), SlotId::new(0).unwrap());
+        assert!(frame.pad(row).is_lit(), "stereo is offered on column zero");
+    }
+
+    #[test]
+    fn picking_a_column_sets_that_tracks_input() {
+        let mut controller = controller();
+        controller.set_input_count(2);
+        controller.on_surface(SurfaceEvent::SidePressed { index: 1 }, T0);
+        let _ = commands(&mut controller);
+
+        let pad = SlotAddr::new(TrackId::new(3).unwrap(), SlotId::new(2).unwrap());
+        controller.on_surface(
+            SurfaceEvent::PadPressed {
+                addr: pad,
+                velocity: 127,
+            },
+            T0,
+        );
+
+        let mut wanted = [TrackInput::Stereo; TRACK_COUNT];
+        wanted[3] = TrackInput::Mono(1);
+        assert_eq!(controller.inputs(), wanted, "column two is input one");
+        assert!(commands(&mut controller).contains(&Command::SetInputs(wanted)));
+    }
+
+    #[test]
+    fn a_column_the_device_cannot_offer_is_ignored() {
+        let mut controller = controller();
+        controller.set_input_count(2);
+        controller.on_surface(SurfaceEvent::SidePressed { index: 1 }, T0);
+        let _ = commands(&mut controller);
+
+        let pad = SlotAddr::new(TrackId::new(0).unwrap(), SlotId::new(5).unwrap());
+        controller.on_surface(
+            SurfaceEvent::PadPressed {
+                addr: pad,
+                velocity: 127,
+            },
+            T0,
+        );
+
+        assert_eq!(controller.inputs(), [TrackInput::Stereo; TRACK_COUNT]);
+        assert!(commands(&mut controller).is_empty());
     }
 
     #[test]
