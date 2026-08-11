@@ -390,10 +390,30 @@ impl SessionStore {
 
     /// Writes a session under a pad, replacing whatever was there.
     ///
+    /// `load_budget` is the ceiling [`Inspected::accepts`] will hold this session to when
+    /// it is read back, counted the same way. A session that grew past it is refused here,
+    /// before anything is written.
+    ///
     /// # Errors
     ///
-    /// [`SessionError`] if the directory or any file cannot be written.
-    pub fn save(&self, addr: SlotAddr, data: &SessionData<'_>) -> Result<(), SessionError> {
+    /// [`SessionError::TooLarge`] if the session would not load back within `load_budget`,
+    /// or [`SessionError`] if the directory or any file cannot be written.
+    pub fn save(
+        &self,
+        addr: SlotAddr,
+        data: &SessionData<'_>,
+        load_budget: usize,
+    ) -> Result<(), SessionError> {
+        let wanted = data.clips.iter().fold(0_usize, |total, saved| {
+            total.saturating_add(as_segments(saved.clip.len().0))
+        });
+        if wanted > load_budget {
+            return Err(SessionError::TooLarge {
+                allowed: load_budget,
+                wanted,
+            });
+        }
+
         // Written beside the real directory and swapped in once every file is on disk, so
         // a failure part way through leaves the previous session as it was.
         let staging = self.staging(addr);
@@ -830,16 +850,99 @@ mod tests {
             }]
         };
 
-        store.save(addr(0, 0), &data(saved(addr(0, 0)))).unwrap();
+        store
+            .save(addr(0, 0), &data(saved(addr(0, 0))), BUDGET)
+            .unwrap();
 
         // A file where the staging directory has to go makes the save fail before it can
         // touch what is already saved.
         std::fs::write(dir.0.join(".00.saving"), b"in the way").unwrap();
-        assert!(store.save(addr(0, 0), &data(saved(addr(0, 1)))).is_err());
+        assert!(
+            store
+                .save(addr(0, 0), &data(saved(addr(0, 1))), BUDGET)
+                .is_err()
+        );
 
         let read = store.load(addr(0, 0), 48_000, 2, BUDGET).unwrap();
         assert_eq!(read.clips.len(), 1, "the first save is still there");
         assert_eq!(read.clips[0].addr, addr(0, 0), "and it is the same clip");
+    }
+
+    /// One clip per pad named, each short enough to cost exactly one segment.
+    fn one_segment_each<'a>(audio: &'a Clip, pads: &[SlotAddr]) -> Vec<SavedClip<'a>> {
+        pads.iter()
+            .map(|pad| SavedClip {
+                addr: *pad,
+                playing: false,
+                gain_step: UNITY_STEP,
+                launch_anchor: None,
+                clip: audio,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_session_filling_the_load_ceiling_is_saved() {
+        let dir = TempDir::new("save-at-ceiling");
+        let store = SessionStore::new(&dir.0);
+        let audio = clip(64, 0);
+        let clips = one_segment_each(&audio, &[addr(0, 0), addr(1, 0), addr(2, 0)]);
+
+        store.save(addr(0, 0), &data(clips), 3).unwrap();
+        assert_eq!(
+            store.load(addr(0, 0), 48_000, CH, 3).unwrap().clips.len(),
+            3
+        );
+    }
+
+    #[test]
+    fn a_session_past_the_load_ceiling_is_refused_rather_than_written() {
+        let dir = TempDir::new("save-past-ceiling");
+        let store = SessionStore::new(&dir.0);
+        let audio = clip(64, 0);
+
+        // The usable session already on the pad.
+        let before = one_segment_each(&audio, &[addr(0, 0)]);
+        store.save(addr(0, 0), &data(before), 3).unwrap();
+
+        // One pad past the ceiling.
+        let grown = one_segment_each(&audio, &[addr(0, 0), addr(1, 0), addr(2, 0), addr(3, 0)]);
+        let error = store.save(addr(0, 0), &data(grown), 3).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                SessionError::TooLarge {
+                    allowed: 3,
+                    wanted: 4
+                }
+            ),
+            "{error}"
+        );
+
+        let read = store.load(addr(0, 0), 48_000, CH, 3).unwrap();
+        assert_eq!(
+            read.clips.len(),
+            1,
+            "the session that loaded is still there"
+        );
+    }
+
+    #[test]
+    fn a_saved_session_always_loads_back_within_the_same_ceiling() {
+        let dir = TempDir::new("save-load-agree");
+        let store = SessionStore::new(&dir.0);
+        // A whole segment plus one frame, which rounds to two.
+        let audio = clip(SEGMENT_FRAMES + 1, 0);
+        let clips = one_segment_each(&audio, &[addr(0, 0)]);
+
+        assert!(
+            store.save(addr(0, 0), &data(clips), 1).is_err(),
+            "two segments"
+        );
+
+        let clips = one_segment_each(&audio, &[addr(0, 0)]);
+        store.save(addr(0, 0), &data(clips), 2).unwrap();
+        assert!(store.load(addr(0, 0), 48_000, CH, 2).is_ok());
     }
 
     /// Writes a wav of `frames` in `spec`, over whatever the pad's audio file is.
@@ -878,6 +981,7 @@ mod tests {
                     launch_anchor: None,
                     clip: &held,
                 }]),
+                BUDGET,
             )
             .unwrap();
         (store, addr(0, 0))
@@ -897,7 +1001,7 @@ mod tests {
                 clip: &tiny,
             })
             .collect();
-        store.save(addr(0, 0), &data(clips)).unwrap();
+        store.save(addr(0, 0), &data(clips), BUDGET).unwrap();
 
         // Eight one-frame clips are a handful of frames but eight separate buffers.
         let refused = store.inspect(addr(0, 0)).unwrap().accepts(48_000, CH, 4);
@@ -976,6 +1080,7 @@ mod tests {
                         clip: &held,
                     },
                 ]),
+                BUDGET,
             )
             .unwrap();
 
@@ -1060,6 +1165,7 @@ mod tests {
                     launch_anchor: None,
                     clip: &held,
                 }]),
+                BUDGET,
             )
             .unwrap();
 
@@ -1104,7 +1210,9 @@ mod tests {
                 clip: &held,
             }]
         };
-        store.save(addr(0, 0), &data(save(addr(0, 0)))).unwrap();
+        store
+            .save(addr(0, 0), &data(save(addr(0, 0))), BUDGET)
+            .unwrap();
         // A leftover from a swap that did finish.
         std::fs::create_dir_all(dir.0.join(".00.previous")).unwrap();
 
@@ -1136,6 +1244,7 @@ mod tests {
                     launch_anchor: None,
                     clip: &held,
                 }]),
+                BUDGET,
             )
             .unwrap();
 
@@ -1165,6 +1274,7 @@ mod tests {
                     launch_anchor: Some(Frames(365)),
                     clip: &clip,
                 }]),
+                BUDGET,
             )
             .unwrap();
 
@@ -1192,6 +1302,7 @@ mod tests {
                     launch_anchor: None,
                     clip: &clip,
                 }]),
+                BUDGET,
             )
             .unwrap();
 
@@ -1332,7 +1443,7 @@ mod tests {
 
         let mut data = data(Vec::new());
         data.tracks[4].gain_step = 1;
-        store.save(addr(0, 0), &data).unwrap();
+        store.save(addr(0, 0), &data, BUDGET).unwrap();
 
         let loaded = store.load(addr(0, 0), 48_000, CH, BUDGET).unwrap();
         assert_eq!(loaded.gains()[4], 1);
@@ -1364,6 +1475,7 @@ mod tests {
                     launch_anchor: None,
                     clip: &audio,
                 }]),
+                BUDGET,
             )
             .unwrap();
 
@@ -1403,6 +1515,7 @@ mod tests {
                     launch_anchor: None,
                     clip: &audio,
                 }]),
+                BUDGET,
             )
             .unwrap();
 
@@ -1435,6 +1548,7 @@ mod tests {
                     launch_anchor: None,
                     clip: &audio,
                 }]),
+                BUDGET,
             )
             .unwrap();
 
@@ -1469,6 +1583,7 @@ mod tests {
                         clip: &audio,
                     },
                 ]),
+                BUDGET,
             )
             .unwrap();
         assert!(dir.0.join("33").join("t1s1.wav").is_file());
@@ -1483,6 +1598,7 @@ mod tests {
                     launch_anchor: None,
                     clip: &audio,
                 }]),
+                BUDGET,
             )
             .unwrap();
 
@@ -1497,7 +1613,7 @@ mod tests {
     fn a_session_with_no_clips_still_saves() {
         let dir = TempDir::new("bare");
         let store = SessionStore::new(&dir.0);
-        store.save(addr(7, 7), &data(Vec::new())).unwrap();
+        store.save(addr(7, 7), &data(Vec::new()), BUDGET).unwrap();
 
         assert!(store.exists(addr(7, 7)));
         assert!(store.manifest(addr(7, 7)).unwrap().clips.is_empty());
@@ -1520,6 +1636,7 @@ mod tests {
                         launch_anchor: None,
                         clip: &audio,
                     }]),
+                    BUDGET,
                 )
                 .unwrap();
         }
@@ -1533,7 +1650,7 @@ mod tests {
     fn removing_a_session_takes_it_out_of_the_index() {
         let dir = TempDir::new("remove");
         let store = SessionStore::new(&dir.0);
-        store.save(addr(4, 4), &data(Vec::new())).unwrap();
+        store.save(addr(4, 4), &data(Vec::new()), BUDGET).unwrap();
 
         store.remove(addr(4, 4)).unwrap();
         assert!(!store.exists(addr(4, 4)));
@@ -1557,6 +1674,7 @@ mod tests {
                     launch_anchor: None,
                     clip: &audio,
                 }]),
+                BUDGET,
             )
             .unwrap();
 
@@ -1597,6 +1715,7 @@ mod tests {
                     launch_anchor: None,
                     clip: &audio,
                 }]),
+                BUDGET,
             )
             .unwrap();
 
@@ -1633,6 +1752,7 @@ mod tests {
                     launch_anchor: None,
                     clip: &audio,
                 }]),
+                BUDGET,
             )
             .unwrap();
 
@@ -1679,6 +1799,7 @@ mod tests {
                         clip: &audio,
                     },
                 ]),
+                BUDGET,
             )
             .unwrap();
 
@@ -1697,7 +1818,7 @@ mod tests {
     fn a_session_recorded_for_another_setup_is_refused() {
         let dir = TempDir::new("mismatch");
         let store = SessionStore::new(&dir.0);
-        store.save(addr(0, 0), &data(Vec::new())).unwrap();
+        store.save(addr(0, 0), &data(Vec::new()), BUDGET).unwrap();
 
         assert!(store.load(addr(0, 0), 44_100, CH, BUDGET).is_err());
         assert!(store.load(addr(0, 0), 48_000, 1, BUDGET).is_err());
