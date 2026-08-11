@@ -253,7 +253,7 @@ fn run(s: Session<'_>) {
             }
         }
 
-        let drained = drain_engine(io, controller);
+        let drained = drain_engine(io, controller, now);
         let Drained {
             answered,
             clock_total,
@@ -762,7 +762,7 @@ struct Drained {
 }
 
 /// Takes everything the engine has reported, printing and mirroring as it goes.
-fn drain_engine(io: &mut AudioIo, controller: &mut Controller) -> Drained {
+fn drain_engine(io: &mut AudioIo, controller: &mut Controller, now: Duration) -> Drained {
     let mut drained = Drained {
         answered: None,
         clock_total: None,
@@ -782,7 +782,7 @@ fn drain_engine(io: &mut AudioIo, controller: &mut Controller) -> Drained {
             _ => {}
         }
         report(event);
-        controller.on_engine(event);
+        controller.on_engine(event, now);
     });
     drained
 }
@@ -834,6 +834,7 @@ fn watch_devices(
 ) {
     match io.tick(now) {
         Some(DeviceChange::Lost(loss)) => {
+            controller.device_lost();
             if pause_on_disconnect {
                 controller.pause();
                 eprintln!("audio: device gone ({loss}). paused");
@@ -841,7 +842,10 @@ fn watch_devices(
                 eprintln!("audio: device gone ({loss}). held where it stopped");
             }
         }
-        Some(DeviceChange::Back) => println!("audio: device back"),
+        Some(DeviceChange::Back) => {
+            controller.device_back();
+            println!("audio: device back");
+        }
         Some(DeviceChange::Refused(error)) => eprintln!("audio: {error}"),
         None => {}
     }
