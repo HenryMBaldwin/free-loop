@@ -1913,16 +1913,20 @@ mod resources {
     fn a_take_that_runs_out_part_way_is_not_sealed() {
         let mut harness = Harness::new(512);
 
-        // Three takes leave three segments, and a four-bar take needs six.
-        for track in 0..3 {
+        // Two takes and their tails leave less than a four-bar take needs.
+        for track in 0..2 {
             harness.command(Command::Press(addr(track, 0)));
         }
         harness.run_to(2 * BAR);
-        for track in 0..3 {
+        for track in 0..2 {
             harness.command(Command::Press(addr(track, 0)));
         }
-        harness.run_to(2 * BAR + 1);
-        assert_eq!(harness.engine.segments_available(), 3);
+        harness.run_to(3 * BAR);
+        let left = harness.engine.segments_available();
+        assert!(
+            left > 0 && left < 6,
+            "{left} segments left, against six for the take below"
+        );
         harness.drain_events();
 
         let long = addr(7, 7);
@@ -2416,6 +2420,41 @@ mod declick {
         let out = harness.run_to(next_bar + RAMP);
         assert_eq!(out[0], 0.0, "nothing sounds before the bar line");
         assert!(!is_silent(&out), "and it comes back after it");
+    }
+}
+
+mod tail {
+    use super::*;
+
+    /// Frames of tail a take keeps: three beats of the bar after it, in 4/4.
+    const TAIL: u64 = 3 * BEAT;
+
+    #[test]
+    fn a_take_keeps_the_bar_after_it_less_its_last_beat() {
+        let mut harness = Harness::new(128);
+        let pad = addr(0, 0);
+        let (start, end) = record(&mut harness, pad, 0, 1);
+        assert_eq!(end - start, BAR, "the loop is still whole bars");
+
+        // The tail is captured after the seal, so it needs the transport to reach it.
+        harness.run_to(end + TAIL + 1);
+        assert_eq!(harness.engine.clip_tail(pad), Frames(TAIL));
+    }
+
+    #[test]
+    fn the_tail_is_charged_to_the_pool_like_the_loop() {
+        let mut harness = Harness::new(128);
+        let available = harness.engine.segments_available();
+        let pad = addr(0, 0);
+        let (_, end) = record(&mut harness, pad, 0, 1);
+        harness.run_to(end + TAIL + 1);
+
+        let held = available - harness.engine.segments_available();
+        assert_eq!(
+            held,
+            free_loop_clip::segments_for(Frames(BAR + TAIL)),
+            "the loop and its tail both cost storage"
+        );
     }
 }
 
