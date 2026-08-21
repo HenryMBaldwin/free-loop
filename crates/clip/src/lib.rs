@@ -481,6 +481,21 @@ impl Clip {
         self.buffer.write(frame, src, pool)
     }
 
+    /// Writes interleaved frames at `frame`, taking channels from `src` as `picks` says.
+    ///
+    /// Returns how many frames were written.
+    pub fn write_picked(
+        &mut self,
+        frame: u64,
+        src: &[f32],
+        src_channels: usize,
+        picks: &[u8],
+        pool: &mut SegmentPool,
+    ) -> usize {
+        self.buffer
+            .write_picked(frame, src, src_channels, picks, pool)
+    }
+
     /// Writes one channel of `src` onto every channel of the clip.
     ///
     /// Returns how many frames were written.

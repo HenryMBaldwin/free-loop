@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use free_loop_clip::{AudioBuffer, Clip, Ramp, SEGMENT_FRAMES, SegmentPool, segments_for};
-use free_loop_core::{Frames, SLOT_COUNT, SlotAddr, TRACK_COUNT, UNITY_STEP};
+use free_loop_core::{Frames, SLOT_COUNT, SlotAddr, TRACK_COUNT, TrackInput, UNITY_STEP};
 
 use crate::manifest::{ClipEntry, MANIFEST, Manifest, TrackEntry};
 
@@ -104,8 +104,8 @@ pub struct SessionData<'a> {
 /// One track's settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrackSettings {
-    /// The column the track's input sits on. Zero is the whole input.
-    pub input: usize,
+    /// The capture channels the track records.
+    pub input: TrackInput,
     /// Whether launching a clip plays it from its start.
     pub restart: bool,
     /// The step on the gain ladder the track plays at.
@@ -116,7 +116,7 @@ impl Default for TrackSettings {
     /// The whole input, following clips, at unity.
     fn default() -> Self {
         Self {
-            input: 0,
+            input: TrackInput::default(),
             restart: false,
             gain_step: UNITY_STEP,
         }
@@ -277,7 +277,7 @@ impl LoadedSession {
 
         for entry in &self.manifest.tracks {
             if let Some(slot) = tracks.get_mut(usize::from(entry.track)) {
-                slot.input = entry.input;
+                slot.input = track_input(entry);
                 slot.restart = entry.restart;
                 if let Some(step) = entry.gain_step {
                     slot.gain_step = step;
@@ -455,7 +455,8 @@ impl SessionStore {
                 .filter(|(_, track)| **track != TrackSettings::default())
                 .map(|(index, track)| TrackEntry {
                     track: index_as_u8(index),
-                    input: track.input,
+                    input: 0,
+                    input_channels: Some(track.input.channels().as_slice().to_vec()),
                     restart: track.restart,
                     gain_step: Some(track.gain_step),
                 })
@@ -575,6 +576,21 @@ fn phase_of(clip: &Clip) -> u64 {
 /// Where `anchor` sits inside a loop of `len`.
 fn phase_in(anchor: Frames, len: Frames) -> u64 {
     if len.0 == 0 { 0 } else { anchor.0 % len.0 }
+}
+
+/// What a track entry asks to record.
+///
+/// A session saved before channels were listed carries a column instead: zero meant the
+/// first two, and the rest meant one channel each.
+fn track_input(entry: &TrackEntry) -> TrackInput {
+    match entry.input_channels.as_deref() {
+        Some([one]) => TrackInput::Mono(*one),
+        Some([one, two, ..]) => TrackInput::pair(*one, *two),
+        _ => match entry.input {
+            0 => TrackInput::default(),
+            column => TrackInput::Mono(index_as_u8(column - 1)),
+        },
+    }
 }
 
 /// Removes a directory if it is there, reporting anything other than its absence.
@@ -1344,6 +1360,7 @@ mod tests {
                 tracks: vec![TrackEntry {
                     track: 7,
                     input: 2,
+                    input_channels: Some(vec![1]),
                     restart: true,
                     gain_step: Some(3),
                 }],
@@ -1352,7 +1369,7 @@ mod tests {
         };
 
         let tracks = loaded.tracks();
-        assert_eq!(tracks[7].input, 2);
+        assert_eq!(tracks[7].input, TrackInput::Mono(1));
         assert!(tracks[7].restart);
         assert_eq!(tracks[7].gain_step, 3);
         assert_eq!(tracks[0], TrackSettings::default(), "and only that track");
@@ -1387,6 +1404,7 @@ mod tests {
             manifest: track_manifest(vec![TrackEntry {
                 track: 5,
                 input: 0,
+                input_channels: None,
                 restart: false,
                 gain_step: Some(1),
             }]),
@@ -1402,6 +1420,7 @@ mod tests {
             manifest: track_manifest(vec![TrackEntry {
                 track: 2,
                 input: 0,
+                input_channels: None,
                 restart: false,
                 gain_step: Some(1),
             }]),
@@ -1421,6 +1440,7 @@ mod tests {
             manifest: track_manifest(vec![TrackEntry {
                 track: 2,
                 input: 1,
+                input_channels: None,
                 restart: false,
                 gain_step: None,
             }]),
@@ -1430,7 +1450,7 @@ mod tests {
         assert_eq!(loaded.gains()[2], 5);
         assert_eq!(
             loaded.tracks()[2].input,
-            1,
+            TrackInput::Mono(0),
             "and the rest of the entry holds"
         );
     }

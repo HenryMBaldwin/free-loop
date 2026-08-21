@@ -5,6 +5,9 @@ pub const TRACK_COUNT: usize = 8;
 /// Number of slots per track. Rows on the Launchpad grid.
 pub const SLOT_COUNT: usize = 8;
 
+/// Input channels a track can choose between, one per column of the input page.
+pub const INPUT_CHANNELS: usize = SLOT_COUNT;
+
 /// [`TRACK_COUNT`] as the index type, so range checks need no cast.
 const TRACK_LIMIT: u8 = 8;
 /// [`SLOT_COUNT`] as the index type, so range checks need no cast.
@@ -145,6 +148,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_pair_puts_the_lower_channel_on_the_left() {
+        assert_eq!(TrackInput::pair(3, 1), TrackInput::Pair(1, 3));
+        assert_eq!(TrackInput::pair(1, 3), TrackInput::Pair(1, 3));
+        assert_eq!(
+            TrackInput::pair(2, 2),
+            TrackInput::Mono(2),
+            "one channel twice is one channel"
+        );
+    }
+
+    #[test]
+    fn an_input_lists_the_channels_it_takes() {
+        assert_eq!(TrackInput::Mono(5).channels().as_slice(), &[5]);
+        assert_eq!(TrackInput::Pair(1, 3).channels().as_slice(), &[1, 3]);
+    }
+
+    #[test]
+    fn a_tap_adds_a_second_channel_and_takes_it_away_again() {
+        let mono = TrackInput::Mono(0);
+        let pair = mono.toggled(2);
+        assert_eq!(pair, TrackInput::Pair(0, 2));
+        assert_eq!(pair.toggled(2), TrackInput::Mono(0), "back to one");
+        assert_eq!(pair.toggled(0), TrackInput::Mono(2), "either half");
+    }
+
+    #[test]
+    fn a_third_channel_drops_the_left_one() {
+        let pair = TrackInput::Pair(0, 2);
+        assert_eq!(
+            pair.toggled(5),
+            TrackInput::Pair(2, 5),
+            "the newest two are kept"
+        );
+    }
+
+    #[test]
+    fn a_track_always_records_something() {
+        let mono = TrackInput::Mono(4);
+        assert_eq!(mono.toggled(4), mono, "the last channel cannot be dropped");
+    }
+
+    #[test]
     fn ids_reject_out_of_range() {
         assert!(TrackId::new(7).is_ok());
         assert!(TrackId::new(8).is_err());
@@ -200,32 +245,76 @@ mod tests {
     }
 }
 
-/// Which input a track records.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// The capture channels an input takes, in the order they land on the clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Picks {
+    channels: [u8; 2],
+    count: usize,
+}
+
+impl Picks {
+    /// The channels, lower first.
+    pub fn as_slice(&self) -> &[u8] {
+        &self.channels[..self.count]
+    }
+}
+
+/// Which capture channels a track records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrackInput {
-    /// Input channels in order, so a stereo source stays stereo.
-    #[default]
-    Stereo,
-    /// One input channel on every channel of the clip.
+    /// One channel, on every channel of the clip.
     Mono(u8),
+    /// Two channels as left and right. The lower channel is left.
+    Pair(u8, u8),
+}
+
+impl Default for TrackInput {
+    /// The first two channels, which is a stereo source on any interface.
+    fn default() -> Self {
+        Self::Pair(0, 1)
+    }
 }
 
 impl TrackInput {
-    /// The column that stands for this input on a row of pads.
-    ///
-    /// Column zero is the stereo pair; the rest are one input each.
-    pub fn column(self) -> usize {
+    /// Two channels as a pair, lower on the left. The same channel twice is mono.
+    pub fn pair(one: u8, two: u8) -> Self {
+        if one == two {
+            return Self::Mono(one);
+        }
+        Self::Pair(one.min(two), one.max(two))
+    }
+
+    /// The channels this takes, lower first.
+    pub fn channels(self) -> Picks {
         match self {
-            Self::Stereo => 0,
-            Self::Mono(channel) => usize::from(channel) + 1,
+            Self::Mono(channel) => Picks {
+                channels: [channel, 0],
+                count: 1,
+            },
+            Self::Pair(left, right) => Picks {
+                channels: [left, right],
+                count: 2,
+            },
         }
     }
 
-    /// The input a column stands for.
-    pub fn from_column(column: usize) -> Self {
-        match column {
-            0 => Self::Stereo,
-            other => Self::Mono(u8::try_from(other - 1).unwrap_or(u8::MAX)),
+    /// Whether this takes `channel`.
+    pub fn takes(self, channel: u8) -> bool {
+        self.channels().as_slice().contains(&channel)
+    }
+
+    /// The same input with `channel` added, or removed if it was already taken.
+    ///
+    /// Adding a third channel drops the left one, so the newest two are kept. Removing
+    /// the last channel leaves it alone: a track always records something.
+    #[must_use]
+    pub fn toggled(self, channel: u8) -> Self {
+        match self {
+            Self::Mono(held) if held == channel => Self::Mono(held),
+            Self::Mono(held) => Self::pair(held, channel),
+            Self::Pair(left, right) if left == channel => Self::Mono(right),
+            Self::Pair(left, right) if right == channel => Self::Mono(left),
+            Self::Pair(_, right) => Self::pair(right, channel),
         }
     }
 }

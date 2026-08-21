@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use free_loop_audio::{AudioConfig, InputSource};
+use free_loop_audio::AudioConfig;
 use free_loop_core::{LaunchMode, SampleRate, Tempo, TimeError, TimeSignature, TrackInput};
 use free_loop_engine::{ClickConfig, EngineConfig, EngineError};
 use serde::Deserialize;
@@ -210,8 +210,6 @@ impl Config {
             sample_rate: self.audio.sample_rate,
             buffer_frames: self.audio.buffer_frames,
             channels: self.audio.channels,
-            // Every input channel reaches the engine, which picks one per track.
-            input_source: InputSource::Direct,
             cushion_blocks: self.audio.cushion_blocks,
             capture_offset: self.audio.capture_offset_frames,
         }
@@ -238,7 +236,7 @@ impl Config {
     pub fn track_input(&self) -> TrackInput {
         match self.audio.input_channel {
             Some(channel) => TrackInput::Mono(u8::try_from(channel).unwrap_or(0)),
-            None => TrackInput::Stereo,
+            None => TrackInput::default(),
         }
     }
 
@@ -259,12 +257,18 @@ impl Config {
     /// # Errors
     ///
     /// [`ConfigError`] if a musical value is out of range.
-    pub fn engine(&self, sample_rate: u32, channels: usize) -> Result<EngineConfig, ConfigError> {
+    pub fn engine(
+        &self,
+        sample_rate: u32,
+        channels: usize,
+        capture_channels: usize,
+    ) -> Result<EngineConfig, ConfigError> {
         Ok(EngineConfig {
             sample_rate: SampleRate::new(sample_rate)?,
             tempo: Tempo::new(self.transport.tempo)?,
             time_signature: self.time_signature()?,
             channels,
+            capture_channels,
             max_bars: self.transport.max_bars,
             segment_pool: self.engine.segment_pool,
             declick: free_loop_core::Frames(self.engine.declick_frames),
@@ -411,7 +415,7 @@ mod tests {
         assert_eq!(config.track_input(), TrackInput::Mono(1));
 
         let config = Config::parse("").unwrap();
-        assert_eq!(config.track_input(), TrackInput::Stereo);
+        assert_eq!(config.track_input(), TrackInput::default());
     }
 
     #[test]
@@ -423,7 +427,7 @@ mod tests {
     #[test]
     fn an_impossible_tempo_is_refused() {
         let config = Config::parse("[transport]\ntempo = 5000.0\n").unwrap();
-        assert!(config.engine(48_000, 2).is_err());
+        assert!(config.engine(48_000, 2, 2).is_err());
     }
 
     #[test]

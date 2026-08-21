@@ -1,8 +1,8 @@
 //! What a session records besides its audio.
 
 use free_loop_core::{
-    GAIN_STEPS, IndexOutOfRange, SLOT_COUNT, SlotAddr, SlotId, TRACK_COUNT, TrackId, UNITY_STEP,
-    pad_bit,
+    GAIN_STEPS, INPUT_CHANNELS, IndexOutOfRange, SLOT_COUNT, SlotAddr, SlotId, TRACK_COUNT,
+    TrackId, UNITY_STEP, pad_bit,
 };
 use serde::{Deserialize, Serialize};
 
@@ -62,13 +62,19 @@ impl ClipEntry {
 }
 
 /// One track's settings, for the tracks that are not on their defaults.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrackEntry {
     /// Row on the grid.
     pub track: u8,
-    /// The column the track's input sits on. Zero is the whole input.
+    /// The column the track's input sat on, from before channels were listed.
+    ///
+    /// Zero meant the first two channels and the rest meant one channel each. Read only
+    /// when `input_channels` is absent.
     #[serde(default)]
     pub input: usize,
+    /// The capture channels the track records, lower first. One is mono, two are L and R.
+    #[serde(default)]
+    pub input_channels: Option<Vec<u8>>,
     /// Whether launching a clip plays it from its start.
     #[serde(default)]
     pub restart: bool,
@@ -156,6 +162,14 @@ impl Manifest {
 
             if entry.input > SLOT_COUNT {
                 return Err("a track's input is not a column");
+            }
+            if let Some(channels) = entry.input_channels.as_deref() {
+                if channels.is_empty() || channels.len() > 2 {
+                    return Err("a track records one or two channels");
+                }
+                if channels.iter().any(|c| usize::from(*c) >= INPUT_CHANNELS) {
+                    return Err("a track's input channel is off the grid");
+                }
             }
             if entry
                 .gain_step
@@ -265,8 +279,9 @@ mod tests {
             input: 1,
             restart: false,
             gain_step: None,
+            input_channels: None,
         };
-        broken.tracks = vec![entry, entry];
+        broken.tracks = vec![entry.clone(), entry];
         assert_eq!(broken.validate(), Err("two entries for one track"));
     }
 
@@ -278,6 +293,7 @@ mod tests {
             input: 0,
             restart: false,
             gain_step: Some(200),
+            input_channels: None,
         }];
         assert_eq!(broken.validate(), Err("a track's level is off the ladder"));
     }
@@ -290,6 +306,7 @@ mod tests {
             input: 0,
             restart: false,
             gain_step: None,
+            input_channels: None,
         }];
         assert!(broken.validate().is_err());
     }
@@ -310,6 +327,7 @@ mod tests {
             input: 2,
             restart: true,
             gain_step: Some(3),
+            input_channels: None,
         }];
         let written = toml::to_string(&manifest).unwrap();
         let read: Manifest = toml::from_str(&written).unwrap();

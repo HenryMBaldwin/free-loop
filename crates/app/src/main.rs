@@ -99,8 +99,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         None => println!("tracks start on the whole input"),
     }
 
-    let (engine, mut housekeeping) =
-        Engine::new(config.engine(negotiated.sample_rate, negotiated.channels)?)?;
+    let (engine, mut housekeeping) = Engine::new(config.engine(
+        negotiated.sample_rate,
+        negotiated.channels,
+        negotiated.capture_channels,
+    )?)?;
     let mut io = opened.start(engine)?;
 
     let mut surface = connect_surface();
@@ -116,7 +119,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         eprintln!("sessions: {trouble}");
     }
     controller.set_sessions(store.index());
-    controller.set_input_count(negotiated.channels);
+    controller.set_input_count(negotiated.capture_channels);
     controller.set_default_input(config.track_input());
     controller.set_default_launch_mode(config.launch_mode());
     controller.set_inputs([config.track_input(); free_loop_core::TRACK_COUNT]);
@@ -388,9 +391,7 @@ fn load_session(
                 restored.tracks[track].gain_step
             }));
             controller.set_loaded_tempo(restored.tempo);
-            controller.set_inputs(core::array::from_fn(|track| {
-                free_loop_core::TrackInput::from_column(restored.tracks[track].input)
-            }));
+            controller.set_inputs(core::array::from_fn(|track| restored.tracks[track].input));
             controller.set_launch_modes(core::array::from_fn(|track| {
                 if restored.tracks[track].restart {
                     free_loop_core::LaunchMode::Restart
@@ -577,7 +578,7 @@ fn save_settings(controller: &Controller) -> SaveSettings {
     SaveSettings {
         tempo: controller.tempo(),
         tracks: core::array::from_fn(|track| TrackSettings {
-            input: inputs[track].column(),
+            input: inputs[track],
             restart: modes[track].restarts(),
             gain_step: gains[track],
         }),
