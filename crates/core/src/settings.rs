@@ -18,8 +18,8 @@ pub struct Settings {
     pub inputs: [TrackInput; TRACK_COUNT],
     /// Where each track's clips are anchored when launched.
     pub launch_modes: [LaunchMode; TRACK_COUNT],
-    /// Whether each track opens its loops from the tail rather than the head.
-    pub pickups: [bool; TRACK_COUNT],
+    /// Beats each track opens its loops from the tail for. Zero takes the head.
+    pub pickups: [u8; TRACK_COUNT],
 }
 
 impl Settings {
@@ -31,7 +31,7 @@ impl Settings {
             soloed: 0,
             inputs: [TrackInput::default(); TRACK_COUNT],
             launch_modes: [LaunchMode::default(); TRACK_COUNT],
-            pickups: [false; TRACK_COUNT],
+            pickups: [0; TRACK_COUNT],
         }
     }
 }

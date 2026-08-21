@@ -81,9 +81,9 @@ pub struct TrackEntry {
     /// Whether launching a clip plays it from its start.
     #[serde(default)]
     pub restart: bool,
-    /// Whether the track opens its loops from the tail rather than the head.
+    /// Beats the track opens its loops from the tail for. Zero takes the head.
     #[serde(default)]
-    pub pickup: bool,
+    pub pickup: u8,
     /// The step on the gain ladder the track plays at.
     ///
     /// Absent in a session saved before tracks carried their own level, where the levels
@@ -179,6 +179,9 @@ impl Manifest {
                 if channels.iter().any(|c| usize::from(*c) >= INPUT_CHANNELS) {
                     return Err("a track's input channel is off the grid");
                 }
+            }
+            if usize::from(entry.pickup) >= SLOT_COUNT {
+                return Err("a track opens from more beats than a bar holds");
             }
             if entry
                 .gain_step
@@ -288,7 +291,7 @@ mod tests {
             track: 3,
             input: 1,
             restart: false,
-            pickup: false,
+            pickup: 0,
             gain_step: None,
             input_channels: None,
         };
@@ -303,7 +306,7 @@ mod tests {
             track: 3,
             input: 0,
             restart: false,
-            pickup: false,
+            pickup: 0,
             gain_step: Some(200),
             input_channels: None,
         }];
@@ -317,7 +320,7 @@ mod tests {
             track: 99,
             input: 0,
             restart: false,
-            pickup: false,
+            pickup: 0,
             gain_step: None,
             input_channels: None,
         }];
@@ -339,7 +342,7 @@ mod tests {
             track: 7,
             input: 2,
             restart: true,
-            pickup: false,
+            pickup: 0,
             gain_step: Some(3),
             input_channels: None,
         }];

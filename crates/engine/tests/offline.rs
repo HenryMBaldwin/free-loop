@@ -2464,9 +2464,9 @@ mod pickup {
     /// Frames of tail a take keeps in 4/4.
     const TAIL: u64 = 3 * BEAT;
 
-    fn set_pickup(harness: &mut Harness, track: usize, on: bool) {
-        let mut pickups = [false; free_loop_core::TRACK_COUNT];
-        pickups[track] = on;
+    fn set_pickup(harness: &mut Harness, track: usize, beats: u8) {
+        let mut pickups = [0; free_loop_core::TRACK_COUNT];
+        pickups[track] = beats;
         harness.setting(|s| s.pickups = pickups);
     }
 
@@ -2482,7 +2482,7 @@ mod pickup {
         harness.run_to(from);
         let head = harness.run_to(from + TAIL);
 
-        set_pickup(&mut harness, 0, true);
+        set_pickup(&mut harness, 0, 3);
         let next = (harness.position() / BAR + 1) * BAR;
         harness.run_to(next);
         let opened = harness.run_to(next + TAIL);
@@ -2498,12 +2498,37 @@ mod pickup {
     }
 
     #[test]
+    fn a_shallower_setting_takes_fewer_beats_from_the_tail() {
+        let mut harness = Harness::new(128);
+        let pad = addr(0, 0);
+        let (start, end) = record(&mut harness, pad, 0, 1);
+        harness.run_to(end + TAIL + 1);
+        set_pickup(&mut harness, 0, 1);
+
+        let next = (harness.position() / BAR + 1) * BAR;
+        harness.run_to(next);
+        let out = harness.run_to(next + 2 * BEAT);
+
+        for (i, sample) in out.iter().enumerate() {
+            let frame = next + (i / CHANNELS) as u64;
+            let phase = (frame - start) % BAR;
+            // One beat from the tail, then back to the take's own head.
+            let source = if phase < BEAT { start + BAR } else { start };
+            assert_eq!(
+                *sample,
+                signal(source + phase, i % CHANNELS),
+                "frame {frame}"
+            );
+        }
+    }
+
+    #[test]
     fn the_rest_of_the_loop_is_untouched() {
         let mut harness = Harness::new(128);
         let pad = addr(0, 0);
         let (start, end) = record(&mut harness, pad, 0, 1);
         harness.run_to(end + TAIL + 1);
-        set_pickup(&mut harness, 0, true);
+        set_pickup(&mut harness, 0, 3);
 
         // Past the beats the tail stands in for, back to what was recorded.
         let next = (harness.position() / BAR + 1) * BAR + TAIL;
@@ -2528,8 +2553,8 @@ mod pickup {
         let (start, end) = record(&mut harness, pad, 0, 1);
         harness.run_to(end + TAIL + 1);
 
-        set_pickup(&mut harness, 0, true);
-        set_pickup(&mut harness, 0, false);
+        set_pickup(&mut harness, 0, 3);
+        set_pickup(&mut harness, 0, 0);
 
         let next = (harness.position() / BAR + 1) * BAR;
         harness.run_to(next);

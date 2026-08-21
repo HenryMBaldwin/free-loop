@@ -51,6 +51,9 @@ impl LedColor {
     }
 }
 
+/// Steps of brightness a graded button takes, brightest last.
+pub const SHADES: u8 = 4;
+
 /// How a colour is shown.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum LedStyle {
@@ -63,6 +66,8 @@ pub enum LedStyle {
     Flash,
     /// Breathing. Marks something currently sounding.
     Pulse,
+    /// Steady, at step `1..=SHADES` of full brightness. Marks a setting with degrees.
+    Shade(u8),
 }
 
 /// One button's appearance.
@@ -86,6 +91,14 @@ impl Led {
         Self {
             color,
             style: LedStyle::Solid,
+        }
+    }
+
+    /// Steady at step `step` of [`SHADES`], for a setting with degrees.
+    pub fn shade(color: LedColor, step: u8) -> Self {
+        Self {
+            color,
+            style: LedStyle::Shade(step.clamp(1, SHADES)),
         }
     }
 
