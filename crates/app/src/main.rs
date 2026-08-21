@@ -94,9 +94,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         negotiated.channels,
         negotiated.cushion_frames
     );
-    match config.audio.input_channel {
-        Some(channel) => println!("tracks start on input channel {channel}"),
-        None => println!("tracks start on the first stereo pair"),
+    let input = config.track_input(negotiated.capture_channels);
+    match input {
+        free_loop_core::TrackInput::Mono(channel) if config.audio.input_channel.is_some() => {
+            println!("tracks start on input channel {channel}");
+        }
+        _ => println!("tracks start on the first stereo pair"),
     }
 
     let (engine, mut housekeeping) = Engine::new(config.engine(
@@ -120,9 +123,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     controller.set_sessions(store.index());
     controller.set_input_count(negotiated.capture_channels);
-    controller.set_default_input(config.track_input());
+    controller.set_default_input(input);
     controller.set_default_launch_mode(config.launch_mode());
-    controller.set_inputs([config.track_input(); free_loop_core::TRACK_COUNT]);
+    controller.set_inputs([input; free_loop_core::TRACK_COUNT]);
     controller.set_launch_modes([config.launch_mode(); free_loop_core::TRACK_COUNT]);
 
     println!(
