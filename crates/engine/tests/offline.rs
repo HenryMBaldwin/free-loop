@@ -2418,3 +2418,45 @@ mod declick {
         assert!(!is_silent(&out), "and it comes back after it");
     }
 }
+
+mod seam {
+    use super::*;
+
+    /// Records one bar of constant input, then renders across the loop point.
+    ///
+    /// A constant is perfectly periodic, so anything but a constant coming back is the
+    /// engine's doing rather than the material's.
+    #[test]
+    fn a_constant_loop_crosses_its_own_seam_unchanged() {
+        let mut harness = Harness::new(128);
+        let pad = addr(0, 0);
+
+        harness.command(Command::Press(pad));
+        let mut fed = 0;
+        while fed < BAR {
+            let input = vec![0.25_f32; 128 * CHANNELS];
+            let mut out = vec![0.0; 128 * CHANNELS];
+            harness
+                .engine
+                .process(&input, &mut out, &mut harness.events);
+            fed += 128;
+        }
+        harness.command(Command::Press(pad));
+        let input = vec![0.25_f32; 128 * CHANNELS];
+        let mut out = vec![0.0; 128 * CHANNELS];
+        harness
+            .engine
+            .process(&input, &mut out, &mut harness.events);
+
+        // Two whole loops with nothing coming in, so every sample is the clip.
+        let played = harness.run_to(harness.position() + 2 * BAR);
+        let odd: Vec<(usize, f32)> = played
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| **s != 0.25)
+            .map(|(i, s)| (i, *s))
+            .take(8)
+            .collect();
+        assert!(odd.is_empty(), "not constant at {odd:?}");
+    }
+}
