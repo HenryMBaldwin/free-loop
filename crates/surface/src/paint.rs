@@ -343,7 +343,7 @@ pub fn settings(chrome: Chrome) -> LedFrame {
 
 /// Paints a question over the grid: yes on the left, no on the right.
 ///
-/// Every other pad is dark, so nothing else can be pressed by mistake.
+/// Every other pad is dark.
 pub fn confirm(chrome: Chrome) -> LedFrame {
     let mut frame = LedFrame::new();
 
@@ -1009,7 +1009,7 @@ mod tests {
         let painted = inputs(chrome);
         let row = TrackId::new(0).unwrap();
 
-        // One column per channel the device has, so two columns for two channels.
+        // One column per channel the device has.
         for column in 0..2 {
             let addr = SlotAddr::new(row, SlotId::new(column).unwrap());
             assert!(painted.pad(addr).is_lit(), "channel {column} is offered");

@@ -14,7 +14,7 @@ pub const MAX_BLOCK_FRAMES: usize = 8_192;
 /// Maps device channels onto the capture channels the engine reads.
 ///
 /// Capture is the device's own width, bounded by [`INPUT_CHANNELS`]. Every channel a
-/// track might pick has to arrive, so nothing is narrowed here.
+/// track might pick has to arrive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChannelMap {
     device: usize,
