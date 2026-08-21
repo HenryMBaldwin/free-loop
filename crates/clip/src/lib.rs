@@ -115,6 +115,8 @@ impl Segment {
 pub struct SegmentPool {
     free: Vec<Segment>,
     channels: usize,
+    /// Segments allocated up front, which `free` never grows past.
+    capacity: usize,
     /// Segments accounted to storage held elsewhere, which are never handed out.
     reserved: usize,
 }
@@ -125,6 +127,7 @@ impl SegmentPool {
         Self {
             free: (0..count).map(|_| Segment::new(channels)).collect(),
             channels,
+            capacity: count,
             reserved: 0,
         }
     }
@@ -150,6 +153,11 @@ impl SegmentPool {
     /// Segments held back for storage the pool did not allocate.
     pub fn reserved(&self) -> usize {
         self.reserved
+    }
+
+    /// Segments the pool was built with, which is the ceiling it holds everything to.
+    pub fn capacity(&self) -> usize {
+        self.capacity
     }
 
     /// Channel count every segment in this pool was allocated for.
@@ -269,6 +277,35 @@ impl AudioBuffer {
                 out.fill(src[(done + frame_index) * src_channels + pick]);
             }
             done += run;
+        }
+
+        done
+    }
+
+    /// Backs `run` frames at `frame` with silence, drawing segments as needed.
+    ///
+    /// For frames a recording covered but the device never delivered. Recycled segments
+    /// still hold the last take's audio, so the range is zeroed.
+    ///
+    /// Returns how many frames are now backed, short of `run` only when the pool ran dry
+    /// or the buffer's capacity was reached.
+    pub fn silence(&mut self, frame: u64, run: usize, pool: &mut SegmentPool) -> usize {
+        let mut done = 0;
+
+        while done < run {
+            let (index, offset) = split(frame + done as u64);
+            let Some(slot) = self.segments.get_mut(index) else {
+                break;
+            };
+            if slot.is_none() {
+                let Some(segment) = pool.take() else { break };
+                *slot = Some(segment);
+            }
+            let Some(segment) = slot.as_mut() else { break };
+
+            let span = (run - done).min(SEGMENT_FRAMES - offset);
+            segment.data[offset * self.channels..(offset + span) * self.channels].fill(0.0);
+            done += span;
         }
 
         done
@@ -409,6 +446,13 @@ impl Clip {
     ) -> usize {
         self.buffer
             .write_channel(frame, src, src_channels, pick, pool)
+    }
+
+    /// Backs `run` frames at `frame` with silence, drawing segments as needed.
+    ///
+    /// Returns how many frames are now backed.
+    pub fn silence(&mut self, frame: u64, run: usize, pool: &mut SegmentPool) -> usize {
+        self.buffer.silence(frame, run, pool)
     }
 
     /// Returns the clip's segments to `pool`, leaving it empty and reusable.

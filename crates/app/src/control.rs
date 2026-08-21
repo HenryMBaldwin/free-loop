@@ -746,6 +746,10 @@ impl Controller {
             // A take with nowhere to go says so on the whole grid: the session is full,
             // not that pad.
             Event::RecordingRefused { .. } => self.show(LedColor::Red, now, None),
+            // The same answer the store's own refusal gives.
+            Event::LoadRefused { wanted, .. } => {
+                self.load_failed(now, Some(wanted.to_string()));
+            }
             // Bars are already covered by the beat they start with, and the rest are for
             // logging rather than for the grid.
             Event::Bar { .. }

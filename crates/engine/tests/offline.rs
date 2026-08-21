@@ -839,6 +839,102 @@ fn a_load_leaves_less_room_to_record() {
 }
 
 #[test]
+fn a_take_with_no_input_at_all_still_costs_the_pool() {
+    let mut harness = Harness::new(512);
+    let available = harness.engine.segments_available();
+    let pad = addr(0, 0);
+
+    // Two bars with the device delivering nothing, so every frame is silence the clip
+    // still has to hold.
+    harness.command(Command::Press(pad));
+    while harness.position() < 2 * BAR {
+        let mut out = vec![0.0; 512 * CHANNELS];
+        harness.engine.process(&[], &mut out, &mut harness.events);
+    }
+    harness.command(Command::Press(pad));
+    let mut out = vec![0.0; 512 * CHANNELS];
+    harness.engine.process(&[], &mut out, &mut harness.events);
+
+    let held = available - harness.engine.segments_available();
+    assert_eq!(
+        held,
+        free_loop_clip::segments_for(Frames(2 * BAR)),
+        "charged for its whole length, not only for what arrived"
+    );
+}
+
+#[test]
+fn silent_takes_cannot_outgrow_the_pool() {
+    let mut harness = Harness::new(512);
+    let pool = harness.engine.segments_available();
+
+    // Repeated whole takes with no input at all. Once the pool is spent the rest have to
+    // be refused.
+    for track in 0..8 {
+        let pad = addr(track, 0);
+        harness.command(Command::Press(pad));
+        let until = (harness.position() / BAR + 3) * BAR;
+        while harness.position() < until {
+            let mut out = vec![0.0; 512 * CHANNELS];
+            harness.engine.process(&[], &mut out, &mut harness.events);
+        }
+        harness.command(Command::Press(pad));
+        let mut out = vec![0.0; 512 * CHANNELS];
+        harness.engine.process(&[], &mut out, &mut harness.events);
+    }
+
+    // Measured the way a save measures it: the clips the engine would hand over.
+    harness.command(Command::Snapshot { request: 1 });
+    harness.run_frames(512);
+    let mut cost = 0;
+    let mut clips = 0;
+    harness.housekeeping.snapshots.drain(|snapshot| {
+        cost += snapshot.clip.segments();
+        clips += 1;
+    });
+
+    assert!(clips > 0, "some takes did seal");
+    assert!(
+        cost <= pool,
+        "{clips} clips cost {cost} segments against a pool of {pool}"
+    );
+}
+
+#[test]
+fn a_load_bigger_than_the_pool_is_refused_whole() {
+    let mut harness = Harness::new(128);
+    let pool = harness.engine.segments_available();
+
+    load_one(&mut harness, addr(0, 0), pool + 1);
+
+    assert_eq!(
+        harness.engine.state(addr(0, 0)),
+        SlotState::Empty,
+        "nothing was put on the grid"
+    );
+    let refused: Vec<(u32, u32)> = harness
+        .drain_events()
+        .iter()
+        .filter_map(|e| match e {
+            Event::LoadRefused { wanted, allowed } => Some((*wanted, *allowed)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        refused,
+        vec![(
+            u32::try_from(pool + 1).unwrap(),
+            u32::try_from(pool).unwrap()
+        )]
+    );
+    assert_eq!(
+        harness.engine.segments_available(),
+        pool,
+        "nothing reserved"
+    );
+}
+
+#[test]
 fn replacing_a_loaded_session_keeps_the_reservation_exact() {
     let mut harness = Harness::new(128);
     let available = harness.engine.segments_available();

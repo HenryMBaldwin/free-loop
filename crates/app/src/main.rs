@@ -901,17 +901,20 @@ fn report(event: Event) {
 
         Event::RecordingRefused { addr } => {
             eprintln!(
-                "no recording space free for track {} slot {}; the pad is left empty",
+                "no clip from track {} slot {}; the pad is left empty",
                 addr.track.index(),
                 addr.slot.index()
             );
         }
         Event::RecordBufferLow { addr } => {
             eprintln!(
-                "out of recording space on track {} slot {}",
+                "out of recording space on track {} slot {}; the take will be discarded",
                 addr.track.index(),
                 addr.slot.index()
             );
+        }
+        Event::LoadRefused { wanted, allowed } => {
+            eprintln!("session needs {wanted} segments but the pool holds {allowed}");
         }
         Event::TempoRejected => eprintln!("tempo is locked while clips exist"),
         // Clipping and short capture report per block, too often to print. `ClipReport`
