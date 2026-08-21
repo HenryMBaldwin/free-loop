@@ -96,7 +96,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     match config.audio.input_channel {
         Some(channel) => println!("tracks start on input channel {channel}"),
-        None => println!("tracks start on the whole input"),
+        None => println!("tracks start on the first stereo pair"),
     }
 
     let (engine, mut housekeeping) = Engine::new(config.engine(
@@ -391,7 +391,13 @@ fn load_session(
                 restored.tracks[track].gain_step
             }));
             controller.set_loaded_tempo(restored.tempo);
-            controller.set_inputs(core::array::from_fn(|track| restored.tracks[track].input));
+            // A session recorded on a wider interface names channels this one may not
+            // have.
+            controller.set_inputs(core::array::from_fn(|track| {
+                restored.tracks[track]
+                    .input
+                    .within(negotiated.capture_channels)
+            }));
             controller.set_launch_modes(core::array::from_fn(|track| {
                 if restored.tracks[track].restart {
                     free_loop_core::LaunchMode::Restart
@@ -912,7 +918,7 @@ fn report(event: Event) {
         }
         Event::RecordBufferLow { addr } => {
             eprintln!(
-                "out of recording space on track {} slot {}; the take will be discarded",
+                "out of recording space on track {} slot {}; the take will be cut short",
                 addr.track.index(),
                 addr.slot.index()
             );

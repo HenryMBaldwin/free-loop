@@ -51,8 +51,8 @@ pub struct Audio {
     pub channels: Option<u16>,
     /// Input channel every track starts recording, changeable from the grid.
     ///
-    /// Empty starts them on the whole input, which is right for a stereo source. Set it
-    /// when one instrument is in one jack of a multi-input interface.
+    /// Empty starts them on the first stereo pair. Set it when one instrument is in one
+    /// jack of a multi-input interface.
     pub input_channel: Option<usize>,
     /// Blocks of capture buffered before the output starts consuming.
     pub cushion_blocks: u32,
@@ -268,7 +268,7 @@ impl Config {
             capture_channels,
             segment_pool: self.engine.segment_pool,
             declick: free_loop_core::Frames(self.engine.declick_frames),
-            input: self.track_input(),
+            input: self.track_input().within(capture_channels),
             launch_mode: self.launch_mode(),
             // Replaced by what the driver reports once the streams are running.
             capture_offset: free_loop_core::Frames::ZERO,
@@ -293,7 +293,7 @@ pub const EXAMPLE: &str = r#"# Free Loop configuration. Every setting shown at i
 # buffer_frames = 256
 # channels = 2
 
-# The device input channel your instrument is in. Omit for a stereo source.
+# The device input channel your instrument is in. Omit for the first stereo pair.
 # A Scarlett Solo's instrument jack is channel 1.
 # input_channel = 1
 

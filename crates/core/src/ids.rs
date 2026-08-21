@@ -148,6 +148,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_input_is_brought_inside_the_device_it_lands_on() {
+        assert_eq!(TrackInput::Mono(6).within(2), TrackInput::Mono(1));
+        assert_eq!(TrackInput::Pair(1, 3).within(4), TrackInput::Pair(1, 3));
+        assert_eq!(
+            TrackInput::Pair(6, 7).within(2),
+            TrackInput::Mono(1),
+            "a pair with nowhere to spread is one channel"
+        );
+    }
+
+    #[test]
     fn a_pair_puts_the_lower_channel_on_the_left() {
         assert_eq!(TrackInput::pair(3, 1), TrackInput::Pair(1, 3));
         assert_eq!(TrackInput::pair(1, 3), TrackInput::Pair(1, 3));
@@ -270,6 +281,19 @@ impl TrackInput {
                 channels: [left, right],
                 count: 2,
             },
+        }
+    }
+
+    /// The same input with every channel brought inside a device of `channels`.
+    ///
+    /// A channel the device lacks moves to the highest it has, and a pair whose halves
+    /// land on the same channel becomes mono.
+    #[must_use]
+    pub fn within(self, channels: usize) -> Self {
+        let last = u8::try_from(channels.saturating_sub(1)).unwrap_or(u8::MAX);
+        match self {
+            Self::Mono(channel) => Self::Mono(channel.min(last)),
+            Self::Pair(left, right) => Self::pair(left.min(last), right.min(last)),
         }
     }
 

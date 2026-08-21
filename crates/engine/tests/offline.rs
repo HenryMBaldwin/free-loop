@@ -1910,6 +1910,49 @@ mod resources {
     }
 
     #[test]
+    fn a_press_cannot_cancel_the_stop_the_pool_forced() {
+        let mut harness = Harness::new(512);
+        for track in 0..2 {
+            harness.command(Command::Press(addr(track, 0)));
+        }
+        harness.run_to(2 * BAR);
+        for track in 0..2 {
+            harness.command(Command::Press(addr(track, 0)));
+        }
+        harness.run_to(3 * BAR);
+        harness.drain_events();
+
+        let long = addr(7, 7);
+        harness.command(Command::Press(long));
+        let low = |harness: &Harness| {
+            harness
+                .events
+                .iter()
+                .any(|e| matches!(e, Event::RecordBufferLow { addr } if *addr == long))
+        };
+        for _ in 0..2_000 {
+            if low(&harness) {
+                break;
+            }
+            harness.run_frames(512);
+        }
+        assert!(low(&harness), "the pool gave out");
+
+        // The press lands after the pool gave out and before the beat that seals it.
+        harness.command(Command::Press(long));
+        let until = (harness.position() / BAR + 2) * BAR;
+        harness.run_to(until);
+
+        assert!(
+            harness
+                .events
+                .iter()
+                .any(|e| matches!(e, Event::ClipRecorded { addr, .. } if *addr == long)),
+            "the take still sealed at the boundary the pool forced"
+        );
+    }
+
+    #[test]
     fn a_take_that_runs_out_is_cut_to_the_bars_it_holds() {
         let mut harness = Harness::new(512);
 

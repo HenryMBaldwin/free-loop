@@ -289,47 +289,6 @@ impl AudioBuffer {
         done
     }
 
-    /// Writes one channel of `src` onto every channel, drawing segments as needed.
-    ///
-    /// `src` is interleaved `src_channels` wide. `pick` is clamped to what it holds.
-    /// Returns how many frames were written.
-    pub fn write_channel(
-        &mut self,
-        frame: u64,
-        src: &[f32],
-        src_channels: usize,
-        pick: usize,
-        pool: &mut SegmentPool,
-    ) -> usize {
-        if src_channels == 0 {
-            return 0;
-        }
-        let pick = pick.min(src_channels - 1);
-        let total = src.len() / src_channels;
-        let mut done = 0;
-
-        while done < total {
-            let (index, offset) = split(frame + done as u64);
-            let Some(slot) = self.segments.get_mut(index) else {
-                break;
-            };
-            if slot.is_none() {
-                let Some(segment) = pool.take() else { break };
-                *slot = Some(segment);
-            }
-            let Some(segment) = slot.as_mut() else { break };
-
-            let run = (total - done).min(SEGMENT_FRAMES - offset);
-            let dst = &mut segment.data[offset * self.channels..(offset + run) * self.channels];
-            for (frame_index, out) in dst.chunks_exact_mut(self.channels).enumerate() {
-                out.fill(src[(done + frame_index) * src_channels + pick]);
-            }
-            done += run;
-        }
-
-        done
-    }
-
     /// Backs `run` frames at `frame` with silence, drawing segments as needed.
     ///
     /// For frames a recording covered but the device never delivered. Recycled segments
@@ -523,21 +482,6 @@ impl Clip {
     ) -> usize {
         self.buffer
             .write_picked(frame, src, src_channels, picks, pool)
-    }
-
-    /// Writes one channel of `src` onto every channel of the clip.
-    ///
-    /// Returns how many frames were written.
-    pub fn write_channel(
-        &mut self,
-        frame: u64,
-        src: &[f32],
-        src_channels: usize,
-        pick: usize,
-        pool: &mut SegmentPool,
-    ) -> usize {
-        self.buffer
-            .write_channel(frame, src, src_channels, pick, pool)
     }
 
     /// Backs `run` frames at `frame` with silence, drawing segments as needed.
