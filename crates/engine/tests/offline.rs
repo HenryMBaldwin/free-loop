@@ -2438,6 +2438,34 @@ mod tail {
     }
 
     #[test]
+    fn a_snapshot_taken_mid_tail_holds_a_finished_clip() {
+        let mut harness = Harness::new(128);
+        let pad = addr(0, 0);
+        let (_, end) = record(&mut harness, pad, 0, 1);
+
+        // Part way through the tail, with the clip already sealed and playing.
+        harness.run_to(end + BEAT);
+        harness.command(Command::Snapshot { request: 1 });
+        harness.run_to(end + TAIL + BAR);
+        harness.housekeeping.recycler.run();
+
+        let mut taken = Vec::new();
+        harness
+            .housekeeping
+            .snapshots
+            .drain(|snapshot| taken.push(snapshot));
+        assert_eq!(taken.len(), 1, "the pad was published");
+
+        let held = taken[0].clip.tail();
+        assert!(held > Frames::ZERO, "the snapshot carries a tail, not zero");
+        assert_eq!(
+            harness.engine.clip_tail(pad),
+            held,
+            "and the clip on the grid agrees with what was saved"
+        );
+    }
+
+    #[test]
     fn a_clip_only_claims_the_tail_the_pool_gave_it() {
         let mut harness = Harness::new(128);
         let pad = addr(0, 0);

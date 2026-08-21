@@ -739,7 +739,9 @@ fn read_wav(path: &Path, entry: &ClipEntry, channels: u16) -> Result<Clip, Sessi
 
     let channels = usize::from(channels);
     let frames = entry.len_frames;
-    let segments = usize::try_from(frames.div_ceil(SEGMENT_FRAMES as u64)).unwrap_or(1);
+    // The file holds the loop and its tail, and both are read in.
+    let stored = frames.saturating_add(entry.tail_frames);
+    let segments = usize::try_from(stored.div_ceil(SEGMENT_FRAMES as u64)).unwrap_or(1);
     let mut pool = SegmentPool::new(segments.max(1), channels);
     let mut buffer = AudioBuffer::new(segments.max(1), channels);
 
@@ -1924,6 +1926,38 @@ mod tests {
         let mut wanted = vec![0.0; 96 * usize::from(CH)];
         audio.copy_into(Frames(400), &mut wanted);
         assert_eq!(out, wanted);
+    }
+
+    #[test]
+    fn a_tail_across_a_segment_boundary_comes_back_whole() {
+        let dir = TempDir::new("tail-boundary");
+        let store = SessionStore::new(&dir.0);
+        // The loop ends just inside a segment, so its tail runs into the next one.
+        let audio = tailed_clip(SEGMENT_FRAMES - 32, 512);
+
+        store
+            .save(
+                addr(0, 0),
+                &data(vec![SavedClip {
+                    addr: addr(0, 0),
+                    playing: false,
+                    gain_step: UNITY_STEP,
+                    launch_anchor: None,
+                    clip: &audio,
+                }]),
+                BUDGET,
+            )
+            .unwrap();
+
+        let loaded = store.load(addr(0, 0), 48_000, CH, BUDGET).unwrap();
+        let back = &loaded.clips[0].clip;
+        assert_eq!(back.tail(), Frames(512));
+
+        let mut out = vec![0.0; 512 * usize::from(CH)];
+        let mut wanted = vec![0.0; 512 * usize::from(CH)];
+        back.copy_into(Frames(SEGMENT_FRAMES as u64 - 32), &mut out);
+        audio.copy_into(Frames(SEGMENT_FRAMES as u64 - 32), &mut wanted);
+        assert_eq!(out, wanted, "the half past the boundary is not silence");
     }
 
     #[test]
