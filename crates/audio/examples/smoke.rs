@@ -15,7 +15,7 @@
 use std::error::Error;
 use std::time::{Duration, Instant};
 
-use free_loop_audio::{AudioConfig, InputSource, list_devices, open};
+use free_loop_audio::{AudioConfig, list_devices, open};
 use free_loop_core::{
     Command, Event, Frames, SampleRate, SlotAddr, SlotId, SlotState, Tempo, TimeSignature, TrackId,
 };
@@ -31,10 +31,6 @@ const PLAY_BARS: u32 = 4;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let device = std::env::args().nth(1);
-    let input_source = match std::env::args().nth(2) {
-        Some(channel) => InputSource::Mono(channel.parse()?),
-        None => InputSource::Direct,
-    };
 
     let devices = list_devices()?;
     println!("inputs:");
@@ -49,7 +45,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let config = AudioConfig {
         input_device: device.clone(),
         output_device: device,
-        input_source,
         ..AudioConfig::new()
     };
 
@@ -68,6 +63,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         tempo: Tempo::new(TEMPO)?,
         time_signature: TimeSignature::FOUR_FOUR,
         channels: negotiated.channels,
+        capture_channels: negotiated.capture_channels,
         max_bars: 32,
         segment_pool: 64,
         capture_offset: Frames::ZERO,

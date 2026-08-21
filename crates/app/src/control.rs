@@ -176,7 +176,7 @@ impl Controller {
     /// A controller for an empty session.
     pub fn new(tempo: f64, beats_per_bar: u32, click_enabled: bool) -> Self {
         let chrome = Chrome {
-            inputs: [TrackInput::Stereo; TRACK_COUNT],
+            inputs: [TrackInput::default(); TRACK_COUNT],
             launch_modes: [LaunchMode::Follow; TRACK_COUNT],
             input_count: 2,
             beat: 0,
@@ -195,7 +195,7 @@ impl Controller {
             chrome,
             tempo,
             default_tempo: tempo,
-            default_input: TrackInput::Stereo,
+            default_input: TrackInput::default(),
             default_launch_mode: LaunchMode::Follow,
             tempo_before_request: tempo,
             held: [[None; SLOT_COUNT]; TRACK_COUNT],
@@ -282,10 +282,11 @@ impl Controller {
     /// Sets which input the pad's track records, if the device offers it.
     fn set_input(&mut self, addr: SlotAddr) {
         let column = addr.slot.index();
-        if column > self.chrome.input_count {
+        if column >= self.chrome.input_count {
             return;
         }
-        self.chrome.inputs[addr.track.index()] = TrackInput::from_column(column);
+        let channel = u8::try_from(column).unwrap_or(0);
+        self.chrome.inputs[addr.track.index()] = TrackInput::Mono(channel);
         self.settings_changed = true;
         self.dirty = true;
     }
@@ -1813,7 +1814,7 @@ mod tests {
         let mut modes = [LaunchMode::Follow; TRACK_COUNT];
         modes[7] = LaunchMode::Restart;
         controller.set_launch_modes(modes);
-        let mut inputs = [TrackInput::Stereo; TRACK_COUNT];
+        let mut inputs = [TrackInput::default(); TRACK_COUNT];
         inputs[7] = TrackInput::Mono(1);
         controller.set_inputs(inputs);
         let _ = commands(&mut controller);
@@ -1822,7 +1823,7 @@ mod tests {
         controller.on_surface(side(NEW_SIDE), T0);
 
         assert_eq!(controller.launch_modes(), [LaunchMode::Follow; TRACK_COUNT]);
-        assert_eq!(controller.inputs(), [TrackInput::Stereo; TRACK_COUNT]);
+        assert_eq!(controller.inputs(), [TrackInput::default(); TRACK_COUNT]);
     }
 
     #[test]
@@ -1875,18 +1876,26 @@ mod tests {
         controller.on_surface(SurfaceEvent::SidePressed { index: 2 }, T0);
 
         let frame = controller.take_frame().unwrap();
-        let row = SlotAddr::new(TrackId::new(0).unwrap(), SlotId::new(0).unwrap());
-        assert!(frame.pad(row).is_lit(), "stereo is offered on column zero");
+        let channel = |c| SlotAddr::new(TrackId::new(0).unwrap(), SlotId::new(c).unwrap());
+        assert!(frame.pad(channel(0)).is_lit(), "one column per channel");
+        assert!(
+            frame.pad(channel(1)).is_lit(),
+            "and both of the pair are on"
+        );
+        assert!(
+            !frame.pad(channel(2)).is_lit(),
+            "a channel the device lacks is dark"
+        );
     }
 
     #[test]
-    fn picking_a_column_sets_that_tracks_input() {
+    fn a_tap_takes_one_channel_as_mono() {
         let mut controller = controller();
         controller.set_input_count(2);
         controller.on_surface(SurfaceEvent::SidePressed { index: 2 }, T0);
         let _ = commands(&mut controller);
 
-        let pad = SlotAddr::new(TrackId::new(3).unwrap(), SlotId::new(2).unwrap());
+        let pad = SlotAddr::new(TrackId::new(3).unwrap(), SlotId::new(1).unwrap());
         controller.on_surface(
             SurfaceEvent::PadPressed {
                 addr: pad,
@@ -1895,14 +1904,14 @@ mod tests {
             T0,
         );
 
-        let mut wanted = [TrackInput::Stereo; TRACK_COUNT];
+        let mut wanted = [TrackInput::default(); TRACK_COUNT];
         wanted[3] = TrackInput::Mono(1);
-        assert_eq!(controller.inputs(), wanted, "column two is input one");
+        assert_eq!(controller.inputs(), wanted, "a tap takes that one channel");
         assert_eq!(settings(&mut controller).inputs, wanted);
     }
 
     #[test]
-    fn a_column_the_device_cannot_offer_is_ignored() {
+    fn a_channel_the_device_lacks_is_ignored() {
         let mut controller = controller();
         controller.set_input_count(2);
         controller.on_surface(SurfaceEvent::SidePressed { index: 2 }, T0);
@@ -1917,7 +1926,7 @@ mod tests {
             T0,
         );
 
-        assert_eq!(controller.inputs(), [TrackInput::Stereo; TRACK_COUNT]);
+        assert_eq!(controller.inputs(), [TrackInput::default(); TRACK_COUNT]);
         assert!(commands(&mut controller).is_empty());
     }
 

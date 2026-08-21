@@ -84,6 +84,9 @@ pub enum EngineError {
     /// Channel count was zero.
     #[error("channel count must be greater than zero")]
     ZeroChannels,
+    /// Capture channel count was zero.
+    #[error("capture channel count must be greater than zero")]
+    ZeroCaptureChannels,
     /// Recordings were configured to be zero bars long.
     #[error("maximum recording length must be at least one bar")]
     ZeroMaxBars,
@@ -101,8 +104,10 @@ pub struct EngineConfig {
     pub tempo: Tempo,
     /// Time signature.
     pub time_signature: TimeSignature,
-    /// Channels in the interleaved input and output buffers.
+    /// Channels in the interleaved output buffer.
     pub channels: usize,
+    /// Channels in the interleaved input buffer, which a track picks from.
+    pub capture_channels: usize,
     /// Longest recording allowed, in bars.
     pub max_bars: u32,
     /// Segments to allocate. This is the ceiling on total recorded audio.
@@ -132,6 +137,7 @@ impl EngineConfig {
             tempo: Tempo::new(120.0)?,
             time_signature: TimeSignature::FOUR_FOUR,
             channels: 2,
+            capture_channels: 2,
             max_bars: 32,
             segment_pool: 64,
             capture_offset: Frames::ZERO,
@@ -439,6 +445,8 @@ pub struct Engine {
     click: Click,
     loads: LoadInbox,
     channels: usize,
+    /// Width of the input buffer, which a track picks one or two channels from.
+    capture_channels: usize,
     max_bars: u32,
     paused: bool,
     /// Pads that do not sound.
@@ -474,6 +482,9 @@ impl Engine {
     pub fn new(config: EngineConfig) -> Result<(Self, Housekeeping), EngineError> {
         if config.channels == 0 {
             return Err(EngineError::ZeroChannels);
+        }
+        if config.capture_channels == 0 {
+            return Err(EngineError::ZeroCaptureChannels);
         }
         if config.max_bars == 0 {
             return Err(EngineError::ZeroMaxBars);
@@ -524,6 +535,7 @@ impl Engine {
             click: Click::new(config.click, config.sample_rate),
             loads,
             channels: config.channels,
+            capture_channels: config.capture_channels,
             max_bars: config.max_bars,
             paused: false,
             muted: 0,
@@ -1040,9 +1052,10 @@ impl Engine {
 
     /// Renders one block.
     ///
-    /// `output` is interleaved and fully overwritten. `input` is interleaved with the
-    /// same channel count; if it is short, the missing frames are treated as silence and
-    /// an [`Event::Xrun`] is reported.
+    /// `output` is interleaved at the configured channel count and fully overwritten.
+    /// `input` is interleaved at the capture channel count, which is independent of it; if
+    /// it is short, the missing frames are treated as silence and an [`Event::Xrun`] is
+    /// reported.
     pub fn process(&mut self, input: &[f32], output: &mut [f32], sink: &mut impl EventSink) {
         output.fill(0.0);
         self.audio.reclaim();
@@ -1065,7 +1078,7 @@ impl Engine {
         }
 
         let frames = output.len() / self.channels;
-        let input_frames = input.len() / self.channels;
+        let input_frames = input.len() / self.capture_channels;
         if input_frames < frames {
             sink.event(Event::Xrun {
                 frames: as_u64(frames - input_frames),
@@ -1168,10 +1181,10 @@ impl Engine {
         //
         // A device that delivers nothing at all leaves `input` empty, so the range can
         // start past its end.
-        let channels = self.channels;
+        let capture_channels = self.capture_channels;
         let available = input_frames.saturating_sub(offset).min(run);
         let captured = input
-            .get(offset * self.channels..(offset + available) * self.channels)
+            .get(offset * capture_channels..(offset + available) * capture_channels)
             .unwrap_or(&[]);
 
         for addr in SlotAddr::all() {
@@ -1190,16 +1203,14 @@ impl Engine {
                 .and_then(Arc::get_mut)
                 .map_or(0, |clip| {
                     let written = if available > 0 {
-                        match recording.input {
-                            TrackInput::Stereo => clip.write(recording.frames, captured, segments),
-                            TrackInput::Mono(channel) => clip.write_channel(
-                                recording.frames,
-                                captured,
-                                channels,
-                                usize::from(channel),
-                                segments,
-                            ),
-                        }
+                        let picks = recording.input.channels();
+                        clip.write_picked(
+                            recording.frames,
+                            captured,
+                            capture_channels,
+                            picks.as_slice(),
+                            segments,
+                        )
                     } else {
                         0
                     };
