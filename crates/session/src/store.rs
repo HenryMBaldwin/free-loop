@@ -318,6 +318,9 @@ impl SessionStore {
     /// under another name. Also clears staging left by an interruption during writing,
     /// which holds disk space until that pad is saved again. Call once at startup.
     ///
+    /// A pad that holds both keeps both: the copy set aside is the session a save wrote
+    /// over, and the only remaining trace of it.
+    ///
     /// Returns what could not be put right, so a pad that is still missing can be said so
     /// rather than looking empty.
     pub fn recover(&self) -> Vec<SessionError> {
@@ -326,13 +329,11 @@ impl SessionStore {
             let dir = self.dir(addr);
             let previous = self.previous(addr);
 
-            if dir.is_dir() {
-                // Whatever is here is the finished session; anything aside is what it
-                // replaced.
-                if let Err(error) = remove_dir(&previous) {
-                    trouble.push(error);
-                }
-            } else if previous.is_dir()
+            // A pad with nothing in it and a copy set aside was interrupted mid-swap, so
+            // the copy goes back. A pad that has both was saved over, and the copy is
+            // what it replaced.
+            if !dir.is_dir()
+                && previous.is_dir()
                 && let Err(error) = rename(&previous, &dir)
             {
                 trouble.push(error);
@@ -513,7 +514,8 @@ impl SessionStore {
             return Err(error);
         }
 
-        let _ = std::fs::remove_dir_all(&previous);
+        // The session that was replaced is left where it is. It is the only copy of
+        // what a save wrote over, and one generation per pad is bounded.
         Ok(())
     }
 
@@ -1235,7 +1237,7 @@ mod tests {
         store
             .save(addr(0, 0), &data(save(addr(0, 0))), BUDGET)
             .unwrap();
-        // A leftover from a swap that did finish.
+        // What an earlier save wrote over.
         std::fs::create_dir_all(dir.0.join(".00.previous")).unwrap();
 
         store.recover();
@@ -1245,9 +1247,42 @@ mod tests {
                 .unwrap()
                 .clips
                 .len(),
-            1
+            1,
+            "the finished session is the one on the pad"
         );
-        assert!(!dir.0.join(".00.previous").exists(), "and it is tidied up");
+        assert!(
+            dir.0.join(".00.previous").exists(),
+            "and what it replaced is still there to go back to"
+        );
+    }
+
+    #[test]
+    fn saving_over_a_session_keeps_the_one_it_replaced() {
+        let dir = TempDir::new("replaced");
+        let store = SessionStore::new(&dir.0);
+        let audio = clip(128, 0);
+        let saved = |pad| {
+            vec![SavedClip {
+                addr: pad,
+                playing: true,
+                gain_step: UNITY_STEP,
+                launch_anchor: None,
+                clip: &audio,
+            }]
+        };
+
+        store
+            .save(addr(0, 0), &data(saved(addr(1, 1))), BUDGET)
+            .unwrap();
+        store
+            .save(addr(0, 0), &data(saved(addr(2, 2))), BUDGET)
+            .unwrap();
+
+        let previous = dir.0.join(".00.previous");
+        assert!(previous.is_dir(), "the session written over is kept");
+        let text = std::fs::read_to_string(previous.join(MANIFEST)).unwrap();
+        let read: Manifest = toml::from_str(&text).unwrap();
+        assert_eq!(read.clips[0].track, 1, "and it is the earlier one");
     }
 
     #[test]
