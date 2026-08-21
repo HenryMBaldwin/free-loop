@@ -36,7 +36,7 @@ pub const TEMPO_HOLD_DELAY: Duration = Duration::from_millis(400);
 pub const TEMPO_HOLD_INTERVAL: Duration = Duration::from_millis(120);
 
 /// How long the grid holds the colour that answers a save or a load.
-pub const RESULT_FLASH: Duration = Duration::from_millis(250);
+pub const RESULT_FLASH: Duration = Duration::from_millis(500);
 
 /// How long the bpm stays up before the grid comes back.
 ///
