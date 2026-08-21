@@ -15,7 +15,7 @@ use launchy::x;
 use launchy::{InputDevice as _, MsgPollingWrapper as _, OutputDevice as _};
 
 use crate::event::{Control, SurfaceEvent};
-use crate::led::{CONTROL_COUNT, Led, LedColor, LedFrame, LedStyle, SIDE_COUNT};
+use crate::led::{CONTROL_COUNT, Led, LedColor, LedFrame, LedStyle, SHADES, SIDE_COUNT};
 use crate::surface::{ControlSurface, SurfaceError};
 
 /// Buttons the device accepts in one update.
@@ -39,9 +39,6 @@ const MAX_BUTTONS: usize = 80;
 /// Scroll speed the device accepts, 0 to 127. Fast enough to read a three digit number
 /// without waiting for it.
 const TEXT_SPEED: u8 = 24;
-
-/// Fraction of full brightness used for [`LedStyle::Dim`].
-const DIM_DIVISOR: u16 = 4;
 
 /// Highest value a Launchpad X RGB channel takes.
 const RGB_MAX: u16 = 127;
@@ -113,10 +110,21 @@ fn palette(color: LedColor) -> x::PaletteColor {
     }
 }
 
-/// Scales a 0–255 channel onto the device's 0–127 range at reduced brightness.
-fn dim_channel(value: u8) -> u8 {
-    let scaled = u16::from(value) * RGB_MAX / 255 / DIM_DIVISOR;
+/// Scales a 0–255 channel onto the device's 0–127 range at step `step` of [`SHADES`].
+fn shade_channel(value: u8, step: u8) -> u8 {
+    let step = u16::from(step.clamp(1, SHADES));
+    let scaled = u16::from(value) * RGB_MAX / 255 * step / u16::from(SHADES);
     u8::try_from(scaled).unwrap_or(0)
+}
+
+/// A colour at step `step` of [`SHADES`], clamped to the range the device takes.
+fn shaded(color: LedColor, step: u8) -> x::ButtonStyle {
+    let (r, g, b) = color.rgb();
+    x::ButtonStyle::rgb(x::RgbColor::new(
+        shade_channel(r, step),
+        shade_channel(g, step),
+        shade_channel(b, step),
+    ))
 }
 
 fn style(led: Led) -> x::ButtonStyle {
@@ -124,16 +132,10 @@ fn style(led: Led) -> x::ButtonStyle {
         LedStyle::Solid => x::ButtonStyle::palette(palette(led.color)),
         LedStyle::Flash => x::ButtonStyle::flash(palette(led.color)),
         LedStyle::Pulse => x::ButtonStyle::pulse(palette(led.color)),
-        // The device only flashes and pulses palette entries, so dimming has to go
-        // through RGB, where brightness can be set directly.
-        LedStyle::Dim => {
-            let (r, g, b) = led.color.rgb();
-            x::ButtonStyle::rgb(x::RgbColor::new(
-                dim_channel(r),
-                dim_channel(g),
-                dim_channel(b),
-            ))
-        }
+        // The device only flashes and pulses palette entries, so anything below full
+        // brightness has to go through RGB, where it can be set directly.
+        LedStyle::Dim => shaded(led.color, 1),
+        LedStyle::Shade(step) => shaded(led.color, step),
     }
 }
 
@@ -551,8 +553,8 @@ mod tests {
 
     #[test]
     fn dimming_stays_inside_the_devices_range_and_below_full() {
-        assert_eq!(dim_channel(0), 0);
-        let full = dim_channel(255);
+        assert_eq!(shade_channel(0, 1), 0);
+        let full = shade_channel(255, 1);
         assert!(full > 0 && full < u8::try_from(RGB_MAX).unwrap());
     }
 

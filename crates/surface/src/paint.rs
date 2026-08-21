@@ -10,7 +10,7 @@ use free_loop_core::{
 };
 
 use crate::event::Control;
-use crate::led::{BEAT_LEDS, FIRST_BEAT_LED, Led, LedColor, LedFrame, LedStyle};
+use crate::led::{BEAT_LEDS, FIRST_BEAT_LED, Led, LedColor, LedFrame, LedStyle, SHADES};
 
 /// Surface state that does not come from the session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,8 +35,8 @@ pub struct Chrome {
     pub inputs: [TrackInput; TRACK_COUNT],
     /// Where each track's clips are anchored when launched.
     pub launch_modes: [LaunchMode; TRACK_COUNT],
-    /// Whether each track opens its loops from the tail.
-    pub pickups: [bool; TRACK_COUNT],
+    /// Beats each track opens its loops from the tail for. Zero is off.
+    pub pickups: [u8; TRACK_COUNT],
     /// Input channels the device offers.
     pub input_count: usize,
 }
@@ -99,7 +99,7 @@ impl Default for Chrome {
             gains: [UNITY_STEP; TRACK_COUNT],
             inputs: [TrackInput::default(); TRACK_COUNT],
             launch_modes: [LaunchMode::Follow; TRACK_COUNT],
-            pickups: [false; TRACK_COUNT],
+            pickups: [0; TRACK_COUNT],
             input_count: 2,
         }
     }
@@ -166,7 +166,7 @@ pub const SELECTED: LedColor = LedColor::Pink;
 pub const INPUT: LedColor = LedColor::Purple;
 
 /// Colour the per-track settings are shown in, matching their side button.
-pub const SETTING: LedColor = LedColor::Amber;
+pub const SETTING: LedColor = LedColor::Blue;
 
 /// Colour a silenced group takes, matching its side button.
 pub const MUTED: LedColor = LedColor::Red;
@@ -314,24 +314,21 @@ pub fn inputs(chrome: Chrome) -> LedFrame {
 
 /// Paints each row as one track's settings, one setting per column.
 ///
-/// Column zero is whether launching a clip restarts it, column one whether it opens from
-/// its tail. The rest are unused for now.
+/// Column zero is whether launching a clip restarts it, column one how many beats it
+/// opens from its tail for. The rest are unused for now.
+///
+/// A setting with degrees grades its brightness, dimmest for off.
 pub fn settings(chrome: Chrome) -> LedFrame {
     let mut frame = LedFrame::new();
 
     for addr in SlotAddr::all() {
         let track = addr.track.index();
-        let on = match addr.slot.index() {
-            RESTART_COLUMN => chrome.launch_modes[track].restarts(),
-            PICKUP_COLUMN => chrome.pickups[track],
+        let step = match addr.slot.index() {
+            RESTART_COLUMN => u8::from(chrome.launch_modes[track].restarts()) * (SHADES - 1),
+            PICKUP_COLUMN => chrome.pickups[track].min(SHADES - 1),
             _ => continue,
         };
-        let led = if on {
-            Led::solid(SETTING)
-        } else {
-            Led::dim(SETTING)
-        };
-        frame.set_pad(addr, led);
+        frame.set_pad(addr, Led::shade(SETTING, step + 1));
     }
 
     finish(&mut frame, chrome);
@@ -1023,9 +1020,10 @@ mod tests {
     }
 
     #[test]
-    fn a_settings_row_lights_the_column_for_a_track_opening_from_its_tail() {
+    fn a_settings_row_brightens_with_the_beats_a_track_opens_from() {
         let mut chrome = Chrome::default();
-        chrome.pickups[4] = true;
+        chrome.pickups[4] = 1;
+        chrome.pickups[5] = 3;
         let painted = settings(chrome);
 
         let lit = |track, column| {
@@ -1034,8 +1032,9 @@ mod tests {
                 SlotId::new(column).unwrap(),
             ))
         };
-        assert_eq!(lit(4, 1), Led::solid(SETTING), "the track that is on");
-        assert_eq!(lit(0, 1), Led::dim(SETTING), "and the rest are on offer");
+        assert_eq!(lit(0, 1), Led::shade(SETTING, 1), "off is dimmest");
+        assert_eq!(lit(4, 1), Led::shade(SETTING, 2), "one beat is a step up");
+        assert_eq!(lit(5, 1), Led::shade(SETTING, 4), "three is full");
     }
 
     #[test]

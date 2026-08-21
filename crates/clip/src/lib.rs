@@ -580,27 +580,27 @@ impl Clip {
     /// For a clip whose playback position is decided when it is launched rather than when
     /// it was recorded. Otherwise as [`Clip::mix_into`].
     pub fn mix_from(&self, anchor: Frames, position: Frames, dst: &mut [f32], ramp: Ramp) {
-        self.mix_pickup(anchor, position, dst, ramp, false);
+        self.mix_pickup(anchor, position, dst, ramp, Frames::ZERO);
     }
 
-    /// Adds the loop into `dst`, opening from the tail when `pickup` is set.
+    /// Adds the loop into `dst`, opening its first `pickup` frames from the tail.
     ///
     /// The tail was played a loop later than the head it stands in for, so it carries the
-    /// lead-in the head was recorded too early to have. Only the frames the tail actually
-    /// holds are replaced; the rest of the loop plays as recorded.
+    /// lead-in the head was recorded too early to have. Clamped to what the tail holds;
+    /// the rest of the loop plays as recorded.
     pub fn mix_pickup(
         &self,
         anchor: Frames,
         position: Frames,
         dst: &mut [f32],
         ramp: Ramp,
-        pickup: bool,
+        pickup: Frames,
     ) {
         let len = self.len.0;
         if len == 0 || ramp.is_silent() {
             return;
         }
-        let opening = if pickup { self.tail.0.min(len) } else { 0 };
+        let opening = pickup.0.min(self.tail.0).min(len);
 
         let total = dst.len() / self.channels;
         // Modular rather than saturating: a clip loaded from a session can sit ahead of

@@ -13,8 +13,8 @@ use free_loop_core::{
 };
 use free_loop_surface::{
     Axis, Chrome, Control, INPUT_SIDE, Led, LedColor, LedFrame, MUTE_SIDE, NEW_SIDE, PAUSE_SIDE,
-    PICKUP_COLUMN, RESTART_COLUMN, SELECTED, SETTINGS_SIDE, SOLO_SIDE, SurfaceEvent, VOLUME_SIDE,
-    paint,
+    PICKUP_COLUMN, RESTART_COLUMN, SELECTED, SETTINGS_SIDE, SHADES, SOLO_SIDE, SurfaceEvent,
+    VOLUME_SIDE, paint,
 };
 
 /// Beats per minute one press of the tempo buttons moves.
@@ -181,7 +181,7 @@ impl Controller {
         let chrome = Chrome {
             inputs: [TrackInput::default(); TRACK_COUNT],
             launch_modes: [LaunchMode::Follow; TRACK_COUNT],
-            pickups: [false; TRACK_COUNT],
+            pickups: [0; TRACK_COUNT],
             input_count: 2,
             beat: 0,
             beats_per_bar,
@@ -316,20 +316,26 @@ impl Controller {
             RESTART_COLUMN => {
                 self.chrome.launch_modes[track] = self.chrome.launch_modes[track].toggled();
             }
-            PICKUP_COLUMN => self.chrome.pickups[track] = !self.chrome.pickups[track],
+            // Off, then a degree per beat the tail can stand in for.
+            PICKUP_COLUMN => {
+                let degrees = self.chrome.beats_per_bar.saturating_sub(1);
+                let degrees = u8::try_from(degrees).unwrap_or(u8::MAX).min(SHADES - 1);
+                let next = self.chrome.pickups[track] + 1;
+                self.chrome.pickups[track] = if next > degrees { 0 } else { next };
+            }
             _ => return,
         }
         self.settings_changed = true;
         self.dirty = true;
     }
 
-    /// Which tracks open their loops from the tail.
-    pub fn pickups(&self) -> [bool; TRACK_COUNT] {
+    /// Beats each track opens its loops from the tail for.
+    pub fn pickups(&self) -> [u8; TRACK_COUNT] {
         self.chrome.pickups
     }
 
     /// Takes the pickup settings a loaded session came with.
-    pub fn set_pickups(&mut self, pickups: [bool; TRACK_COUNT]) {
+    pub fn set_pickups(&mut self, pickups: [u8; TRACK_COUNT]) {
         self.chrome.pickups = pickups;
         self.settings_changed = true;
         self.dirty = true;
@@ -1517,6 +1523,24 @@ mod tests {
             Some(TextUpdate::Show("2600".to_owned())),
             "the pool size the session needs"
         );
+    }
+
+    #[test]
+    fn the_pickup_setting_cycles_through_its_degrees() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::SidePressed { index: 3 }, T0);
+        let pad = SlotAddr::new(TrackId::new(2).unwrap(), SlotId::new(1).unwrap());
+        let press = SurfaceEvent::PadPressed {
+            addr: pad,
+            velocity: 127,
+        };
+
+        // Off, then one degree per beat the tail can stand in for, then back.
+        for beats in [1, 2, 3, 0] {
+            controller.on_surface(press, T0);
+            assert_eq!(controller.pickups()[2], beats);
+        }
+        assert_eq!(settings(&mut controller).pickups[2], 0);
     }
 
     #[test]
