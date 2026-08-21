@@ -186,6 +186,12 @@ pub const SETTINGS_SIDE: usize = 3;
 /// The settings column holding whether a launch restarts a clip.
 pub const RESTART_COLUMN: usize = 0;
 
+/// The pad that answers yes, top left of the grid.
+pub const YES_PAD: (usize, usize) = (0, 0);
+
+/// The pad that answers no, top right of the grid.
+pub const NO_PAD: (usize, usize) = (0, SLOT_COUNT - 1);
+
 /// The settings column for opening a loop from its tail.
 pub const PICKUP_COLUMN: usize = 1;
 
@@ -329,6 +335,25 @@ pub fn settings(chrome: Chrome) -> LedFrame {
             _ => continue,
         };
         frame.set_pad(addr, Led::shade(SETTING, step + 1));
+    }
+
+    finish(&mut frame, chrome);
+    frame
+}
+
+/// Paints a question over the grid: yes on the left, no on the right.
+///
+/// Every other pad is dark, so nothing else can be pressed by mistake.
+pub fn confirm(chrome: Chrome) -> LedFrame {
+    let mut frame = LedFrame::new();
+
+    for addr in SlotAddr::all() {
+        let led = match (addr.track.index(), addr.slot.index()) {
+            YES_PAD => Led::solid(LedColor::Green),
+            NO_PAD => Led::solid(LedColor::Red),
+            _ => continue,
+        };
+        frame.set_pad(addr, led);
     }
 
     finish(&mut frame, chrome);
