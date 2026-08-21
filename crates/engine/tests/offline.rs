@@ -2593,8 +2593,8 @@ mod seam {
 
     /// Records one bar of constant input, then renders across the loop point.
     ///
-    /// A constant is perfectly periodic, so anything but a constant coming back is the
-    /// engine's doing rather than the material's.
+    /// A constant is perfectly periodic, so anything else coming back is the engine's
+    /// doing.
     #[test]
     fn a_constant_loop_crosses_its_own_seam_unchanged() {
         let mut harness = Harness::new(128);

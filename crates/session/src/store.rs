@@ -319,7 +319,7 @@ impl SessionStore {
     /// which holds disk space until that pad is saved again. Call once at startup.
     ///
     /// A pad that holds both keeps both: the copy set aside is the session a save wrote
-    /// over, and the only remaining trace of it.
+    /// over.
     ///
     /// Returns what could not be put right, so a pad that is still missing can be said so
     /// rather than looking empty.
@@ -514,8 +514,7 @@ impl SessionStore {
             return Err(error);
         }
 
-        // The session that was replaced is left where it is. It is the only copy of
-        // what a save wrote over, and one generation per pad is bounded.
+        // The session that was replaced is left where it is.
         Ok(())
     }
 
@@ -726,8 +725,7 @@ fn check_wav(
 /// Reads a clip's audio into storage `channels` wide.
 ///
 /// The file's own width is whatever it was recorded at. Clip channel `c` takes file
-/// channel `c % file_channels`, so a stereo session widens onto a four channel device and
-/// a four channel one is read back on two.
+/// channel `c % file_channels`.
 fn read_wav(path: &Path, entry: &ClipEntry, channels: u16) -> Result<Clip, SessionError> {
     let mut reader = hound::WavReader::open(path).map_err(|source| SessionError::Wav {
         path: path.display().to_string(),

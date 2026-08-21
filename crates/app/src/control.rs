@@ -444,7 +444,6 @@ impl Controller {
 
     /// Saves over the pad, asking first if it holds anything.
     fn press_save(&mut self, addr: SlotAddr) {
-        // A pad with nothing on it has nothing to lose, so it goes straight in.
         if self.sessions & bit(addr) == 0 {
             self.requests.push(Request::SaveSession(addr));
             return;
@@ -459,7 +458,6 @@ impl Controller {
         if self.sessions & bit(addr) == 0 {
             return;
         }
-        // A load replaces the grid, so it only asks when there is something on it.
         if !self.session.has_any_clip() {
             self.requests.push(Request::LoadSession(addr));
             return;

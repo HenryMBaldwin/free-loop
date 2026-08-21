@@ -244,7 +244,7 @@ pub enum TrackInput {
 }
 
 impl Default for TrackInput {
-    /// The first two channels, which is a stereo source on any interface.
+    /// The first two channels.
     fn default() -> Self {
         Self::Pair(0, 1)
     }

@@ -66,8 +66,6 @@ fn shifted_anchor(recorded_at: Frames, len: Frames, shift: Frames) -> Frames {
 }
 
 /// Capture kept past a loop: every beat of the bar after it but the last.
-///
-/// The last beat is what a pickup leads in from, so it stays as the take has it.
 fn tail_frames(grid: BarGrid) -> u64 {
     let beats = grid.time_signature().beats_per_bar().saturating_sub(1);
     grid.beat_offset(beats).0
@@ -176,20 +174,17 @@ impl EventSink for Vec<Event> {
 struct Recording {
     /// Frames of transport elapsed since capture began, written or not.
     frames: u64,
-    /// Where capture began, so a take cut short knows its own bar lines.
+    /// Where capture began.
     started_at: Frames,
-    /// Frames of the loop backed by storage, which bounds where it can end.
+    /// Frames of the loop backed by storage.
     written: u64,
     /// The input this take is capturing, fixed when it began.
     input: TrackInput,
     /// Whether the segment pool ran dry part way through.
     starved: bool,
-    /// Frames of tail actually backed by storage, which is what the clip ends up with.
+    /// Frames of tail backed by storage.
     tail_written: u64,
     /// Frames to keep capturing to once the loop itself is sealed.
-    ///
-    /// The take carries on into the bar after it, so a pickup has somewhere to come
-    /// from.
     tail_until: Option<u64>,
 }
 
@@ -384,8 +379,8 @@ impl Audio {
                 else {
                     return;
                 };
-                // Capture carries on into the bar after the loop, so a pickup has
-                // somewhere to come from. The recording is dropped once it has.
+                // Capture carries on into the bar after the loop, and the recording is
+                // dropped once it has.
                 recording.tail_until = Some(tail_from.saturating_add(self.tail_frames));
                 let Some(held) = self.clips[addr.track.index()][addr.slot.index()].as_mut() else {
                     return;
@@ -509,9 +504,8 @@ impl Engine {
 
         let grid = BarGrid::new(config.sample_rate, config.tempo, config.time_signature)?;
 
-        // A take runs until the pool does, and nothing stops one taking all of it, so
-        // every clip's segment array has to reach the whole pool. The slots are pointers;
-        // only the segments written cost memory.
+        // One take may use the whole pool. The slots are pointers; only the segments
+        // written cost memory.
         let max_segments = config.segment_pool.max(1);
 
         let (retirement, recycler) = channel();
@@ -1241,8 +1235,7 @@ impl Engine {
                     written + clip.silence(from, run - written, segments)
                 });
 
-            // Once sealed the loop is safe, so a short tail costs the pickup rather than
-            // the take, and says nothing.
+            // A short tail costs the pickup, not the take, and says nothing.
             if recording.tail_until.is_some() {
                 recording.tail_written += as_u64(backed);
             } else {
@@ -1271,7 +1264,7 @@ impl Engine {
 
     /// Ends the takes that ran out of storage, at the last whole bar each one holds.
     ///
-    /// A take with no whole bar behind it has no clip to make, so it goes back instead.
+    /// A take with no whole bar behind it goes back.
     fn cut_short(&mut self, out: PadMask, sink: &mut impl EventSink) {
         if out == 0 {
             return;
@@ -1285,8 +1278,7 @@ impl Engine {
             };
             let bars = recording.written / bar;
             if bars == 0 {
-                // Nothing whole to keep, so the pad goes back rather than holding a take
-                // it can never seal.
+                // Nothing whole to keep.
                 self.audio.recordings[track][slot] = None;
                 if let Some(held) = self.audio.clips[track][slot].take() {
                     self.audio.retire(held);
