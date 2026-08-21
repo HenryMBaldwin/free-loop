@@ -28,8 +28,8 @@ pub use led::{
 };
 pub use mock::MockSurface;
 pub use paint::{
-    Axis, Chrome, INPUT_SIDE, MUTE_SIDE, MUTED, NEW_SIDE, PAUSE_SIDE, RESTART_COLUMN, SELECTED,
-    SETTINGS_SIDE, SOLO_SIDE, SOLOED, VOLUME_SIDE,
+    Axis, Chrome, INPUT_SIDE, MUTE_SIDE, MUTED, NEW_SIDE, PAUSE_SIDE, PICKUP_COLUMN,
+    RESTART_COLUMN, SELECTED, SETTINGS_SIDE, SOLO_SIDE, SOLOED, VOLUME_SIDE,
 };
 pub use reconnect::Reconnecting;
 pub use surface::{ControlSurface, SurfaceError};

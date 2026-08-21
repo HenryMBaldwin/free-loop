@@ -551,10 +551,27 @@ impl Clip {
     /// For a clip whose playback position is decided when it is launched rather than when
     /// it was recorded. Otherwise as [`Clip::mix_into`].
     pub fn mix_from(&self, anchor: Frames, position: Frames, dst: &mut [f32], ramp: Ramp) {
+        self.mix_pickup(anchor, position, dst, ramp, false);
+    }
+
+    /// Adds the loop into `dst`, opening from the tail when `pickup` is set.
+    ///
+    /// The tail was played a loop later than the head it stands in for, so it carries the
+    /// lead-in the head was recorded too early to have. Only the frames the tail actually
+    /// holds are replaced; the rest of the loop plays as recorded.
+    pub fn mix_pickup(
+        &self,
+        anchor: Frames,
+        position: Frames,
+        dst: &mut [f32],
+        ramp: Ramp,
+        pickup: bool,
+    ) {
         let len = self.len.0;
         if len == 0 || ramp.is_silent() {
             return;
         }
+        let opening = if pickup { self.tail.0.min(len) } else { 0 };
 
         let total = dst.len() / self.channels;
         // Modular rather than saturating: a clip loaded from a session can sit ahead of
@@ -563,13 +580,17 @@ impl Clip {
         let mut done = 0;
 
         while done < total {
-            let offset = phase % SEGMENT_FRAMES_U64;
+            // Runs never straddle the point the tail stops standing in.
+            let standing_in = phase < opening;
+            let source = if standing_in { len + phase } else { phase };
+            let limit = if standing_in { opening } else { len };
+
             let run = (total - done)
-                .min(SEGMENT_FRAMES - as_usize(offset))
-                .min(as_usize(len - phase));
+                .min(SEGMENT_FRAMES - as_usize(source % SEGMENT_FRAMES_U64))
+                .min(as_usize(limit - phase));
 
             let slice = &mut dst[done * self.channels..(done + run) * self.channels];
-            self.buffer.add_into(phase, slice, run, ramp.from(done));
+            self.buffer.add_into(source, slice, run, ramp.from(done));
 
             done += run;
             phase += run as u64;

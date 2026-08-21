@@ -271,6 +271,8 @@ struct Audio {
     inputs: [TrackInput; TRACK_COUNT],
     /// Where each track's clips are anchored when launched.
     launch_modes: [LaunchMode; TRACK_COUNT],
+    /// Whether each track opens its loops from the tail.
+    pickups: [bool; TRACK_COUNT],
     /// Where a launch put each pad's clip, for the pads whose track restarts them.
     anchors: [[Option<Frames>; SLOT_COUNT]; TRACK_COUNT],
     /// Pads whose capture could not be given storage, for the engine to put back. Several
@@ -552,6 +554,7 @@ impl Engine {
                 tail_frames: tail_frames(grid),
                 inputs: [config.input; TRACK_COUNT],
                 launch_modes: [config.launch_mode; TRACK_COUNT],
+                pickups: [false; TRACK_COUNT],
                 anchors: core::array::from_fn(|_| core::array::from_fn(|_| None)),
                 refused: 0,
                 staged: Staging::new(),
@@ -749,6 +752,7 @@ impl Engine {
         self.soloed = settings.soloed;
         self.audio.inputs = settings.inputs;
         self.audio.launch_modes = settings.launch_modes;
+        self.audio.pickups = settings.pickups;
     }
 
     /// Empties any pad that was armed but could not be given storage.
@@ -1204,7 +1208,8 @@ impl Engine {
             self.levels[track][slot] = reached;
             if let Some(clip) = self.audio.clip(addr) {
                 let anchor = self.audio.anchor(addr, clip);
-                clip.mix_from(anchor, self.position, out, ramp);
+                let pickup = self.audio.pickups[track];
+                clip.mix_pickup(anchor, self.position, out, ramp, pickup);
             }
         }
 
