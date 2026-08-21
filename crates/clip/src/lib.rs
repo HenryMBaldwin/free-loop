@@ -241,6 +241,54 @@ impl AudioBuffer {
         done
     }
 
+    /// Writes interleaved frames at `frame`, taking channels from `src` as `picks` says.
+    ///
+    /// `src` is `src_channels` wide. Channel `c` of the buffer takes source channel
+    /// `picks[c % picks.len()]`, clamped to what `src` holds, so one pick spreads across
+    /// every channel and two alternate. An empty `picks` writes nothing.
+    ///
+    /// Returns how many frames were written.
+    pub fn write_picked(
+        &mut self,
+        frame: u64,
+        src: &[f32],
+        src_channels: usize,
+        picks: &[u8],
+        pool: &mut SegmentPool,
+    ) -> usize {
+        if src_channels == 0 || picks.is_empty() {
+            return 0;
+        }
+        let last = src_channels - 1;
+        let total = src.len() / src_channels;
+        let mut done = 0;
+
+        while done < total {
+            let (index, offset) = split(frame + done as u64);
+            let Some(slot) = self.segments.get_mut(index) else {
+                break;
+            };
+            if slot.is_none() {
+                let Some(segment) = pool.take() else { break };
+                *slot = Some(segment);
+            }
+            let Some(segment) = slot.as_mut() else { break };
+
+            let run = (total - done).min(SEGMENT_FRAMES - offset);
+            let dst = &mut segment.data[offset * self.channels..(offset + run) * self.channels];
+            for (frame_index, out) in dst.chunks_exact_mut(self.channels).enumerate() {
+                let from = &src[(done + frame_index) * src_channels..][..src_channels];
+                for (channel, sample) in out.iter_mut().enumerate() {
+                    let pick = usize::from(picks[channel % picks.len()]).min(last);
+                    *sample = from[pick];
+                }
+            }
+            done += run;
+        }
+
+        done
+    }
+
     /// Writes one channel of `src` onto every channel, drawing segments as needed.
     ///
     /// `src` is interleaved `src_channels` wide. `pick` is clamped to what it holds.

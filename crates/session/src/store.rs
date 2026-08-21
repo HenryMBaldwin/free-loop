@@ -153,7 +153,7 @@ pub struct Inspected {
 pub struct Accepted {
     manifest: Manifest,
     dir: PathBuf,
-    /// The channel count the checks were made against.
+    /// The width the clips will be read into, which is what the device runs.
     channels: u16,
 }
 
@@ -221,13 +221,6 @@ impl Inspected {
                 found: self.manifest.sample_rate,
             });
         }
-        if self.manifest.channels != channels {
-            return Err(SessionError::Mismatch {
-                what: "channels",
-                wanted: u32::from(channels),
-                found: u32::from(self.manifest.channels),
-            });
-        }
         // Structure first: it caps the list at one entry per pad, after which the sum below
         // is over something bounded.
         self.manifest.validate().map_err(SessionError::Invalid)?;
@@ -249,7 +242,7 @@ impl Inspected {
             check_wav(
                 &self.dir.join(Manifest::file_name(pad)),
                 entry,
-                channels,
+                self.manifest.channels,
                 sample_rate,
             )?;
         }
@@ -706,11 +699,21 @@ fn check_wav(
 }
 
 /// Reads one clip back into storage the caller owns.
+/// Reads a clip's audio into storage `channels` wide.
+///
+/// The file's own width is whatever it was recorded at. Clip channel `c` takes file
+/// channel `c % file_channels`, so a stereo session widens onto a four channel device and
+/// a four channel one is read back on two.
 fn read_wav(path: &Path, entry: &ClipEntry, channels: u16) -> Result<Clip, SessionError> {
     let mut reader = hound::WavReader::open(path).map_err(|source| SessionError::Wav {
         path: path.display().to_string(),
         source,
     })?;
+
+    let file_channels = usize::from(reader.spec().channels).max(1);
+    let picks: Vec<u8> = (0..file_channels)
+        .map(|c| u8::try_from(c).unwrap_or(u8::MAX))
+        .collect();
 
     let channels = usize::from(channels);
     let frames = entry.len_frames;
@@ -718,7 +721,7 @@ fn read_wav(path: &Path, entry: &ClipEntry, channels: u16) -> Result<Clip, Sessi
     let mut pool = SegmentPool::new(segments.max(1), channels);
     let mut buffer = AudioBuffer::new(segments.max(1), channels);
 
-    let mut chunk = Vec::with_capacity(SEGMENT_FRAMES * channels);
+    let mut chunk = Vec::with_capacity(SEGMENT_FRAMES * file_channels);
     let mut written = 0_u64;
 
     for sample in reader.samples::<f32>() {
@@ -736,12 +739,13 @@ fn read_wav(path: &Path, entry: &ClipEntry, channels: u16) -> Result<Clip, Sessi
         chunk.push(sample);
 
         if chunk.len() == chunk.capacity() {
-            written += buffer.write(written, &chunk, &mut pool) as u64;
+            written +=
+                buffer.write_picked(written, &chunk, file_channels, &picks, &mut pool) as u64;
             chunk.clear();
         }
     }
     if !chunk.is_empty() {
-        buffer.write(written, &chunk, &mut pool);
+        buffer.write_picked(written, &chunk, file_channels, &picks, &mut pool);
     }
 
     let mut clip = Clip::new(buffer, Frames(frames), Frames(entry.phase_frames), channels);
@@ -1810,14 +1814,57 @@ mod tests {
     }
 
     #[test]
-    fn a_session_recorded_for_another_setup_is_refused() {
+    fn a_session_recorded_at_another_rate_is_refused() {
         let dir = TempDir::new("mismatch");
         let store = SessionStore::new(&dir.0);
         store.save(addr(0, 0), &data(Vec::new()), BUDGET).unwrap();
 
+        // Every length and phase is a frame count at one rate.
         assert!(store.load(addr(0, 0), 44_100, CH, BUDGET).is_err());
-        assert!(store.load(addr(0, 0), 48_000, 1, BUDGET).is_err());
         assert!(store.load(addr(0, 0), 48_000, CH, BUDGET).is_ok());
+    }
+
+    #[test]
+    fn a_session_loads_onto_a_device_of_another_width() {
+        let dir = TempDir::new("widths");
+        let store = SessionStore::new(&dir.0);
+        let audio = clip(64, 0);
+        store
+            .save(
+                addr(0, 0),
+                &data(one_segment_each(&audio, &[addr(0, 0)])),
+                BUDGET,
+            )
+            .unwrap();
+
+        // Recorded on two channels, read back on four and on one.
+        assert!(store.load(addr(0, 0), 48_000, 4, BUDGET).is_ok());
+        assert!(store.load(addr(0, 0), 48_000, 1, BUDGET).is_ok());
+    }
+
+    #[test]
+    fn a_narrower_session_is_copied_across_the_wider_device() {
+        let dir = TempDir::new("widen");
+        let store = SessionStore::new(&dir.0);
+        let audio = clip(4, 0);
+        store
+            .save(
+                addr(0, 0),
+                &data(one_segment_each(&audio, &[addr(0, 0)])),
+                BUDGET,
+            )
+            .unwrap();
+
+        let loaded = store.load(addr(0, 0), 48_000, 4, BUDGET).unwrap();
+        let mut out = vec![0.0; 4 * 4];
+        loaded.clips[0]
+            .clip
+            .mix_into(loaded.clips[0].clip.recorded_at(), &mut out, Ramp::UNITY);
+
+        for frame in out.chunks_exact(4) {
+            assert_eq!(frame[2], frame[0], "the third channel carries the first");
+            assert_eq!(frame[3], frame[1], "and the fourth the second");
+        }
     }
 
     #[test]
