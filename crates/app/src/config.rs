@@ -229,12 +229,13 @@ impl Config {
         }
     }
 
-    /// The input every track starts on.
-    pub fn track_input(&self) -> TrackInput {
+    /// The input every track starts on, held to the channels the device has.
+    pub fn track_input(&self, channels: usize) -> TrackInput {
         match self.audio.input_channel {
-            Some(channel) => TrackInput::Mono(u8::try_from(channel).unwrap_or(0)),
+            Some(channel) => TrackInput::Mono(u8::try_from(channel).unwrap_or(u8::MAX)),
             None => TrackInput::default(),
         }
+        .within(channels)
     }
 
     /// The time signature this config asks for.
@@ -268,7 +269,7 @@ impl Config {
             capture_channels,
             segment_pool: self.engine.segment_pool,
             declick: free_loop_core::Frames(self.engine.declick_frames),
-            input: self.track_input().within(capture_channels),
+            input: self.track_input(capture_channels),
             launch_mode: self.launch_mode(),
             // Replaced by what the driver reports once the streams are running.
             capture_offset: free_loop_core::Frames::ZERO,
@@ -406,10 +407,19 @@ mod tests {
     #[test]
     fn an_input_channel_becomes_a_mono_source() {
         let config = Config::parse("[audio]\ninput_channel = 1\n").unwrap();
-        assert_eq!(config.track_input(), TrackInput::Mono(1));
+        assert_eq!(config.track_input(2), TrackInput::Mono(1));
 
         let config = Config::parse("").unwrap();
-        assert_eq!(config.track_input(), TrackInput::default());
+        assert_eq!(config.track_input(2), TrackInput::default());
+    }
+
+    #[test]
+    fn a_configured_channel_the_device_lacks_lands_on_its_last_one() {
+        let config = Config::parse("[audio]\ninput_channel = 6\n").unwrap();
+        assert_eq!(config.track_input(2), TrackInput::Mono(1));
+
+        let config = Config::parse("[audio]\ninput_channel = 999\n").unwrap();
+        assert_eq!(config.track_input(2), TrackInput::Mono(1));
     }
 
     #[test]
