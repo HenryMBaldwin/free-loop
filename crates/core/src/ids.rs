@@ -165,31 +165,6 @@ mod tests {
     }
 
     #[test]
-    fn a_tap_adds_a_second_channel_and_takes_it_away_again() {
-        let mono = TrackInput::Mono(0);
-        let pair = mono.toggled(2);
-        assert_eq!(pair, TrackInput::Pair(0, 2));
-        assert_eq!(pair.toggled(2), TrackInput::Mono(0), "back to one");
-        assert_eq!(pair.toggled(0), TrackInput::Mono(2), "either half");
-    }
-
-    #[test]
-    fn a_third_channel_drops_the_left_one() {
-        let pair = TrackInput::Pair(0, 2);
-        assert_eq!(
-            pair.toggled(5),
-            TrackInput::Pair(2, 5),
-            "the newest two are kept"
-        );
-    }
-
-    #[test]
-    fn a_track_always_records_something() {
-        let mono = TrackInput::Mono(4);
-        assert_eq!(mono.toggled(4), mono, "the last channel cannot be dropped");
-    }
-
-    #[test]
     fn ids_reject_out_of_range() {
         assert!(TrackId::new(7).is_ok());
         assert!(TrackId::new(8).is_err());
@@ -301,21 +276,6 @@ impl TrackInput {
     /// Whether this takes `channel`.
     pub fn takes(self, channel: u8) -> bool {
         self.channels().as_slice().contains(&channel)
-    }
-
-    /// The same input with `channel` added, or removed if it was already taken.
-    ///
-    /// Adding a third channel drops the left one, so the newest two are kept. Removing
-    /// the last channel leaves it alone: a track always records something.
-    #[must_use]
-    pub fn toggled(self, channel: u8) -> Self {
-        match self {
-            Self::Mono(held) if held == channel => Self::Mono(held),
-            Self::Mono(held) => Self::pair(held, channel),
-            Self::Pair(left, right) if left == channel => Self::Mono(right),
-            Self::Pair(left, right) if right == channel => Self::Mono(left),
-            Self::Pair(_, right) => Self::pair(right, channel),
-        }
     }
 }
 

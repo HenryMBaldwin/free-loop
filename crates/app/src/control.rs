@@ -149,6 +149,8 @@ pub struct Controller {
     held: [[Option<Duration>; SLOT_COUNT]; TRACK_COUNT],
     /// Pads currently warning that they are about to empty.
     warning: u64,
+    /// A pad held down on the input page, which the next press pairs with.
+    input_held: Option<SlotAddr>,
     commands: Vec<Command>,
     /// Whether the settings have moved since the engine was last told.
     settings_changed: bool,
@@ -200,6 +202,7 @@ impl Controller {
             tempo_before_request: tempo,
             held: [[None; SLOT_COUNT]; TRACK_COUNT],
             warning: 0,
+            input_held: None,
             commands: Vec::new(),
             settings_changed: true,
             requests: Vec::new(),
@@ -279,14 +282,27 @@ impl Controller {
         self.dirty = true;
     }
 
-    /// Sets which input the pad's track records, if the device offers it.
-    fn set_input(&mut self, addr: SlotAddr) {
+    /// Sets which channels the pad's track records, if the device offers them.
+    ///
+    /// A press on its own takes that one channel. A press while another pad on the same
+    /// row is still down takes both, lower channel on the left.
+    fn press_input(&mut self, addr: SlotAddr) {
         let column = addr.slot.index();
         if column >= self.chrome.input_count {
             return;
         }
         let channel = u8::try_from(column).unwrap_or(0);
-        self.chrome.inputs[addr.track.index()] = TrackInput::Mono(channel);
+
+        self.chrome.inputs[addr.track.index()] = match self.input_held {
+            Some(held) if held.track == addr.track && held.slot != addr.slot => {
+                let first = u8::try_from(held.slot.index()).unwrap_or(0);
+                TrackInput::pair(first, channel)
+            }
+            _ => {
+                self.input_held = Some(addr);
+                TrackInput::Mono(channel)
+            }
+        };
         self.settings_changed = true;
         self.dirty = true;
     }
@@ -505,7 +521,7 @@ impl Controller {
                 self.set_level(addr);
             }
             SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::Input => {
-                self.set_input(addr);
+                self.press_input(addr);
             }
             SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::Settings => {
                 self.toggle_setting(addr);
@@ -519,6 +535,11 @@ impl Controller {
             SurfaceEvent::PadPressed { addr, .. } => {
                 // Nothing yet: which gesture this is depends on how long it lasts.
                 self.held[addr.track.index()][addr.slot.index()] = Some(now);
+            }
+            SurfaceEvent::PadReleased { addr } if self.mode == Mode::Input => {
+                if self.input_held == Some(addr) {
+                    self.input_held = None;
+                }
             }
             SurfaceEvent::PadReleased { addr } => {
                 // A hold that completed already emptied the pad and took its entry, so
@@ -1908,6 +1929,70 @@ mod tests {
         wanted[3] = TrackInput::Mono(1);
         assert_eq!(controller.inputs(), wanted, "a tap takes that one channel");
         assert_eq!(settings(&mut controller).inputs, wanted);
+    }
+
+    /// Presses `column` on `track`'s input row, leaving it down.
+    fn hold_input(controller: &mut Controller, track: u8, column: u8) -> SlotAddr {
+        let pad = SlotAddr::new(TrackId::new(track).unwrap(), SlotId::new(column).unwrap());
+        controller.on_surface(
+            SurfaceEvent::PadPressed {
+                addr: pad,
+                velocity: 127,
+            },
+            T0,
+        );
+        pad
+    }
+
+    #[test]
+    fn holding_one_channel_and_tapping_another_makes_a_pair() {
+        let mut controller = controller();
+        controller.set_input_count(4);
+        controller.on_surface(SurfaceEvent::SidePressed { index: 2 }, T0);
+
+        let first = hold_input(&mut controller, 3, 3);
+        hold_input(&mut controller, 3, 1);
+
+        assert_eq!(
+            controller.inputs()[3],
+            TrackInput::Pair(1, 3),
+            "lower channel on the left, whichever was pressed first"
+        );
+        controller.on_surface(SurfaceEvent::PadReleased { addr: first }, T0);
+    }
+
+    #[test]
+    fn a_tap_after_the_hold_is_let_go_replaces_the_pair() {
+        let mut controller = controller();
+        controller.set_input_count(4);
+        controller.on_surface(SurfaceEvent::SidePressed { index: 2 }, T0);
+
+        let first = hold_input(&mut controller, 0, 0);
+        hold_input(&mut controller, 0, 2);
+        assert_eq!(controller.inputs()[0], TrackInput::Pair(0, 2));
+
+        controller.on_surface(SurfaceEvent::PadReleased { addr: first }, T0);
+        let second = hold_input(&mut controller, 0, 2);
+        controller.on_surface(SurfaceEvent::PadReleased { addr: second }, T0);
+
+        assert_eq!(
+            controller.inputs()[0],
+            TrackInput::Mono(2),
+            "a press on its own is one channel again"
+        );
+    }
+
+    #[test]
+    fn a_pair_cannot_reach_across_tracks() {
+        let mut controller = controller();
+        controller.set_input_count(4);
+        controller.on_surface(SurfaceEvent::SidePressed { index: 2 }, T0);
+
+        hold_input(&mut controller, 0, 0);
+        hold_input(&mut controller, 1, 3);
+
+        assert_eq!(controller.inputs()[0], TrackInput::Mono(0));
+        assert_eq!(controller.inputs()[1], TrackInput::Mono(3), "its own row");
     }
 
     #[test]
