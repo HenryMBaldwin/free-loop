@@ -34,6 +34,9 @@ pub struct ClipEntry {
     /// Stored per clip although volume is set per track.
     #[serde(default = "unity")]
     pub gain_step: u8,
+    /// Audio held past the loop, which a pickup opens from.
+    #[serde(default)]
+    pub tail_frames: u64,
     /// Where the clip was anchored by the launch that is playing it, if any.
     ///
     /// Only set for a pad on a track that restarts its clips and that was sounding. Absent
@@ -150,6 +153,9 @@ impl Manifest {
             if usize::from(entry.gain_step) >= GAIN_STEPS {
                 return Err("a clip's level is off the ladder");
             }
+            if entry.tail_frames > entry.len_frames {
+                return Err("a clip's tail is longer than the loop it follows");
+            }
         }
 
         let mut tracks = 0_u32;
@@ -218,6 +224,7 @@ mod tests {
                 playing: true,
                 capture_offset_frames: 2_348,
                 gain_step: 2,
+                tail_frames: 0,
                 launch_phase_frames: Some(48),
             }],
         }

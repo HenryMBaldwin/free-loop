@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use free_loop_clip::{AudioBuffer, Clip, Ramp, SEGMENT_FRAMES, SegmentPool, segments_for};
+use free_loop_clip::{AudioBuffer, Clip, SEGMENT_FRAMES, SegmentPool, segments_for};
 use free_loop_core::{Frames, SLOT_COUNT, SlotAddr, TRACK_COUNT, TrackInput, UNITY_STEP};
 
 use crate::manifest::{ClipEntry, MANIFEST, Manifest, TrackEntry};
@@ -231,7 +231,9 @@ impl Inspected {
         // Segments rather than frames: every clip gets its own buffer and rounds up to a
         // whole segment, so a grid of one-frame clips costs a segment each.
         let wanted = self.manifest.clips.iter().fold(0_usize, |total, entry| {
-            total.saturating_add(segments_for(Frames(entry.len_frames)))
+            total.saturating_add(segments_for(Frames(
+                entry.len_frames.saturating_add(entry.tail_frames),
+            )))
         });
         if wanted > segments {
             return Err(SessionError::TooLarge {
@@ -440,6 +442,7 @@ impl SessionStore {
                     .map(|anchor| phase_in(anchor, saved.clip.len())),
                 playing: saved.playing,
                 capture_offset_frames: saved.clip.capture_offset().0,
+                tail_frames: saved.clip.tail().0,
                 gain_step: saved.gain_step,
             });
         }
@@ -642,7 +645,7 @@ fn write_wav(
     })?;
 
     let channels = usize::from(channels);
-    let total = clip.len().0;
+    let total = clip.len().0.saturating_add(clip.tail().0);
     let mut chunk = vec![0.0_f32; SEGMENT_FRAMES * channels];
     let mut done = 0;
 
@@ -651,10 +654,8 @@ fn write_wav(
             .unwrap_or(SEGMENT_FRAMES)
             .min(SEGMENT_FRAMES);
         let slice = &mut chunk[..frames * channels];
-        slice.fill(0.0);
-        // Reading from the clip's own start gives phase zero, so the file begins where
-        // the loop begins.
-        clip.mix_into(clip.recorded_at() + Frames(done), slice, Ramp::UNITY);
+        // A linear copy, so the tail comes out as captured.
+        clip.copy_into(Frames(done), slice);
 
         for sample in slice.iter() {
             writer
@@ -709,7 +710,7 @@ fn check_wav(
     // A file shorter than the manifest claims would become silence-padded, and a longer one
     // would be cut off without a word.
     let held = reader.len() / u32::from(spec.channels.max(1));
-    if u64::from(held) != entry.len_frames {
+    if u64::from(held) != entry.len_frames.saturating_add(entry.tail_frames) {
         return Err(SessionError::Mismatch {
             what: "frames in an audio file",
             wanted: u32::try_from(entry.len_frames).unwrap_or(u32::MAX),
@@ -770,6 +771,7 @@ fn read_wav(path: &Path, entry: &ClipEntry, channels: u16) -> Result<Clip, Sessi
     }
 
     let mut clip = Clip::new(buffer, Frames(frames), Frames(entry.phase_frames), channels);
+    clip.set_tail(Frames(entry.tail_frames));
     clip.set_capture_offset(Frames(entry.capture_offset_frames));
     clip.set_borrowed(true);
     Ok(clip)
@@ -786,7 +788,7 @@ mod tests {
     )]
 
     use super::*;
-    use free_loop_clip::{AudioBuffer, SegmentPool};
+    use free_loop_clip::{AudioBuffer, Ramp, SegmentPool};
     use free_loop_core::{SlotId, TrackId};
 
     const CH: u16 = 2;
@@ -1840,6 +1842,67 @@ mod tests {
             gains[7], UNITY_STEP,
             "a track with nothing on it is untouched"
         );
+    }
+
+    /// A clip of `frames` with `tail` frames of audio held past its loop.
+    fn tailed_clip(frames: usize, tail: usize) -> Clip {
+        let whole = frames + tail;
+        let segments = whole.div_ceil(SEGMENT_FRAMES).max(1);
+        let mut pool = SegmentPool::new(segments, usize::from(CH));
+        let mut buffer = AudioBuffer::new(segments, usize::from(CH));
+        let audio: Vec<f32> = (0..whole * usize::from(CH))
+            .map(|i| i as f32 / 1000.0)
+            .collect();
+        buffer.write(0, &audio, &mut pool);
+
+        let mut clip = Clip::new(buffer, Frames(frames as u64), Frames::ZERO, CH.into());
+        clip.set_tail(Frames(tail as u64));
+        clip
+    }
+
+    #[test]
+    fn a_tail_survives_a_round_trip() {
+        let dir = TempDir::new("tail");
+        let store = SessionStore::new(&dir.0);
+        let audio = tailed_clip(400, 96);
+
+        store
+            .save(
+                addr(0, 0),
+                &data(vec![SavedClip {
+                    addr: addr(0, 0),
+                    playing: false,
+                    gain_step: UNITY_STEP,
+                    launch_anchor: None,
+                    clip: &audio,
+                }]),
+                BUDGET,
+            )
+            .unwrap();
+
+        let loaded = store.load(addr(0, 0), 48_000, CH, BUDGET).unwrap();
+        let back = &loaded.clips[0].clip;
+        assert_eq!(back.len(), Frames(400), "the loop is what it was");
+        assert_eq!(back.tail(), Frames(96), "and so is the tail");
+
+        // The tail is the audio past the loop, not a wrap back to its start.
+        let mut out = vec![0.0; 96 * usize::from(CH)];
+        back.copy_into(Frames(400), &mut out);
+        let mut wanted = vec![0.0; 96 * usize::from(CH)];
+        audio.copy_into(Frames(400), &mut wanted);
+        assert_eq!(out, wanted);
+    }
+
+    #[test]
+    fn a_clip_saved_before_tails_existed_has_none() {
+        let text = concat!(
+            "tempo = 120.0\nbeats_per_bar = 4\nbeat_unit = 4\n",
+            "sample_rate = 48000\nchannels = 2\n",
+            "[[clips]]\ntrack = 0\nslot = 0\nfile = \"t0s0.wav\"\n",
+            "len_frames = 96000\nphase_frames = 0\nplaying = true\n",
+        );
+        let read: Manifest = toml::from_str(text).unwrap();
+        assert_eq!(read.clips[0].tail_frames, 0);
     }
 
     #[test]
