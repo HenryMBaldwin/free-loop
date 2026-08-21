@@ -244,8 +244,8 @@ impl AudioBuffer {
     /// Writes interleaved frames at `frame`, taking channels from `src` as `picks` says.
     ///
     /// `src` is `src_channels` wide. Channel `c` of the buffer takes source channel
-    /// `picks[c % picks.len()]`, clamped to what `src` holds, so one pick spreads across
-    /// every channel and two alternate. An empty `picks` writes nothing.
+    /// `picks[c % picks.len()]`, clamped to what `src` holds. An empty `picks` writes
+    /// nothing.
     ///
     /// Returns how many frames were written.
     pub fn write_picked(
@@ -430,7 +430,7 @@ impl Clip {
 
     /// Segments this clip's audio costs, wherever its storage came from.
     ///
-    /// The tail counts too: it is real audio the pool handed out.
+    /// Counts the tail as well as the loop.
     pub fn segments(&self) -> usize {
         segments_for(Frames(self.len.0.saturating_add(self.tail.0)))
     }
@@ -549,8 +549,8 @@ impl Clip {
 
     /// Copies the clip's stored audio at `from` into `dst`, loop and tail alike.
     ///
-    /// For writing a clip out as it was captured, tail and all. Reads past what is
-    /// stored give silence.
+    /// For writing a clip out as it was captured. Reads past what is stored give
+    /// silence.
     pub fn copy_into(&self, from: Frames, dst: &mut [f32]) {
         let total = dst.len() / self.channels;
         let mut done = 0;
@@ -585,9 +585,7 @@ impl Clip {
 
     /// Adds the loop into `dst`, opening its first `pickup` frames from the tail.
     ///
-    /// The tail was played a loop later than the head it stands in for, so it carries the
-    /// lead-in the head was recorded too early to have. Clamped to what the tail holds;
-    /// the rest of the loop plays as recorded.
+    /// Clamped to what the tail holds; the rest of the loop plays as recorded.
     pub fn mix_pickup(
         &self,
         anchor: Frames,
