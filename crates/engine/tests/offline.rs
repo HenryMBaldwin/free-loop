@@ -1953,6 +1953,61 @@ mod resources {
     }
 
     #[test]
+    fn storage_coming_back_does_not_extend_a_take_the_pool_already_cut() {
+        let sealed = |disturb: bool| {
+            let mut harness = Harness::new(512);
+            for track in 0..2 {
+                harness.command(Command::Press(addr(track, 0)));
+            }
+            harness.run_to(2 * BAR);
+            for track in 0..2 {
+                harness.command(Command::Press(addr(track, 0)));
+            }
+            harness.run_to(3 * BAR);
+            harness.drain_events();
+
+            let long = addr(7, 7);
+            harness.command(Command::Press(long));
+            let low = |harness: &Harness| {
+                harness
+                    .events
+                    .iter()
+                    .any(|e| matches!(e, Event::RecordBufferLow { addr } if *addr == long))
+            };
+            for _ in 0..2_000 {
+                if low(&harness) {
+                    break;
+                }
+                harness.run_frames(512);
+            }
+            assert!(low(&harness), "the pool gave out");
+
+            // Both land before the render that would otherwise seal the take.
+            if disturb {
+                harness.command(Command::Press(long));
+                harness.command(Command::Clear(addr(0, 0)));
+            }
+            let until = (harness.position() / BAR + 2) * BAR;
+            harness.run_to(until);
+
+            harness
+                .events
+                .iter()
+                .find_map(|e| match e {
+                    Event::ClipRecorded { addr, len, .. } if *addr == long => Some(*len),
+                    _ => None,
+                })
+                .unwrap()
+        };
+
+        assert_eq!(
+            sealed(true),
+            sealed(false),
+            "the take seals at the boundary its storage bought"
+        );
+    }
+
+    #[test]
     fn a_take_that_runs_out_is_cut_to_the_bars_it_holds() {
         let mut harness = Harness::new(512);
 
