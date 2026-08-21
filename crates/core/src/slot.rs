@@ -208,8 +208,6 @@ pub struct Ctx {
     pub now: Frames,
     /// The bar grid.
     pub grid: BarGrid,
-    /// Longest recording allowed, in bars. Capture is forced to stop at this length.
-    pub max_bars: u32,
     /// The id to give the next clip that finishes recording.
     pub next_clip_id: ClipId,
 }
@@ -290,9 +288,10 @@ fn advance(state: SlotState, ctx: &Ctx) -> (SlotState, Effects) {
             started_at,
             ends_at,
         } => {
-            // An unstopped recording still has to end somewhere.
-            let limit = Frames(started_at.0 + ctx.grid.bars(ctx.max_bars).0);
-            let due = ends_at.unwrap_or(limit).min(limit);
+            // A recording nobody has stopped runs until the storage does.
+            let Some(due) = ends_at else {
+                return (state, Effects::new());
+            };
             if ctx.now < due {
                 return (state, Effects::new());
             }
@@ -390,7 +389,6 @@ mod tests {
                 TimeSignature::FOUR_FOUR,
             )
             .unwrap(),
-            max_bars: 64,
             next_clip_id: ClipId(7),
         }
     }
@@ -553,14 +551,28 @@ mod tests {
     }
 
     #[test]
-    fn a_recording_nobody_stops_ends_at_the_maximum_length() {
+    fn a_recording_nobody_stops_carries_on() {
         let started_at = Frames(BAR);
         let recording = SlotState::Recording {
             started_at,
             ends_at: None,
         };
-        let mut ctx = ctx(BAR + 4 * BAR);
-        ctx.max_bars = 4;
+        let ctx = ctx(BAR + 400 * BAR);
+
+        // Nothing but a stop or the storage running out ends a take.
+        let (state, fx) = step(recording, SlotInput::Advance, &ctx);
+        assert_eq!(state, recording);
+        assert!(effects(fx).is_empty());
+    }
+
+    #[test]
+    fn a_recording_ends_where_it_was_told_to() {
+        let started_at = Frames(BAR);
+        let recording = SlotState::Recording {
+            started_at,
+            ends_at: Some(Frames(3 * BAR)),
+        };
+        let ctx = ctx(3 * BAR);
 
         let (state, fx) = step(recording, SlotInput::Advance, &ctx);
         assert_eq!(state, SlotState::Playing { clip: ClipId(7) });
@@ -569,7 +581,7 @@ mod tests {
             Some(&Effect::FinishCapture {
                 clip: ClipId(7),
                 started_at,
-                at: Frames(5 * BAR),
+                at: Frames(3 * BAR),
             })
         );
     }

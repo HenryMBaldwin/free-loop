@@ -1910,10 +1910,10 @@ mod resources {
     }
 
     #[test]
-    fn a_take_that_runs_out_part_way_is_not_sealed() {
+    fn a_take_that_runs_out_is_cut_to_the_bars_it_holds() {
         let mut harness = Harness::new(512);
 
-        // Two takes and their tails leave less than a four-bar take needs.
+        // Two takes and their tails leave less than the take below asks for.
         for track in 0..2 {
             harness.command(Command::Press(addr(track, 0)));
         }
@@ -1922,33 +1922,29 @@ mod resources {
             harness.command(Command::Press(addr(track, 0)));
         }
         harness.run_to(3 * BAR);
-        let left = harness.engine.segments_available();
-        assert!(
-            left > 0 && left < 6,
-            "{left} segments left, against six for the take below"
-        );
         harness.drain_events();
 
         let long = addr(7, 7);
         harness.command(Command::Press(long));
-        harness.run_to(6 * BAR);
-        harness.command(Command::Press(long));
-        harness.run_to(6 * BAR + 1);
+        harness.run_to(9 * BAR);
 
-        let events = harness.drain_events();
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, Event::RecordBufferLow { addr } if *addr == long)),
-            "it was warned on the way"
-        );
-        assert!(
-            !events
-                .iter()
-                .any(|e| matches!(e, Event::ClipRecorded { .. })),
-            "and no clip was sealed from a take with silence in its tail"
-        );
-        assert_eq!(harness.engine.state(long), SlotState::Empty);
+        let recorded: Vec<Frames> = harness
+            .drain_events()
+            .iter()
+            .filter_map(|e| match e {
+                Event::ClipRecorded { addr, len, .. } if *addr == long => Some(*len),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(recorded.len(), 1, "the take was sealed, not lost");
+        let len = recorded[0].0;
+        assert!(len > 0 && len < 6 * BAR, "{len} frames, cut short");
+        assert_eq!(len % BAR, 0, "and still whole bars");
+        assert!(matches!(
+            harness.engine.state(long),
+            SlotState::Playing { .. }
+        ));
     }
 }
 
