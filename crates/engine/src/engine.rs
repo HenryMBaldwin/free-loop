@@ -9,7 +9,7 @@
 //! exact frame it was scheduled for rather than at the next block edge.
 
 use free_loop_core::{
-    BarGrid, ClipId, Command, Ctx, Effect, Event, Frames, LaunchMode, MIN_BPM, PadMask, SLOT_COUNT,
+    BarGrid, ClipId, Command, Ctx, Effect, Event, Frames, LaunchMode, PadMask, SLOT_COUNT,
     SampleRate, SessionModel, Settings, SlotAddr, SlotState, TRACK_COUNT, Tempo, TimeError,
     TimeSignature, TrackInput, UNITY_STEP, gain_for_step, pad_bit,
 };
@@ -20,7 +20,7 @@ use crate::click::{Click, ClickConfig};
 use crate::load::{LoadInbox, LoadMessage, Loader};
 use crate::recycle::{Recycler, Retirement, channel};
 use crate::snapshot::{Snapshot, SnapshotReader, SnapshotWriter};
-use free_loop_clip::{Clip, Ramp, SEGMENT_FRAMES, SegmentPool, segments_for};
+use free_loop_clip::{Clip, Ramp, SegmentPool, segments_for};
 
 /// Frames a level travels the full gain range in by default. 5 ms at 48 kHz.
 pub const DEFAULT_DECLICK: Frames = Frames(240);
@@ -95,9 +95,6 @@ pub enum EngineError {
     /// Capture channel count was zero.
     #[error("capture channel count must be greater than zero")]
     ZeroCaptureChannels,
-    /// Recordings were configured to be zero bars long.
-    #[error("maximum recording length must be at least one bar")]
-    ZeroMaxBars,
     /// The segment pool held no segments.
     #[error("the segment pool must hold at least one segment")]
     EmptyPool,
@@ -116,8 +113,6 @@ pub struct EngineConfig {
     pub channels: usize,
     /// Channels in the interleaved input buffer, which a track picks from.
     pub capture_channels: usize,
-    /// Longest recording allowed, in bars.
-    pub max_bars: u32,
     /// Segments to allocate. This is the ceiling on total recorded audio.
     pub segment_pool: usize,
     /// Round-trip latency to compensate for, in frames. See
@@ -146,7 +141,6 @@ impl EngineConfig {
             time_signature: TimeSignature::FOUR_FOUR,
             channels: 2,
             capture_channels: 2,
-            max_bars: 32,
             segment_pool: 64,
             capture_offset: Frames::ZERO,
             click: ClickConfig::default(),
@@ -182,6 +176,10 @@ impl EventSink for Vec<Event> {
 struct Recording {
     /// Frames of transport elapsed since capture began, written or not.
     frames: u64,
+    /// Where capture began, so a take cut short knows its own bar lines.
+    started_at: Frames,
+    /// Frames of the loop backed by storage, which bounds where it can end.
+    written: u64,
     /// The input this take is capturing, fixed when it began.
     input: TrackInput,
     /// Whether the segment pool ran dry part way through.
@@ -348,7 +346,7 @@ impl Audio {
 
     fn apply(&mut self, addr: SlotAddr, effect: Effect, sink: &mut impl EventSink) {
         match effect {
-            Effect::StartCapture { .. } => {
+            Effect::StartCapture { at } => {
                 // A take is at least one bar; less storage than that cannot produce a
                 // clip.
                 if self.segments.available() < segments_for(Frames(self.bar_frames)) {
@@ -365,6 +363,8 @@ impl Audio {
                 self.clips[addr.track.index()][addr.slot.index()] = Some(shell);
                 self.recordings[addr.track.index()][addr.slot.index()] = Some(Recording {
                     frames: 0,
+                    started_at: at,
+                    written: 0,
                     starved: false,
                     input: self.inputs[addr.track.index()],
                     tail_written: 0,
@@ -384,16 +384,6 @@ impl Audio {
                 else {
                     return;
                 };
-                // A take that ran out holds silence from where it did, and its length
-                // counts storage it never got. It goes back.
-                if recording.starved {
-                    self.recordings[addr.track.index()][addr.slot.index()] = None;
-                    if let Some(held) = self.clips[addr.track.index()][addr.slot.index()].take() {
-                        self.retire(held);
-                    }
-                    self.refused |= pad_bit(addr);
-                    return;
-                }
                 // Capture carries on into the bar after the loop, so a pickup has
                 // somewhere to come from. The recording is dropped once it has.
                 recording.tail_until = Some(tail_from.saturating_add(self.tail_frames));
@@ -475,7 +465,6 @@ pub struct Engine {
     channels: usize,
     /// Width of the input buffer, which a track picks one or two channels from.
     capture_channels: usize,
-    max_bars: u32,
     paused: bool,
     /// Pads that do not sound.
     muted: PadMask,
@@ -514,24 +503,16 @@ impl Engine {
         if config.capture_channels == 0 {
             return Err(EngineError::ZeroCaptureChannels);
         }
-        if config.max_bars == 0 {
-            return Err(EngineError::ZeroMaxBars);
-        }
         if config.segment_pool == 0 {
             return Err(EngineError::EmptyPool);
         }
 
         let grid = BarGrid::new(config.sample_rate, config.tempo, config.time_signature)?;
 
-        // Size the segment arrays for the slowest tempo the transport accepts, so a
-        // later tempo change can never outgrow a buffer that is already allocated.
-        let slowest = BarGrid::new(
-            config.sample_rate,
-            Tempo::new(MIN_BPM)?,
-            config.time_signature,
-        )?;
-        let longest = slowest.bars(config.max_bars).0;
-        let max_segments = as_usize(longest.div_ceil(as_u64(SEGMENT_FRAMES))).max(1);
+        // A take runs until the pool does, and nothing stops one taking all of it, so
+        // every clip's segment array has to reach the whole pool. The slots are pointers;
+        // only the segments written cost memory.
+        let max_segments = config.segment_pool.max(1);
 
         let (retirement, recycler) = channel();
         let (snapshots, snapshot_reader) = crate::snapshot::channel();
@@ -566,7 +547,6 @@ impl Engine {
             loads,
             channels: config.channels,
             capture_channels: config.capture_channels,
-            max_bars: config.max_bars,
             paused: false,
             muted: 0,
             soloed: 0,
@@ -695,7 +675,6 @@ impl Engine {
         Ctx {
             now: self.position,
             grid: self.grid,
-            max_bars: self.max_bars,
             next_clip_id: self.audio.next_clip_id,
         }
     }
@@ -1228,6 +1207,7 @@ impl Engine {
             .unwrap_or(&[]);
 
         let mut done_tailing: PadMask = 0;
+        let mut out_of_room: PadMask = 0;
         for addr in SlotAddr::all() {
             let Audio {
                 clips,
@@ -1265,9 +1245,13 @@ impl Engine {
             // the take, and says nothing.
             if recording.tail_until.is_some() {
                 recording.tail_written += as_u64(backed);
-            } else if backed < run && !recording.starved {
-                recording.starved = true;
-                sink.event(Event::RecordBufferLow { addr });
+            } else {
+                recording.written += as_u64(backed);
+                if backed < run && !recording.starved {
+                    recording.starved = true;
+                    out_of_room |= pad_bit(addr);
+                    sink.event(Event::RecordBufferLow { addr });
+                }
             }
             recording.frames += as_u64(run);
 
@@ -1281,7 +1265,40 @@ impl Engine {
         }
 
         self.settle_tails(done_tailing);
+        self.cut_short(out_of_room, sink);
         self.click.add_into(out, self.channels);
+    }
+
+    /// Ends the takes that ran out of storage, at the last whole bar each one holds.
+    ///
+    /// A take with no whole bar behind it has no clip to make, so it goes back instead.
+    fn cut_short(&mut self, out: PadMask, sink: &mut impl EventSink) {
+        if out == 0 {
+            return;
+        }
+        let before = self.session;
+        let bar = self.audio.bar_frames.max(1);
+        for addr in SlotAddr::all().filter(|addr| out & pad_bit(*addr) != 0) {
+            let (track, slot) = (addr.track.index(), addr.slot.index());
+            let Some(recording) = self.audio.recordings[track][slot].as_ref() else {
+                continue;
+            };
+            let bars = recording.written / bar;
+            if bars == 0 {
+                // Nothing whole to keep, so the pad goes back rather than holding a take
+                // it can never seal.
+                self.audio.recordings[track][slot] = None;
+                if let Some(held) = self.audio.clips[track][slot].take() {
+                    self.audio.retire(held);
+                }
+                self.audio.refused |= pad_bit(addr);
+                continue;
+            }
+            let at = Frames(recording.started_at.0 + bars * bar);
+            self.session.finish_recording_at(addr, at);
+        }
+        self.settle_refusals(sink);
+        self.emit_changes(&before, sink);
     }
 
     /// Ends the recordings whose tail is complete, telling each clip how much it holds.

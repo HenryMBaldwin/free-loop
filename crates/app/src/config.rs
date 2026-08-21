@@ -92,8 +92,6 @@ pub struct Transport {
     pub beats_per_bar: u32,
     /// Note value that gets the beat.
     pub beat_unit: u32,
-    /// Longest recording allowed, in bars.
-    pub max_bars: u32,
     /// Whether launching a clip plays it from its start rather than from wherever the
     /// transport has reached.
     pub restart_clips: bool,
@@ -105,7 +103,6 @@ impl Default for Transport {
             tempo: 120.0,
             beats_per_bar: 4,
             beat_unit: 4,
-            max_bars: 32,
             restart_clips: false,
         }
     }
@@ -269,7 +266,6 @@ impl Config {
             time_signature: self.time_signature()?,
             channels,
             capture_channels,
-            max_bars: self.transport.max_bars,
             segment_pool: self.engine.segment_pool,
             declick: free_loop_core::Frames(self.engine.declick_frames),
             input: self.track_input(),
@@ -315,7 +311,6 @@ pause_on_disconnect = true
 tempo = 120.0
 beats_per_bar = 4
 beat_unit = 4
-max_bars = 32
 # Whether launching a clip plays it from its start. Off drops into whatever part of it the
 # transport has reached, which keeps every loop locked to the same grid.
 restart_clips = false
@@ -397,7 +392,6 @@ mod tests {
         let config = Config::parse(EXAMPLE).unwrap();
         let defaults = Config::default();
         assert_eq!(config.transport.tempo, defaults.transport.tempo);
-        assert_eq!(config.transport.max_bars, defaults.transport.max_bars);
         assert_eq!(config.engine.segment_pool, defaults.engine.segment_pool);
         assert_eq!(config.click.level, defaults.click.level);
         assert_eq!(config.audio.cushion_blocks, defaults.audio.cushion_blocks);

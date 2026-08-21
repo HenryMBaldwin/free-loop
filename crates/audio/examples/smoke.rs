@@ -64,7 +64,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         time_signature: TimeSignature::FOUR_FOUR,
         channels: negotiated.channels,
         capture_channels: negotiated.capture_channels,
-        max_bars: 32,
         segment_pool: 64,
         capture_offset: Frames::ZERO,
         click: ClickConfig::default(),
