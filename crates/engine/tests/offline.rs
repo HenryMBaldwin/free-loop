@@ -2458,6 +2458,95 @@ mod tail {
     }
 }
 
+mod pickup {
+    use super::*;
+
+    /// Frames of tail a take keeps in 4/4.
+    const TAIL: u64 = 3 * BEAT;
+
+    fn set_pickup(harness: &mut Harness, track: usize, on: bool) {
+        let mut pickups = [false; free_loop_core::TRACK_COUNT];
+        pickups[track] = on;
+        harness.setting(|s| s.pickups = pickups);
+    }
+
+    #[test]
+    fn the_opening_beats_come_from_the_tail() {
+        let mut harness = Harness::new(128);
+        let pad = addr(0, 0);
+        let (start, end) = record(&mut harness, pad, 0, 1);
+        harness.run_to(end + TAIL + 1);
+
+        // The take's own head, for comparison.
+        let from = end + TAIL + BAR;
+        harness.run_to(from);
+        let head = harness.run_to(from + TAIL);
+
+        set_pickup(&mut harness, 0, true);
+        let next = (harness.position() / BAR + 1) * BAR;
+        harness.run_to(next);
+        let opened = harness.run_to(next + TAIL);
+
+        assert_ne!(opened, head, "the tail stands in for the head");
+        // Frame k of the tail was captured a whole loop after frame k of the head.
+        for (i, sample) in opened.iter().enumerate() {
+            let frame = next + (i / CHANNELS) as u64;
+            let phase = (frame - start) % BAR;
+            let want = signal(start + BAR + phase, i % CHANNELS);
+            assert_eq!(*sample, want, "frame {frame}");
+        }
+    }
+
+    #[test]
+    fn the_rest_of_the_loop_is_untouched() {
+        let mut harness = Harness::new(128);
+        let pad = addr(0, 0);
+        let (start, end) = record(&mut harness, pad, 0, 1);
+        harness.run_to(end + TAIL + 1);
+        set_pickup(&mut harness, 0, true);
+
+        // Past the beats the tail stands in for, back to what was recorded.
+        let next = (harness.position() / BAR + 1) * BAR + TAIL;
+        harness.run_to(next);
+        let out = harness.run_to(next + BEAT);
+
+        for (i, sample) in out.iter().enumerate() {
+            let frame = next + (i / CHANNELS) as u64;
+            let phase = (frame - start) % BAR;
+            assert_eq!(
+                *sample,
+                signal(start + phase, i % CHANNELS),
+                "frame {frame}"
+            );
+        }
+    }
+
+    #[test]
+    fn turning_it_off_puts_the_head_back() {
+        let mut harness = Harness::new(128);
+        let pad = addr(0, 0);
+        let (start, end) = record(&mut harness, pad, 0, 1);
+        harness.run_to(end + TAIL + 1);
+
+        set_pickup(&mut harness, 0, true);
+        set_pickup(&mut harness, 0, false);
+
+        let next = (harness.position() / BAR + 1) * BAR;
+        harness.run_to(next);
+        let out = harness.run_to(next + TAIL);
+
+        for (i, sample) in out.iter().enumerate() {
+            let frame = next + (i / CHANNELS) as u64;
+            let phase = (frame - start) % BAR;
+            assert_eq!(
+                *sample,
+                signal(start + phase, i % CHANNELS),
+                "frame {frame}"
+            );
+        }
+    }
+}
+
 mod seam {
     use super::*;
 

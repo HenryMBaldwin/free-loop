@@ -35,6 +35,8 @@ pub struct Chrome {
     pub inputs: [TrackInput; TRACK_COUNT],
     /// Where each track's clips are anchored when launched.
     pub launch_modes: [LaunchMode; TRACK_COUNT],
+    /// Whether each track opens its loops from the tail.
+    pub pickups: [bool; TRACK_COUNT],
     /// Input channels the device offers.
     pub input_count: usize,
 }
@@ -97,6 +99,7 @@ impl Default for Chrome {
             gains: [UNITY_STEP; TRACK_COUNT],
             inputs: [TrackInput::default(); TRACK_COUNT],
             launch_modes: [LaunchMode::Follow; TRACK_COUNT],
+            pickups: [false; TRACK_COUNT],
             input_count: 2,
         }
     }
@@ -182,6 +185,9 @@ pub const SETTINGS_SIDE: usize = 3;
 
 /// The settings column holding whether a launch restarts a clip.
 pub const RESTART_COLUMN: usize = 0;
+
+/// The settings column for opening a loop from its tail.
+pub const PICKUP_COLUMN: usize = 1;
 
 /// The right-hand column button that runs the transport.
 pub const PAUSE_SIDE: usize = 4;
@@ -308,15 +314,19 @@ pub fn inputs(chrome: Chrome) -> LedFrame {
 
 /// Paints each row as one track's settings, one setting per column.
 ///
-/// Column zero is whether launching a clip restarts it. The rest are unused for now.
+/// Column zero is whether launching a clip restarts it, column one whether it opens from
+/// its tail. The rest are unused for now.
 pub fn settings(chrome: Chrome) -> LedFrame {
     let mut frame = LedFrame::new();
 
     for addr in SlotAddr::all() {
-        if addr.slot.index() != RESTART_COLUMN {
-            continue;
-        }
-        let led = if chrome.launch_modes[addr.track.index()].restarts() {
+        let track = addr.track.index();
+        let on = match addr.slot.index() {
+            RESTART_COLUMN => chrome.launch_modes[track].restarts(),
+            PICKUP_COLUMN => chrome.pickups[track],
+            _ => continue,
+        };
+        let led = if on {
             Led::solid(SETTING)
         } else {
             Led::dim(SETTING)
@@ -1000,16 +1010,32 @@ mod tests {
     }
 
     #[test]
-    fn the_settings_grid_holds_one_column_for_now() {
+    fn the_settings_grid_holds_two_columns_for_now() {
         let painted = settings(Chrome::default());
         let row = TrackId::new(0).unwrap();
-        for column in 1..u8::try_from(SLOT_COUNT).unwrap() {
+        for column in 2..u8::try_from(SLOT_COUNT).unwrap() {
             let addr = SlotAddr::new(row, SlotId::new(column).unwrap());
             assert!(
                 !painted.pad(addr).is_lit(),
                 "column {column} does nothing yet"
             );
         }
+    }
+
+    #[test]
+    fn a_settings_row_lights_the_column_for_a_track_opening_from_its_tail() {
+        let mut chrome = Chrome::default();
+        chrome.pickups[4] = true;
+        let painted = settings(chrome);
+
+        let lit = |track, column| {
+            painted.pad(SlotAddr::new(
+                TrackId::new(track).unwrap(),
+                SlotId::new(column).unwrap(),
+            ))
+        };
+        assert_eq!(lit(4, 1), Led::solid(SETTING), "the track that is on");
+        assert_eq!(lit(0, 1), Led::dim(SETTING), "and the rest are on offer");
     }
 
     #[test]

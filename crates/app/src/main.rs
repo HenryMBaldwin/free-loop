@@ -399,6 +399,7 @@ fn load_session(
                     free_loop_core::LaunchMode::Follow
                 }
             }));
+            controller.set_pickups(core::array::from_fn(|track| restored.tracks[track].pickup));
             controller.session_loaded(addr, true);
         }
         Err(error) => {
@@ -574,12 +575,14 @@ struct SaveSettings {
 fn save_settings(controller: &Controller) -> SaveSettings {
     let inputs = controller.inputs();
     let modes = controller.launch_modes();
+    let pickups = controller.pickups();
     let gains = controller.gains();
     SaveSettings {
         tempo: controller.tempo(),
         tracks: core::array::from_fn(|track| TrackSettings {
             input: inputs[track],
             restart: modes[track].restarts(),
+            pickup: pickups[track],
             gain_step: gains[track],
         }),
     }

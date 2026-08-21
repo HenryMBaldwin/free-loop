@@ -13,7 +13,8 @@ use free_loop_core::{
 };
 use free_loop_surface::{
     Axis, Chrome, Control, INPUT_SIDE, Led, LedColor, LedFrame, MUTE_SIDE, NEW_SIDE, PAUSE_SIDE,
-    RESTART_COLUMN, SELECTED, SETTINGS_SIDE, SOLO_SIDE, SurfaceEvent, VOLUME_SIDE, paint,
+    PICKUP_COLUMN, RESTART_COLUMN, SELECTED, SETTINGS_SIDE, SOLO_SIDE, SurfaceEvent, VOLUME_SIDE,
+    paint,
 };
 
 /// Beats per minute one press of the tempo buttons moves.
@@ -180,6 +181,7 @@ impl Controller {
         let chrome = Chrome {
             inputs: [TrackInput::default(); TRACK_COUNT],
             launch_modes: [LaunchMode::Follow; TRACK_COUNT],
+            pickups: [false; TRACK_COUNT],
             input_count: 2,
             beat: 0,
             beats_per_bar,
@@ -309,11 +311,26 @@ impl Controller {
 
     /// Flips the setting the pad's column stands for.
     fn toggle_setting(&mut self, addr: SlotAddr) {
-        if addr.slot.index() != RESTART_COLUMN {
-            return;
-        }
         let track = addr.track.index();
-        self.chrome.launch_modes[track] = self.chrome.launch_modes[track].toggled();
+        match addr.slot.index() {
+            RESTART_COLUMN => {
+                self.chrome.launch_modes[track] = self.chrome.launch_modes[track].toggled();
+            }
+            PICKUP_COLUMN => self.chrome.pickups[track] = !self.chrome.pickups[track],
+            _ => return,
+        }
+        self.settings_changed = true;
+        self.dirty = true;
+    }
+
+    /// Which tracks open their loops from the tail.
+    pub fn pickups(&self) -> [bool; TRACK_COUNT] {
+        self.chrome.pickups
+    }
+
+    /// Takes the pickup settings a loaded session came with.
+    pub fn set_pickups(&mut self, pickups: [bool; TRACK_COUNT]) {
+        self.chrome.pickups = pickups;
         self.settings_changed = true;
         self.dirty = true;
     }
@@ -799,6 +816,7 @@ impl Controller {
             soloed: self.chrome.soloed,
             inputs: self.chrome.inputs,
             launch_modes: self.chrome.launch_modes,
+            pickups: self.chrome.pickups,
         }
     }
 
