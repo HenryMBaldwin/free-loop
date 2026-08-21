@@ -102,6 +102,24 @@ impl SessionModel {
     ///
     /// A queued transition holds the frame it is due at, so moving the transport leaves
     /// it scheduled against a position that may now be far ahead.
+    /// Ends a recording no later than `at`, for a caller that has run out of room.
+    ///
+    /// A take already stopping keeps the earlier of the two ends. Does nothing to a slot
+    /// that is not recording.
+    pub fn finish_recording_at(&mut self, addr: SlotAddr, at: Frames) {
+        let (track, slot) = (addr.track.index(), addr.slot.index());
+        if let SlotState::Recording {
+            started_at,
+            ends_at,
+        } = self.slots[track][slot]
+        {
+            self.slots[track][slot] = SlotState::Recording {
+                started_at,
+                ends_at: Some(ends_at.map_or(at, |due| due.min(at))),
+            };
+        }
+    }
+
     pub fn retarget_pending(&mut self, at: Frames) {
         for addr in SlotAddr::all() {
             let state = match self.state(addr) {
@@ -187,7 +205,6 @@ mod tests {
                 TimeSignature::FOUR_FOUR,
             )
             .unwrap(),
-            max_bars: 64,
             next_clip_id: ClipId(next_clip_id),
         }
     }

@@ -648,7 +648,6 @@ mod tests {
                 free_loop_core::TimeSignature::FOUR_FOUR,
             )
             .unwrap(),
-            max_bars: 32,
             next_clip_id: ClipId(0),
         };
         session.press(addr(2, 3), &ctx, &mut |_, _| {});
