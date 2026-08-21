@@ -24,7 +24,7 @@ pub use event::{Control, SurfaceEvent};
 pub use host::HostWatch;
 pub use launchpad::{LaunchpadX, output_ports};
 pub use led::{
-    BEAT_LEDS, CONTROL_COUNT, FIRST_BEAT_LED, Led, LedColor, LedFrame, LedStyle, SIDE_COUNT,
+    BEAT_LEDS, CONTROL_COUNT, FIRST_BEAT_LED, Led, LedColor, LedFrame, LedStyle, SHADES, SIDE_COUNT,
 };
 pub use mock::MockSurface;
 pub use paint::{

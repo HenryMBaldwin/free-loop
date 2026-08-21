@@ -108,8 +108,8 @@ pub struct TrackSettings {
     pub input: TrackInput,
     /// Whether launching a clip plays it from its start.
     pub restart: bool,
-    /// Whether the track opens its loops from the tail.
-    pub pickup: bool,
+    /// Beats the track opens its loops from the tail for. Zero takes the head.
+    pub pickup: u8,
     /// The step on the gain ladder the track plays at.
     pub gain_step: u8,
 }
@@ -120,7 +120,7 @@ impl Default for TrackSettings {
         Self {
             input: TrackInput::default(),
             restart: false,
-            pickup: false,
+            pickup: 0,
             gain_step: UNITY_STEP,
         }
     }
@@ -1369,7 +1369,7 @@ mod tests {
                     input: 2,
                     input_channels: Some(vec![1]),
                     restart: true,
-                    pickup: false,
+                    pickup: 0,
                     gain_step: Some(3),
                 }],
             },
@@ -1414,7 +1414,7 @@ mod tests {
                 input: 0,
                 input_channels: None,
                 restart: false,
-                pickup: false,
+                pickup: 0,
                 gain_step: Some(1),
             }]),
             clips: Vec::new(),
@@ -1431,7 +1431,7 @@ mod tests {
                 input: 0,
                 input_channels: None,
                 restart: false,
-                pickup: false,
+                pickup: 0,
                 gain_step: Some(1),
             }]),
             clips: vec![loaded_clip(addr(2, 0), 5), loaded_clip(addr(2, 1), 7)],
@@ -1452,7 +1452,7 @@ mod tests {
                 input: 1,
                 input_channels: None,
                 restart: false,
-                pickup: false,
+                pickup: 0,
                 gain_step: None,
             }]),
             clips: vec![loaded_clip(addr(2, 0), 5)],
