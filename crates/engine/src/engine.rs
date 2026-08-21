@@ -65,6 +65,14 @@ fn shifted_anchor(recorded_at: Frames, len: Frames, shift: Frames) -> Frames {
     Frames((recorded_at.0 % len.0 + len.0 - shift.0 % len.0) % len.0)
 }
 
+/// Capture kept past a loop: every beat of the bar after it but the last.
+///
+/// The last beat is what a pickup leads in from, so it stays as the take has it.
+fn tail_frames(grid: BarGrid) -> u64 {
+    let beats = grid.time_signature().beats_per_bar().saturating_sub(1);
+    grid.beat_offset(beats).0
+}
+
 /// Saturating `u64` to `usize`.
 fn as_usize(value: u64) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
@@ -178,6 +186,11 @@ struct Recording {
     input: TrackInput,
     /// Whether the segment pool ran dry part way through.
     starved: bool,
+    /// Frames to keep capturing to once the loop itself is sealed.
+    ///
+    /// The take carries on into the bar after it, so a pickup has somewhere to come
+    /// from.
+    tail_until: Option<u64>,
 }
 
 /// One pad's worth of a load that has not been put in place yet.
@@ -252,6 +265,8 @@ struct Audio {
     capture_offset: Frames,
     /// Frames in a bar, which is the shortest take.
     bar_frames: u64,
+    /// Frames of capture kept past a loop, which is a bar less its final beat.
+    tail_frames: u64,
     /// Which input each track records.
     inputs: [TrackInput; TRACK_COUNT],
     /// Where each track's clips are anchored when launched.
@@ -348,6 +363,7 @@ impl Audio {
                     frames: 0,
                     starved: false,
                     input: self.inputs[addr.track.index()],
+                    tail_until: None,
                 });
             }
 
@@ -356,19 +372,26 @@ impl Audio {
                 started_at,
                 at,
             } => {
-                let Some(recording) = self.recordings[addr.track.index()][addr.slot.index()].take()
+                let tail_from = at.0.saturating_sub(started_at.0);
+                let Some(recording) = self.recordings[addr.track.index()][addr.slot.index()]
+                    .as_mut()
+                    .filter(|recording| recording.tail_until.is_none())
                 else {
                     return;
                 };
                 // A take that ran out holds silence from where it did, and its length
                 // counts storage it never got. It goes back.
                 if recording.starved {
+                    self.recordings[addr.track.index()][addr.slot.index()] = None;
                     if let Some(held) = self.clips[addr.track.index()][addr.slot.index()].take() {
                         self.retire(held);
                     }
                     self.refused |= pad_bit(addr);
                     return;
                 }
+                // Capture carries on into the bar after the loop, so a pickup has
+                // somewhere to come from. The recording is dropped once it has.
+                recording.tail_until = Some(tail_from.saturating_add(self.tail_frames));
                 let Some(held) = self.clips[addr.track.index()][addr.slot.index()].as_mut() else {
                     return;
                 };
@@ -526,6 +549,7 @@ impl Engine {
                 next_clip_id: ClipId(0),
                 capture_offset: config.capture_offset,
                 bar_frames: grid.bars(1).0,
+                tail_frames: tail_frames(grid),
                 inputs: [config.input; TRACK_COUNT],
                 launch_modes: [config.launch_mode; TRACK_COUNT],
                 anchors: core::array::from_fn(|_| core::array::from_fn(|_| None)),
@@ -573,6 +597,13 @@ impl Engine {
     /// What a pad is doing.
     pub fn state(&self, addr: SlotAddr) -> SlotState {
         self.session.state(addr)
+    }
+
+    /// Audio a pad's clip holds past its loop.
+    pub fn clip_tail(&self, addr: SlotAddr) -> Frames {
+        self.audio
+            .clip(addr)
+            .map_or(Frames::ZERO, |clip| clip.tail())
     }
 
     /// Segments still available for recording.
@@ -978,6 +1009,7 @@ impl Engine {
     fn set_grid(&mut self, grid: BarGrid) {
         self.grid = grid;
         self.audio.bar_frames = grid.bars(1).0;
+        self.audio.tail_frames = tail_frames(grid);
     }
 
     /// Publishes a reference to every pad that holds a clip.
@@ -1187,6 +1219,7 @@ impl Engine {
             .get(offset * capture_channels..(offset + available) * capture_channels)
             .unwrap_or(&[]);
 
+        let mut done_tailing: PadMask = 0;
         for addr in SlotAddr::all() {
             let Audio {
                 clips,
@@ -1225,9 +1258,38 @@ impl Engine {
                 sink.event(Event::RecordBufferLow { addr });
             }
             recording.frames += as_u64(run);
+
+            // A sealed take carries on until its tail is in, then stops being a recording.
+            if recording
+                .tail_until
+                .is_some_and(|until| recording.frames >= until)
+            {
+                done_tailing |= pad_bit(addr);
+            }
         }
 
+        self.settle_tails(done_tailing);
         self.click.add_into(out, self.channels);
+    }
+
+    /// Ends the recordings whose tail is complete, telling each clip how much it holds.
+    fn settle_tails(&mut self, done: PadMask) {
+        if done == 0 {
+            return;
+        }
+        for addr in SlotAddr::all().filter(|addr| done & pad_bit(*addr) != 0) {
+            let (track, slot) = (addr.track.index(), addr.slot.index());
+            let Some(recording) = self.audio.recordings[track][slot].take() else {
+                continue;
+            };
+            let Some(inner) = self.audio.clips[track][slot]
+                .as_mut()
+                .and_then(Arc::get_mut)
+            else {
+                continue;
+            };
+            inner.set_tail(Frames(recording.frames.saturating_sub(inner.len().0)));
+        }
     }
 
     fn emit_changes(&self, before: &SessionModel, sink: &mut impl EventSink) {

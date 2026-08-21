@@ -390,6 +390,8 @@ pub struct Clip {
     recorded_at: Frames,
     channels: usize,
     capture_offset: Frames,
+    /// Audio captured past the loop, held at `[len, len + tail)`.
+    tail: Frames,
     borrowed: bool,
 }
 
@@ -403,6 +405,7 @@ impl Clip {
             recorded_at,
             channels,
             capture_offset: Frames::ZERO,
+            tail: Frames::ZERO,
             borrowed: false,
         }
     }
@@ -413,8 +416,20 @@ impl Clip {
     }
 
     /// Segments this clip's audio costs, wherever its storage came from.
+    ///
+    /// The tail counts too: it is real audio the pool handed out.
     pub fn segments(&self) -> usize {
-        segments_for(self.len)
+        segments_for(Frames(self.len.0.saturating_add(self.tail.0)))
+    }
+
+    /// Audio held past the loop, for a pickup to come from.
+    pub fn tail(&self) -> Frames {
+        self.tail
+    }
+
+    /// Records how much audio was kept past the loop.
+    pub fn set_tail(&mut self, tail: Frames) {
+        self.tail = tail;
     }
 
     /// The transport position capture began at. Fixes the loop's phase against the grid.
@@ -462,6 +477,7 @@ impl Clip {
         self.len = Frames::ZERO;
         self.recorded_at = Frames::ZERO;
         self.capture_offset = Frames::ZERO;
+        self.tail = Frames::ZERO;
     }
 
     /// Sets the loop length.
