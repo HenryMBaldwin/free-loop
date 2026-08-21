@@ -1026,8 +1026,13 @@ mod tests {
 
         let on = SlotAddr::new(TrackId::new(1).unwrap(), SlotId::new(0).unwrap());
         let off = SlotAddr::new(TrackId::new(0).unwrap(), SlotId::new(0).unwrap());
-        assert_eq!(painted.pad(on), Led::solid(SETTING));
-        assert_eq!(painted.pad(off), Led::dim(SETTING), "offered, not taken");
+        // Both columns grade, so a setting that is simply on takes the brightest step.
+        assert_eq!(painted.pad(on), Led::shade(SETTING, SHADES));
+        assert_eq!(
+            painted.pad(off),
+            Led::shade(SETTING, 1),
+            "offered, not taken"
+        );
     }
 
     #[test]

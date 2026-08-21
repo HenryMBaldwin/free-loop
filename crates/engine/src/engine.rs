@@ -997,6 +997,9 @@ impl Engine {
         let mut published = 0;
         let mut expected = 0;
         for addr in SlotAddr::all() {
+            // A clone would stop the tail being written, and freeze the clip at whatever
+            // it holds now, so the tail is ended before the clip goes out.
+            self.settle_tail(addr);
             let state = self.session.state(addr);
             // A pad still recording has no finished audio to publish.
             if state.is_recording() {
@@ -1299,18 +1302,31 @@ impl Engine {
             return;
         }
         for addr in SlotAddr::all().filter(|addr| done & pad_bit(*addr) != 0) {
-            let (track, slot) = (addr.track.index(), addr.slot.index());
-            let Some(recording) = self.audio.recordings[track][slot].take() else {
-                continue;
-            };
-            let Some(inner) = self.audio.clips[track][slot]
-                .as_mut()
-                .and_then(Arc::get_mut)
-            else {
-                continue;
-            };
-            inner.set_tail(Frames(recording.tail_written));
+            self.settle_tail(addr);
         }
+    }
+
+    /// Gives a pad's clip the tail its recording captured, and ends the recording.
+    ///
+    /// The recording is kept if the clip cannot be written to, so the tail is never lost
+    /// without being recorded.
+    fn settle_tail(&mut self, addr: SlotAddr) {
+        let (track, slot) = (addr.track.index(), addr.slot.index());
+        let Some(recording) = self.audio.recordings[track][slot].as_ref() else {
+            return;
+        };
+        if recording.tail_until.is_none() {
+            return;
+        }
+        let tail = Frames(recording.tail_written);
+        let Some(inner) = self.audio.clips[track][slot]
+            .as_mut()
+            .and_then(Arc::get_mut)
+        else {
+            return;
+        };
+        inner.set_tail(tail);
+        self.audio.recordings[track][slot] = None;
     }
 
     fn emit_changes(&self, before: &SessionModel, sink: &mut impl EventSink) {
