@@ -55,13 +55,17 @@ pub enum Event {
         /// Beats per minute.
         bpm: f64,
     },
-    /// A recording could not start because no storage was free. The pad is left empty.
+    /// A take produced no clip, and the pad is left empty.
+    ///
+    /// Either it never started for want of storage, or it ran out part way and was
+    /// discarded.
     RecordingRefused {
         /// Which pad was armed.
         addr: SlotAddr,
     },
-    /// A recording is running out of preallocated buffer. Capture stops early unless
-    /// more is supplied.
+    /// A recording could not be given storage for every frame it has covered.
+    ///
+    /// Capture carries on, but the take is discarded when it finishes. Sent once per take.
     RecordBufferLow {
         /// Which pad is recording.
         addr: SlotAddr,
@@ -78,6 +82,13 @@ pub enum Event {
     },
     /// A tempo change was refused because clips already exist.
     TempoRejected,
+    /// A load held more audio than the pool allows, and was refused whole.
+    LoadRefused {
+        /// Segments the session needs.
+        wanted: u32,
+        /// Segments the pool holds.
+        allowed: u32,
+    },
     /// Every pad holding a clip has been published. Sent even when none did.
     SnapshotComplete {
         /// Which request this answers.
@@ -116,13 +127,15 @@ pub enum EventKind {
     Xrun,
     /// [`Event::TempoRejected`].
     TempoRejected,
+    /// [`Event::LoadRefused`].
+    LoadRefused,
     /// [`Event::SnapshotComplete`].
     SnapshotComplete,
 }
 
 impl EventKind {
     /// Every kind, in the order they index a per-kind count.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::SlotChanged,
         Self::Bar,
         Self::Clock,
@@ -135,6 +148,7 @@ impl EventKind {
         Self::Clipped,
         Self::Xrun,
         Self::TempoRejected,
+        Self::LoadRefused,
         Self::SnapshotComplete,
     ];
 
@@ -171,6 +185,7 @@ impl EventKind {
             Self::Clipped => "clipping report",
             Self::Xrun => "short capture report",
             Self::TempoRejected => "tempo refusal",
+            Self::LoadRefused => "load refusal",
             Self::SnapshotComplete => "snapshot completion",
         }
     }
@@ -192,6 +207,7 @@ impl Event {
             Self::Clipped { .. } => EventKind::Clipped,
             Self::Xrun { .. } => EventKind::Xrun,
             Self::TempoRejected => EventKind::TempoRejected,
+            Self::LoadRefused { .. } => EventKind::LoadRefused,
             Self::SnapshotComplete { .. } => EventKind::SnapshotComplete,
         }
     }

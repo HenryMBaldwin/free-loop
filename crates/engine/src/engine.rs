@@ -200,6 +200,17 @@ impl Staging {
         }
     }
 
+    /// Segments the staged clips would cost the pool.
+    fn segments(&self) -> usize {
+        self.clips
+            .iter()
+            .flatten()
+            .flatten()
+            .fold(0_usize, |total, staged| {
+                total.saturating_add(staged.clip.segments())
+            })
+    }
+
     /// Gives up a load that never finished arriving.
     ///
     /// The storage belongs to whoever sent it, so it goes back through the recycler rather
@@ -557,11 +568,6 @@ impl Engine {
         self.audio.segments.available()
     }
 
-    /// Segments charged to loaded audio, which is stored outside the pool.
-    pub fn segments_reserved(&self) -> usize {
-        self.audio.segments.reserved()
-    }
-
     /// Whether the transport is frozen.
     pub fn is_paused(&self) -> bool {
         self.paused
@@ -881,6 +887,19 @@ impl Engine {
         if !complete {
             return;
         }
+
+        // Checked before the grid is replaced.
+        let wanted = self.audio.staged.segments();
+        let allowed = self.audio.segments.capacity();
+        if wanted > allowed {
+            let Self { audio, .. } = self;
+            audio.staged.abandon(&mut audio.retirement);
+            sink.event(Event::LoadRefused {
+                wanted: u32::try_from(wanted).unwrap_or(u32::MAX),
+                allowed: u32::try_from(allowed).unwrap_or(u32::MAX),
+            });
+            return;
+        }
         self.commit_load(sink);
         self.emit_changes(&before, sink);
     }
@@ -1166,22 +1185,31 @@ impl Engine {
             let Some(recording) = recordings[addr.track.index()][addr.slot.index()].as_mut() else {
                 continue;
             };
-            let written = clips[addr.track.index()][addr.slot.index()]
+            let backed = clips[addr.track.index()][addr.slot.index()]
                 .as_mut()
                 .and_then(Arc::get_mut)
-                .filter(|_| available > 0)
-                .map_or(0, |clip| match recording.input {
-                    TrackInput::Stereo => clip.write(recording.frames, captured, segments),
-                    TrackInput::Mono(channel) => clip.write_channel(
-                        recording.frames,
-                        captured,
-                        channels,
-                        usize::from(channel),
-                        segments,
-                    ),
+                .map_or(0, |clip| {
+                    let written = if available > 0 {
+                        match recording.input {
+                            TrackInput::Stereo => clip.write(recording.frames, captured, segments),
+                            TrackInput::Mono(channel) => clip.write_channel(
+                                recording.frames,
+                                captured,
+                                channels,
+                                usize::from(channel),
+                                segments,
+                            ),
+                        }
+                    } else {
+                        0
+                    };
+                    // Frames the device never delivered still count in the clip's length,
+                    // so they cost the pool the same as recorded ones.
+                    let from = recording.frames + as_u64(written);
+                    written + clip.silence(from, run - written, segments)
                 });
 
-            if available > 0 && written < available && !recording.starved {
+            if backed < run && !recording.starved {
                 recording.starved = true;
                 sink.event(Event::RecordBufferLow { addr });
             }
