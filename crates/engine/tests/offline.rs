@@ -2124,7 +2124,7 @@ mod inputs {
     use free_loop_core::TrackInput;
 
     fn set(harness: &mut Harness, track: usize, input: TrackInput) {
-        let mut inputs = [TrackInput::Stereo; free_loop_core::TRACK_COUNT];
+        let mut inputs = [TrackInput::default(); free_loop_core::TRACK_COUNT];
         inputs[track] = input;
         harness.setting(|s| s.inputs = inputs);
     }
@@ -2132,6 +2132,64 @@ mod inputs {
     /// Every frame of `out`, as (channel 0, channel 1) pairs.
     fn pairs(out: &[f32]) -> Vec<(f32, f32)> {
         out.chunks_exact(CHANNELS).map(|f| (f[0], f[1])).collect()
+    }
+
+    /// Renders `frames` with capture `width` wide, where channel `mark` alone carries 0.5.
+    fn feed(
+        engine: &mut Engine,
+        events: &mut Vec<Event>,
+        frames: usize,
+        width: usize,
+        mark: usize,
+    ) {
+        let input: Vec<f32> = (0..frames * width)
+            .map(|i| if i % width == mark { 0.5 } else { 0.0 })
+            .collect();
+        let mut out = vec![0.0; frames * CHANNELS];
+        engine.process(&input, &mut out, events);
+    }
+
+    #[test]
+    fn a_track_can_record_a_channel_past_the_output_width() {
+        let mut config = EngineConfig::stereo_48k().unwrap();
+        config.segment_pool = 12;
+        config.capture_channels = 4;
+        config.declick = Frames::ZERO;
+        config.click = ClickConfig {
+            enabled: false,
+            level: 0.0,
+        };
+        let (mut engine, _housekeeping) = Engine::new(config).unwrap();
+        let mut events = Vec::new();
+
+        // The fourth input.
+        engine.apply_settings(Settings {
+            inputs: [TrackInput::Mono(3); free_loop_core::TRACK_COUNT],
+            ..Settings::new()
+        });
+
+        let pad = addr(0, 0);
+        engine.handle(Command::Press(pad), &mut events);
+        for _ in 0..BAR / 128 {
+            feed(&mut engine, &mut events, 128, 4, 3);
+        }
+        engine.handle(Command::Press(pad), &mut events);
+        feed(&mut engine, &mut events, 128, 4, 3);
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::ClipRecorded { .. })),
+            "the take sealed"
+        );
+
+        // Played back with nothing coming in, so anything heard is the clip.
+        let mut out = vec![0.0; 64 * CHANNELS];
+        engine.process(&[], &mut out, &mut events);
+        assert!(
+            out.chunks_exact(CHANNELS).all(|f| f == [0.5, 0.5]),
+            "channel three reached both sides of the clip"
+        );
     }
 
     #[test]

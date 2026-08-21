@@ -9,7 +9,7 @@ use cpal::{
     Device, FromSample, Host, InputCallbackInfo, OutputCallbackInfo, SampleFormat, SizedSample,
     Stream, StreamConfig,
 };
-use free_loop_core::{Command, Event, EventKind, Frames, Settings};
+use free_loop_core::{Command, Event, EventKind, Frames, INPUT_CHANNELS, Settings};
 use free_loop_engine::{Engine, EventSink};
 use rtrb::{Consumer, Producer, RingBuffer};
 
@@ -168,8 +168,8 @@ pub fn open(config: &AudioConfig) -> Result<Opened, AudioError> {
         input_channels: usize::from(input_supported.channels()),
         input_format: input_supported.sample_format(),
         output_format: output_supported.sample_format(),
-        input_source: config.input_source,
         buffer_frames: config.buffer_frames,
+        capture_channels: usize::from(input_supported.channels()).min(INPUT_CHANNELS),
         cushion_frames: cushion_frames(config.buffer_frames, config.cushion_blocks),
         capture_offset: config.capture_offset,
     };
@@ -234,9 +234,10 @@ impl Opened {
             events: event_tx,
             settings: Arc::clone(&settings),
             reader: None,
-            captured: vec![0.0; MAX_BLOCK_FRAMES * negotiated.channels],
+            captured: vec![0.0; MAX_BLOCK_FRAMES * negotiated.capture_channels],
             rendered: vec![0.0; MAX_BLOCK_FRAMES * negotiated.channels],
             channels: negotiated.channels,
+            capture_channels: negotiated.capture_channels,
             dropped_events: Arc::clone(&health.dropped_events),
         }));
 
@@ -439,11 +440,7 @@ impl AudioIo {
     /// Builds a capture ring and a pair of streams, and starts them.
     fn spawn(&mut self, opened: &Opened) -> Result<(), AudioError> {
         let negotiated = opened.negotiated;
-        let map = ChannelMap::new(
-            negotiated.input_channels,
-            negotiated.channels,
-            negotiated.input_source,
-        );
+        let map = ChannelMap::new(negotiated.input_channels, negotiated.capture_channels);
         let block = usize::try_from(negotiated.buffer_frames.unwrap_or(ASSUMED_BLOCK_FRAMES))
             .unwrap_or(usize::from(u16::MAX));
         let (writer, reader) = capture_ring(
@@ -633,6 +630,8 @@ struct Shared {
     captured: Vec<f32>,
     rendered: Vec<f32>,
     channels: usize,
+    /// Width the capture ring delivers, which the engine picks channels from.
+    capture_channels: usize,
     /// Shared with [`AudioIo`], so a reader can tell it has missed reports.
     dropped_events: DropCounts,
 }
@@ -735,6 +734,7 @@ impl Shared {
             captured,
             rendered,
             channels,
+            capture_channels,
             dropped_events,
             ..
         } = self;
@@ -752,10 +752,11 @@ impl Shared {
             let run = (frames - done).min(MAX_BLOCK_FRAMES);
             let samples = run * *channels;
 
+            let wanted = run * *capture_channels;
             let filled = reader
                 .as_mut()
-                .map_or(0, |reader| reader.read(&mut captured[..samples]));
-            captured_frames += filled / *channels;
+                .map_or(0, |reader| reader.read(&mut captured[..wanted]));
+            captured_frames += filled / *capture_channels;
             engine.process(&captured[..filled], &mut rendered[..samples], &mut sink);
 
             let target = &mut out[done * *channels..][..samples];
@@ -936,7 +937,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ring::InputSource;
 
     fn negotiated(sample_rate: u32, channels: usize) -> Negotiated {
         Negotiated {
@@ -945,7 +945,7 @@ mod tests {
             input_channels: 2,
             input_format: SampleFormat::F32,
             output_format: SampleFormat::F32,
-            input_source: InputSource::Direct,
+            capture_channels: 2,
             buffer_frames: None,
             cushion_frames: 512,
             capture_offset: None,
@@ -1023,6 +1023,7 @@ mod tests {
     fn the_rest_of_the_configuration_may_differ() {
         let mut found = negotiated(48_000, 2);
         found.input_channels = 8;
+        found.capture_channels = 8;
         found.input_format = SampleFormat::I16;
         found.cushion_frames = 1_024;
         assert!(

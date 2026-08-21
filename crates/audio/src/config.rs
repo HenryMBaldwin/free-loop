@@ -7,8 +7,6 @@ use cpal::{
     SupportedStreamConfigRange,
 };
 
-use crate::ring::InputSource;
-
 /// Sample rates preferred when the caller does not ask for one, in order.
 pub const PREFERRED_RATES: [u32; 2] = [48_000, 44_100];
 
@@ -31,8 +29,6 @@ pub struct AudioConfig {
     pub buffer_frames: Option<u32>,
     /// Channel count to request. `None` asks for stereo.
     pub channels: Option<u16>,
-    /// Which device input channels to listen to.
-    pub input_source: InputSource,
     /// Blocks of capture to buffer before the output starts consuming.
     ///
     /// This is the fixed delay between the input and output callbacks, and it is the
@@ -68,8 +64,8 @@ pub struct Negotiated {
     pub input_format: SampleFormat,
     /// Sample format the output device expects.
     pub output_format: SampleFormat,
-    /// Which device input channels the engine listens to.
-    pub input_source: InputSource,
+    /// Channels the engine reads, which is the device's width up to the ceiling.
+    pub capture_channels: usize,
     /// Block size requested, if one was.
     pub buffer_frames: Option<u32>,
     /// Frames of capture buffered before the output starts consuming.

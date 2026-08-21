@@ -5,55 +5,34 @@
 //! cushion is a fixed, known latency rather than drift.
 
 use cpal::FromSample;
+use free_loop_core::INPUT_CHANNELS;
 use rtrb::{Consumer, Producer, RingBuffer};
 
 /// Largest run of frames handled in one pass. Bounds the scratch buffers.
 pub const MAX_BLOCK_FRAMES: usize = 8_192;
 
-/// Which device channels the engine listens to.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum InputSource {
-    /// Device channels in order. Extra device channels are dropped; if the device has
-    /// fewer than the engine wants, channel 0 fills the rest.
-    #[default]
-    Direct,
-    /// One device channel spread across every engine channel.
-    ///
-    /// An interface with several inputs reports them all whether or not anything is
-    /// plugged in, so a single instrument on input 2 arrives as silence-left.
-    Mono(usize),
-}
-
-/// Maps device channels onto engine channels.
+/// Maps device channels onto the capture channels the engine reads.
+///
+/// Capture is the device's own width, bounded by [`INPUT_CHANNELS`]. Every channel a
+/// track might pick has to arrive, so nothing is narrowed here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChannelMap {
     device: usize,
-    engine: usize,
-    source: InputSource,
+    capture: usize,
 }
 
 impl ChannelMap {
-    /// Builds a map between the two layouts.
-    pub fn new(device: usize, engine: usize, source: InputSource) -> Self {
+    /// Takes the first `capture` of the device's channels, bounded by what it has.
+    pub fn new(device: usize, capture: usize) -> Self {
         Self {
             device,
-            engine,
-            source,
+            capture: capture.min(device),
         }
     }
 
-    /// A map that takes device channels in order.
-    pub fn direct(device: usize, engine: usize) -> Self {
-        Self::new(device, engine, InputSource::Direct)
-    }
-
-    /// The device channel feeding an engine channel, clamped to what the device has.
-    fn source_channel(self, engine_channel: usize) -> usize {
-        let last = self.device.saturating_sub(1);
-        match self.source {
-            InputSource::Direct => engine_channel.min(last),
-            InputSource::Mono(channel) => channel.min(last),
-        }
+    /// A map carrying every channel the device offers, up to the ceiling.
+    pub fn whole(device: usize) -> Self {
+        Self::new(device, INPUT_CHANNELS)
     }
 
     /// Device channel count.
@@ -61,12 +40,12 @@ impl ChannelMap {
         self.device
     }
 
-    /// Engine channel count.
-    pub fn engine(self) -> usize {
-        self.engine
+    /// Channel count the engine reads.
+    pub fn capture(self) -> usize {
+        self.capture
     }
 
-    /// Converts `src` from device layout into `dst` in engine layout.
+    /// Converts `src` from device layout into `dst` in capture layout.
     ///
     /// Returns the frames written, which is limited by the shorter of the two slices.
     pub fn map<T>(self, src: &[T], dst: &mut [f32]) -> usize
@@ -74,16 +53,16 @@ impl ChannelMap {
         T: Copy,
         f32: FromSample<T>,
     {
-        if self.device == 0 || self.engine == 0 {
+        if self.device == 0 || self.capture == 0 {
             return 0;
         }
-        let frames = (src.len() / self.device).min(dst.len() / self.engine);
+        let frames = (src.len() / self.device).min(dst.len() / self.capture);
 
         for frame in 0..frames {
             let input = &src[frame * self.device..][..self.device];
-            let output = &mut dst[frame * self.engine..][..self.engine];
+            let output = &mut dst[frame * self.capture..][..self.capture];
             for (channel, sample) in output.iter_mut().enumerate() {
-                *sample = f32::from_sample_(input[self.source_channel(channel)]);
+                *sample = f32::from_sample_(input[channel]);
             }
         }
         frames
@@ -120,11 +99,11 @@ impl CaptureWriter {
         while done < frames {
             let run = (frames - done).min(MAX_BLOCK_FRAMES);
             let src = &device_samples[done * self.map.device..][..run * self.map.device];
-            let dst = &mut self.scratch[..run * self.map.engine];
+            let dst = &mut self.scratch[..run * self.map.capture];
             self.map.map(src, dst);
 
             let (_, rejected) = self.producer.push_partial_slice(dst);
-            dropped += rejected.len() / self.map.engine;
+            dropped += rejected.len() / self.map.capture;
             done += run;
         }
 
@@ -191,7 +170,7 @@ pub fn capture_ring(
     cushion_frames: usize,
     map: ChannelMap,
 ) -> (CaptureWriter, CaptureReader) {
-    let channels = map.engine();
+    let channels = map.capture();
     let frames = capacity_frames.max(cushion_frames + MAX_BLOCK_FRAMES.min(4_096));
     let (producer, consumer) = RingBuffer::new(frames * channels.max(1));
 
@@ -223,23 +202,32 @@ mod tests {
 
     #[test]
     fn stereo_passes_straight_through() {
-        let map = ChannelMap::direct(2, 2);
+        let map = ChannelMap::whole(2);
         let mut dst = [0.0; 4];
         assert_eq!(map.map(&[1.0_f32, 2.0, 3.0, 4.0], &mut dst), 2);
         assert_eq!(dst, [1.0, 2.0, 3.0, 4.0]);
     }
 
     #[test]
-    fn a_mono_input_fills_both_sides() {
-        let map = ChannelMap::direct(1, 2);
-        let mut dst = [0.0; 4];
+    fn a_one_channel_device_delivers_one_channel() {
+        let map = ChannelMap::whole(1);
+        let mut dst = [0.0; 2];
         assert_eq!(map.map(&[1.0_f32, 2.0], &mut dst), 2);
-        assert_eq!(dst, [1.0, 1.0, 2.0, 2.0]);
+        assert_eq!(dst, [1.0, 2.0]);
+    }
+
+    #[test]
+    fn every_channel_a_track_could_pick_arrives() {
+        let map = ChannelMap::whole(4);
+        let mut dst = [0.0; 8];
+        let frames = map.map(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &mut dst);
+        assert_eq!(frames, 2);
+        assert_eq!(dst, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
     }
 
     #[test]
     fn extra_device_channels_are_dropped() {
-        let map = ChannelMap::direct(4, 2);
+        let map = ChannelMap::new(4, 2);
         let mut dst = [0.0; 4];
         assert_eq!(
             map.map(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &mut dst),
@@ -249,34 +237,21 @@ mod tests {
     }
 
     #[test]
-    fn a_named_mono_channel_reaches_both_sides() {
-        // A bass on the Scarlett Solo's instrument jack arrives on device channel 1.
-        let map = ChannelMap::new(2, 2, InputSource::Mono(1));
-        let mut dst = [0.0; 4];
-        assert_eq!(map.map(&[0.0_f32, 1.0, 0.0, 2.0], &mut dst), 2);
-        assert_eq!(dst, [1.0, 1.0, 2.0, 2.0]);
+    fn capture_is_bounded_by_what_a_track_can_choose() {
+        let map = ChannelMap::whole(32);
+        assert_eq!(map.capture(), INPUT_CHANNELS);
+        assert_eq!(map.device(), 32);
     }
 
     #[test]
-    fn direct_leaves_a_mono_source_on_one_side() {
-        // The behaviour `InputSource::Mono` exists to correct.
-        let map = ChannelMap::direct(2, 2);
-        let mut dst = [0.0; 2];
-        map.map(&[0.0_f32, 1.0], &mut dst);
-        assert_eq!(dst, [0.0, 1.0]);
-    }
-
-    #[test]
-    fn a_mono_channel_past_the_device_clamps() {
-        let map = ChannelMap::new(2, 2, InputSource::Mono(7));
-        let mut dst = [0.0; 2];
-        map.map(&[3.0_f32, 4.0], &mut dst);
-        assert_eq!(dst, [4.0, 4.0]);
+    fn capture_never_claims_channels_the_device_lacks() {
+        let map = ChannelMap::whole(1);
+        assert_eq!(map.capture(), 1);
     }
 
     #[test]
     fn integer_samples_are_converted() {
-        let map = ChannelMap::direct(2, 2);
+        let map = ChannelMap::whole(2);
         let mut dst = [0.0; 2];
         map.map(&[i16::MAX, 0_i16], &mut dst);
         assert!((dst[0] - 1.0).abs() < 1e-4, "got {}", dst[0]);
@@ -285,14 +260,14 @@ mod tests {
 
     #[test]
     fn mapping_stops_at_the_shorter_slice() {
-        let map = ChannelMap::direct(2, 2);
+        let map = ChannelMap::whole(2);
         let mut dst = [0.0; 2];
         assert_eq!(map.map(&[1.0_f32, 2.0, 3.0, 4.0], &mut dst), 1);
     }
 
     #[test]
     fn reads_return_nothing_until_the_cushion_is_built() {
-        let map = ChannelMap::direct(2, 2);
+        let map = ChannelMap::whole(2);
         let (mut writer, mut reader) = capture_ring(8_192, 128, map);
 
         writer.write(&vec![0.5_f32; 64 * 2]);
@@ -307,7 +282,7 @@ mod tests {
 
     #[test]
     fn once_primed_a_short_ring_gives_a_short_read() {
-        let map = ChannelMap::direct(2, 2);
+        let map = ChannelMap::whole(2);
         let (mut writer, mut reader) = capture_ring(8_192, 32, map);
 
         writer.write(&vec![1.0_f32; 40 * 2]);
@@ -319,7 +294,7 @@ mod tests {
 
     #[test]
     fn reads_are_whole_frames() {
-        let map = ChannelMap::direct(2, 2);
+        let map = ChannelMap::whole(2);
         let (mut writer, mut reader) = capture_ring(8_192, 0, map);
 
         writer.write(&vec![1.0_f32; 3 * 2]);
@@ -329,7 +304,7 @@ mod tests {
 
     #[test]
     fn a_stalled_reader_makes_the_writer_drop() {
-        let map = ChannelMap::direct(2, 2);
+        let map = ChannelMap::whole(2);
         let (mut writer, reader) = capture_ring(256, 0, map);
         drop(reader);
 
@@ -341,7 +316,7 @@ mod tests {
 
     #[test]
     fn a_block_larger_than_the_scratch_is_written_in_runs() {
-        let map = ChannelMap::direct(2, 2);
+        let map = ChannelMap::whole(2);
         let frames = MAX_BLOCK_FRAMES + 500;
         let (mut writer, reader) = capture_ring(frames * 2, 0, map);
 

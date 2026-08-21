@@ -95,7 +95,7 @@ impl Default for Chrome {
             muted: 0,
             soloed: 0,
             gains: [UNITY_STEP; TRACK_COUNT],
-            inputs: [TrackInput::Stereo; TRACK_COUNT],
+            inputs: [TrackInput::default(); TRACK_COUNT],
             launch_modes: [LaunchMode::Follow; TRACK_COUNT],
             input_count: 2,
         }
@@ -290,11 +290,11 @@ pub fn inputs(chrome: Chrome) -> LedFrame {
     let mut frame = LedFrame::new();
 
     for addr in SlotAddr::all() {
-        let chosen = chrome.inputs[addr.track.index()].column();
-        let column = addr.slot.index();
-        let led = if column > chrome.input_count {
+        let input = chrome.inputs[addr.track.index()];
+        let channel = u8::try_from(addr.slot.index()).unwrap_or(u8::MAX);
+        let led = if addr.slot.index() >= chrome.input_count {
             Led::OFF
-        } else if column == chosen {
+        } else if input.takes(channel) {
             Led::solid(INPUT)
         } else {
             Led::dim(INPUT)
@@ -403,7 +403,7 @@ fn side_buttons(frame: &mut LedFrame, chrome: Chrome) {
     let picked = chrome
         .inputs
         .iter()
-        .any(|input| *input != TrackInput::Stereo);
+        .any(|input| *input != TrackInput::default());
     frame.set_side(
         INPUT_SIDE,
         if picked {
@@ -942,20 +942,31 @@ mod tests {
     }
 
     #[test]
-    fn an_input_row_lights_the_column_its_track_records() {
+    fn an_input_row_lights_every_channel_its_track_records() {
         let mut chrome = Chrome::default();
         chrome.inputs[2] = TrackInput::Mono(1);
         let painted = inputs(chrome);
 
         let row = TrackId::new(2).unwrap();
-        let chosen = SlotAddr::new(row, SlotId::new(2).unwrap());
-        let other = SlotAddr::new(row, SlotId::new(0).unwrap());
-        assert_eq!(
-            painted.pad(chosen),
-            Led::solid(INPUT),
-            "input 1 is column 2"
-        );
-        assert_eq!(painted.pad(other), Led::dim(INPUT), "stereo is offered");
+        let lit = |column| painted.pad(SlotAddr::new(row, SlotId::new(column).unwrap()));
+        assert_eq!(lit(1), Led::solid(INPUT), "channel one is column one");
+        assert_eq!(lit(0), Led::dim(INPUT), "and the rest are on offer");
+    }
+
+    #[test]
+    fn an_input_row_lights_both_halves_of_a_pair() {
+        let mut chrome = Chrome {
+            input_count: 8,
+            ..Chrome::default()
+        };
+        chrome.inputs[0] = TrackInput::pair(3, 1);
+        let painted = inputs(chrome);
+
+        let row = TrackId::new(0).unwrap();
+        let lit = |column| painted.pad(SlotAddr::new(row, SlotId::new(column).unwrap()));
+        assert_eq!(lit(1), Led::solid(INPUT), "the lower channel");
+        assert_eq!(lit(3), Led::solid(INPUT), "and the upper one");
+        assert_eq!(lit(2), Led::dim(INPUT), "not the gap between them");
     }
 
     #[test]
@@ -967,11 +978,12 @@ mod tests {
         let painted = inputs(chrome);
         let row = TrackId::new(0).unwrap();
 
-        for column in 0..=2 {
+        // One column per channel the device has, so two columns for two channels.
+        for column in 0..2 {
             let addr = SlotAddr::new(row, SlotId::new(column).unwrap());
-            assert!(painted.pad(addr).is_lit(), "column {column} is offered");
+            assert!(painted.pad(addr).is_lit(), "channel {column} is offered");
         }
-        let past = SlotAddr::new(row, SlotId::new(3).unwrap());
+        let past = SlotAddr::new(row, SlotId::new(2).unwrap());
         assert!(!painted.pad(past).is_lit(), "the device has no third input");
     }
 
