@@ -186,6 +186,8 @@ struct Recording {
     input: TrackInput,
     /// Whether the segment pool ran dry part way through.
     starved: bool,
+    /// Frames of tail actually backed by storage, which is what the clip ends up with.
+    tail_written: u64,
     /// Frames to keep capturing to once the loop itself is sealed.
     ///
     /// The take carries on into the bar after it, so a pickup has somewhere to come
@@ -365,6 +367,7 @@ impl Audio {
                     frames: 0,
                     starved: false,
                     input: self.inputs[addr.track.index()],
+                    tail_written: 0,
                     tail_until: None,
                 });
             }
@@ -1258,7 +1261,11 @@ impl Engine {
                     written + clip.silence(from, run - written, segments)
                 });
 
-            if backed < run && !recording.starved {
+            // Once sealed the loop is safe, so a short tail costs the pickup rather than
+            // the take, and says nothing.
+            if recording.tail_until.is_some() {
+                recording.tail_written += as_u64(backed);
+            } else if backed < run && !recording.starved {
                 recording.starved = true;
                 sink.event(Event::RecordBufferLow { addr });
             }
@@ -1293,7 +1300,7 @@ impl Engine {
             else {
                 continue;
             };
-            inner.set_tail(Frames(recording.frames.saturating_sub(inner.len().0)));
+            inner.set_tail(Frames(recording.tail_written));
         }
     }
 

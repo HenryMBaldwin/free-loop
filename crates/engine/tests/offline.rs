@@ -2442,6 +2442,26 @@ mod tail {
     }
 
     #[test]
+    fn a_clip_only_claims_the_tail_the_pool_gave_it() {
+        let mut harness = Harness::new(128);
+        let pad = addr(0, 0);
+
+        // A take long enough to leave the pool with nothing for its tail.
+        harness.command(Command::Press(pad));
+        harness.run_to(8 * BAR);
+        harness.command(Command::Press(pad));
+        harness.run_to(8 * BAR + 1);
+        assert_eq!(harness.engine.segments_available(), 0, "the pool is spent");
+
+        harness.run_to(8 * BAR + TAIL + 1);
+        let tail = harness.engine.clip_tail(pad);
+        assert!(
+            tail < Frames(TAIL),
+            "{tail:?} claimed against a pool that had nothing to give"
+        );
+    }
+
+    #[test]
     fn the_tail_is_charged_to_the_pool_like_the_loop() {
         let mut harness = Harness::new(128);
         let available = harness.engine.segments_available();
