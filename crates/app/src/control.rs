@@ -12,9 +12,9 @@ use free_loop_core::{
     TRACK_COUNT, Tempo, TrackInput, UNITY_STEP, column_mask, pad_bit, row_mask,
 };
 use free_loop_surface::{
-    Axis, Chrome, Control, INPUT_SIDE, Led, LedColor, LedFrame, MUTE_SIDE, NEW_SIDE, PAUSE_SIDE,
-    PICKUP_COLUMN, RESTART_COLUMN, SELECTED, SETTINGS_SIDE, SHADES, SOLO_SIDE, SurfaceEvent,
-    VOLUME_SIDE, paint,
+    Axis, Chrome, Control, INPUT_SIDE, Led, LedColor, LedFrame, MUTE_SIDE, NEW_SIDE, NO_PAD,
+    PAUSE_SIDE, PICKUP_COLUMN, RESTART_COLUMN, SELECTED, SETTINGS_SIDE, SHADES, SOLO_SIDE,
+    SurfaceEvent, VOLUME_SIDE, YES_PAD, paint,
 };
 
 /// Beats per minute one press of the tempo buttons moves.
@@ -67,14 +67,18 @@ pub enum Mode {
     Input,
     /// One row of settings per track.
     Settings,
+    /// Waiting for yes or no before saving over the pad it holds.
+    ConfirmSave(SlotAddr),
+    /// Waiting for yes or no before loading over what is on the grid.
+    ConfirmLoad(SlotAddr),
 }
 
 impl Mode {
     /// The button that opens a picker, if this mode is one.
     fn button(self) -> Option<Control> {
         match self {
-            Self::SavePicker => Some(Control::SaveSession),
-            Self::LoadPicker => Some(Control::LoadSession),
+            Self::SavePicker | Self::ConfirmSave(_) => Some(Control::SaveSession),
+            Self::LoadPicker | Self::ConfirmLoad(_) => Some(Control::LoadSession),
             // Mute and solo open from the side column, not the top row.
             Self::Perform
             | Self::Mute
@@ -438,6 +442,51 @@ impl Controller {
         self.dirty = true;
     }
 
+    /// Saves over the pad, asking first if it holds anything.
+    fn press_save(&mut self, addr: SlotAddr) {
+        // A pad with nothing on it has nothing to lose, so it goes straight in.
+        if self.sessions & bit(addr) == 0 {
+            self.requests.push(Request::SaveSession(addr));
+            return;
+        }
+        self.mode = Mode::ConfirmSave(addr);
+        self.dirty = true;
+    }
+
+    /// Loads the pad, asking first if the grid holds anything.
+    fn press_load(&mut self, addr: SlotAddr) {
+        // Nothing to load from a pad that holds nothing.
+        if self.sessions & bit(addr) == 0 {
+            return;
+        }
+        // A load replaces the grid, so it only asks when there is something on it.
+        if !self.session.has_any_clip() {
+            self.requests.push(Request::LoadSession(addr));
+            return;
+        }
+        self.mode = Mode::ConfirmLoad(addr);
+        self.dirty = true;
+    }
+
+    /// Takes yes or no to the question the grid is asking. Any other pad is ignored.
+    fn answer(&mut self, addr: SlotAddr) {
+        let pressed = (addr.track.index(), addr.slot.index());
+        if pressed == NO_PAD {
+            self.cancel_picker();
+            return;
+        }
+        if pressed != YES_PAD {
+            return;
+        }
+        match self.mode {
+            Mode::ConfirmSave(pad) => self.requests.push(Request::SaveSession(pad)),
+            Mode::ConfirmLoad(pad) => self.requests.push(Request::LoadSession(pad)),
+            _ => return,
+        }
+        self.mode = Mode::Perform;
+        self.dirty = true;
+    }
+
     /// Opens a picker, or closes it if it was already open.
     fn set_mode(&mut self, wanted: Mode) {
         self.mode = if self.mode == wanted {
@@ -533,7 +582,12 @@ impl Controller {
     pub fn on_surface(&mut self, event: SurfaceEvent, now: Duration) {
         match event {
             SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::SavePicker => {
-                self.requests.push(Request::SaveSession(addr));
+                self.press_save(addr);
+            }
+            SurfaceEvent::PadPressed { addr, .. }
+                if matches!(self.mode, Mode::ConfirmSave(_) | Mode::ConfirmLoad(_)) =>
+            {
+                self.answer(addr);
             }
             SurfaceEvent::PadPressed { addr, .. }
                 if matches!(self.mode, Mode::Mute | Mode::Solo) =>
@@ -550,10 +604,7 @@ impl Controller {
                 self.toggle_setting(addr);
             }
             SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::LoadPicker => {
-                // Nothing to load from a pad that holds nothing.
-                if self.sessions & bit(addr) != 0 {
-                    self.requests.push(Request::LoadSession(addr));
-                }
+                self.press_load(addr);
             }
             SurfaceEvent::PadPressed { addr, .. } => {
                 // Nothing yet: which gesture this is depends on how long it lasts.
@@ -881,6 +932,8 @@ impl Controller {
             // A number cannot track a tempo that is still moving, so the grid shows it
             // instead until the button is let go.
             paint::tempo_gauge(self.tempo, self.chrome)
+        } else if matches!(self.mode, Mode::ConfirmSave(_) | Mode::ConfirmLoad(_)) {
+            paint::confirm(self.chrome)
         } else if let Some(button) = self.mode.button() {
             paint::picker(self.sessions, self.current, self.chrome, button)
         } else {
@@ -1471,6 +1524,106 @@ mod tests {
         controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
         controller.cancel_picker();
         assert_eq!(controller.mode(), Mode::Perform);
+    }
+
+    /// The pad that answers yes, and the one that answers no.
+    fn yes() -> SlotAddr {
+        addr(0, 0)
+    }
+    fn no() -> SlotAddr {
+        addr(0, u8::try_from(SLOT_COUNT - 1).unwrap())
+    }
+
+    #[test]
+    fn saving_over_a_session_asks_first() {
+        let mut controller = controller();
+        controller.set_sessions([addr(1, 1)]);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        press(&mut controller, addr(1, 1), T0);
+
+        assert!(
+            controller.drain_requests().next().is_none(),
+            "nothing is written until it is answered"
+        );
+        let frame = controller.take_frame().unwrap();
+        assert!(frame.pad(yes()).is_lit() && frame.pad(no()).is_lit());
+        assert!(
+            SlotAddr::all()
+                .filter(|a| *a != yes() && *a != no())
+                .all(|a| !frame.pad(a).is_lit()),
+            "and nothing else can be pressed by mistake"
+        );
+    }
+
+    #[test]
+    fn yes_writes_over_it_and_no_does_not() {
+        let mut controller = controller();
+        controller.set_sessions([addr(1, 1)]);
+
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        press(&mut controller, addr(1, 1), T0);
+        press(&mut controller, no(), T0);
+        assert!(controller.drain_requests().next().is_none(), "no means no");
+        assert_eq!(controller.mode(), Mode::Perform);
+
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        press(&mut controller, addr(1, 1), T0);
+        press(&mut controller, yes(), T0);
+        assert_eq!(
+            controller.drain_requests().next(),
+            Some(Request::SaveSession(addr(1, 1))),
+            "and the pad asked about is the pad written"
+        );
+    }
+
+    #[test]
+    fn saving_onto_an_empty_pad_asks_nothing() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        press(&mut controller, addr(3, 3), T0);
+
+        assert_eq!(
+            controller.drain_requests().next(),
+            Some(Request::SaveSession(addr(3, 3))),
+            "there is nothing to lose"
+        );
+    }
+
+    #[test]
+    fn loading_over_a_grid_that_holds_something_asks_first() {
+        let mut controller = controller();
+        controller.set_sessions([addr(1, 1)]);
+        controller.on_engine(
+            Event::SlotChanged {
+                addr: addr(0, 0),
+                state: SlotState::Playing { clip: ClipId(0) },
+            },
+            T0,
+        );
+
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        press(&mut controller, addr(1, 1), T0);
+        assert!(controller.drain_requests().next().is_none());
+
+        press(&mut controller, yes(), T0);
+        assert_eq!(
+            controller.drain_requests().next(),
+            Some(Request::LoadSession(addr(1, 1)))
+        );
+    }
+
+    #[test]
+    fn loading_onto_an_empty_grid_asks_nothing() {
+        let mut controller = controller();
+        controller.set_sessions([addr(1, 1)]);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        press(&mut controller, addr(1, 1), T0);
+
+        assert_eq!(
+            controller.drain_requests().next(),
+            Some(Request::LoadSession(addr(1, 1))),
+            "nothing on the grid to lose"
+        );
     }
 
     #[test]
