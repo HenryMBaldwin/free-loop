@@ -560,6 +560,10 @@ impl SessionStore {
     ///
     /// [`SessionError`] if the directory exists but cannot be removed.
     pub fn remove(&self, addr: SlotAddr) -> Result<(), SessionError> {
+        // The copy an earlier save set aside goes too. Recovery reads a pad that has only
+        // that copy as an interrupted swap, and would put the session back.
+        remove_dir(&self.previous(addr))?;
+
         let dir = self.dir(addr);
         if !dir.exists() {
             return Ok(());
@@ -721,7 +725,6 @@ fn check_wav(
     Ok(())
 }
 
-/// Reads one clip back into storage the caller owns.
 /// Reads a clip's audio into storage `channels` wide.
 ///
 /// The file's own width is whatever it was recorded at. Clip channel `c` takes file
@@ -1926,6 +1929,34 @@ mod tests {
         let mut wanted = vec![0.0; 96 * usize::from(CH)];
         audio.copy_into(Frames(400), &mut wanted);
         assert_eq!(out, wanted);
+    }
+
+    #[test]
+    fn removing_a_pad_that_was_saved_over_leaves_nothing_to_come_back() {
+        let dir = TempDir::new("remove-previous");
+        let store = SessionStore::new(&dir.0);
+        let audio = clip(64, 0);
+        let saved = |pad| {
+            vec![SavedClip {
+                addr: pad,
+                playing: false,
+                gain_step: UNITY_STEP,
+                launch_anchor: None,
+                clip: &audio,
+            }]
+        };
+
+        store
+            .save(addr(0, 0), &data(saved(addr(1, 1))), BUDGET)
+            .unwrap();
+        store
+            .save(addr(0, 0), &data(saved(addr(2, 2))), BUDGET)
+            .unwrap();
+        assert!(dir.0.join(".00.previous").is_dir(), "there is one to lose");
+
+        store.remove(addr(0, 0)).unwrap();
+        store.recover();
+        assert!(!store.exists(addr(0, 0)), "the pad stays empty");
     }
 
     #[test]

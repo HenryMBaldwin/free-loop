@@ -98,10 +98,6 @@ impl SessionModel {
         }
     }
 
-    /// Moves every transition still waiting on a bar line to fire at `at` instead.
-    ///
-    /// A queued transition holds the frame it is due at, so moving the transport leaves
-    /// it scheduled against a position that may now be far ahead.
     /// Ends a recording no later than `at`, for a caller that has run out of room.
     ///
     /// A take already stopping keeps the earlier of the two ends. Does nothing to a slot
@@ -120,6 +116,10 @@ impl SessionModel {
         }
     }
 
+    /// Moves every transition still waiting on a bar line to fire at `at` instead.
+    ///
+    /// A queued transition holds the frame it is due at, so moving the transport leaves
+    /// it scheduled against a position that may now be far ahead.
     pub fn retarget_pending(&mut self, at: Frames) {
         for addr in SlotAddr::all() {
             let state = match self.state(addr) {

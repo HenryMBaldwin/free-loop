@@ -428,6 +428,7 @@ impl Controller {
         self.chrome.gains = [UNITY_STEP; TRACK_COUNT];
         self.chrome.inputs = [self.default_input; TRACK_COUNT];
         self.chrome.launch_modes = [self.default_launch_mode; TRACK_COUNT];
+        self.chrome.pickups = [0; TRACK_COUNT];
         self.settings_changed = true;
         self.commands.push(Command::ClearAll);
         self.commands.push(Command::SetPaused(false));
@@ -487,6 +488,7 @@ impl Controller {
 
     /// Opens a picker, or closes it if it was already open.
     fn set_mode(&mut self, wanted: Mode) {
+        self.input_held = None;
         self.mode = if self.mode == wanted {
             Mode::Perform
         } else {
@@ -495,7 +497,6 @@ impl Controller {
         self.dirty = true;
     }
 
-    /// Records that a session was loaded, and leaves the picker.
     /// Takes the tempo a loaded session came with.
     ///
     /// The engine took it from the load itself, so this only brings the display in step.
@@ -505,6 +506,7 @@ impl Controller {
         self.dirty = true;
     }
 
+    /// Records that a session was loaded, and leaves the picker.
     pub fn session_loaded(&mut self, addr: SlotAddr, paused: bool) {
         self.current = Some(addr);
         self.chrome.paused = paused;
@@ -608,10 +610,8 @@ impl Controller {
                 // Nothing yet: which gesture this is depends on how long it lasts.
                 self.held[addr.track.index()][addr.slot.index()] = Some(now);
             }
-            SurfaceEvent::PadReleased { addr } if self.mode == Mode::Input => {
-                if self.input_held == Some(addr) {
-                    self.input_held = None;
-                }
+            SurfaceEvent::PadReleased { addr } if self.input_held == Some(addr) => {
+                self.input_held = None;
             }
             SurfaceEvent::PadReleased { addr } => {
                 // A hold that completed already emptied the pad and took its entry, so
@@ -2023,6 +2023,26 @@ mod tests {
     }
 
     #[test]
+    fn a_hold_does_not_survive_leaving_the_input_page() {
+        let mut controller = controller();
+        controller.set_input_count(4);
+        controller.on_surface(SurfaceEvent::SidePressed { index: 2 }, T0);
+
+        let first = hold_input(&mut controller, 0, 0);
+        // Away and back, letting go while the page is not looking.
+        controller.on_surface(SurfaceEvent::SidePressed { index: 2 }, T0);
+        controller.on_surface(SurfaceEvent::PadReleased { addr: first }, T0);
+        controller.on_surface(SurfaceEvent::SidePressed { index: 2 }, T0);
+
+        hold_input(&mut controller, 0, 2);
+        assert_eq!(
+            controller.inputs()[0],
+            TrackInput::Mono(2),
+            "a pad nobody is holding cannot be paired with"
+        );
+    }
+
+    #[test]
     fn a_fresh_session_puts_every_track_back_to_its_defaults() {
         let mut controller = controller();
         let mut modes = [LaunchMode::Follow; TRACK_COUNT];
@@ -2031,6 +2051,9 @@ mod tests {
         let mut inputs = [TrackInput::default(); TRACK_COUNT];
         inputs[7] = TrackInput::Mono(1);
         controller.set_inputs(inputs);
+        let mut pickups = [0; TRACK_COUNT];
+        pickups[7] = 2;
+        controller.set_pickups(pickups);
         let _ = commands(&mut controller);
 
         controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
@@ -2038,6 +2061,7 @@ mod tests {
 
         assert_eq!(controller.launch_modes(), [LaunchMode::Follow; TRACK_COUNT]);
         assert_eq!(controller.inputs(), [TrackInput::default(); TRACK_COUNT]);
+        assert_eq!(controller.pickups(), [0; TRACK_COUNT]);
     }
 
     #[test]
