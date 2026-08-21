@@ -359,6 +359,19 @@ impl AudioBuffer {
         done
     }
 
+    /// Copies `run` frames starting at `frame` into `dst`, without wrapping.
+    ///
+    /// Segments that were never written read as silence.
+    fn copy_into(&self, frame: u64, dst: &mut [f32], run: usize) {
+        let (index, offset) = split(frame);
+        let Some(Some(segment)) = self.segments.get(index) else {
+            dst[..run * self.channels].fill(0.0);
+            return;
+        };
+        let src = &segment.data[offset * self.channels..(offset + run) * self.channels];
+        dst[..run * self.channels].copy_from_slice(src);
+    }
+
     /// Adds `run` frames starting at `frame` into `dst`.
     ///
     /// Segments that were never written read as silence.
@@ -532,6 +545,22 @@ impl Clip {
     /// Returns how many frames are now backed.
     pub fn silence(&mut self, frame: u64, run: usize, pool: &mut SegmentPool) -> usize {
         self.buffer.silence(frame, run, pool)
+    }
+
+    /// Copies the clip's stored audio at `from` into `dst`, loop and tail alike.
+    ///
+    /// For writing a clip out as it was captured, tail and all. Reads past what is
+    /// stored give silence.
+    pub fn copy_into(&self, from: Frames, dst: &mut [f32]) {
+        let total = dst.len() / self.channels;
+        let mut done = 0;
+        while done < total {
+            let at = from.0 + done as u64;
+            let run = (total - done).min(SEGMENT_FRAMES - as_usize(at % SEGMENT_FRAMES_U64));
+            let slice = &mut dst[done * self.channels..(done + run) * self.channels];
+            self.buffer.copy_into(at, slice, run);
+            done += run;
+        }
     }
 
     /// Returns the clip's segments to `pool`, leaving it empty and reusable.
