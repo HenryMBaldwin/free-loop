@@ -65,7 +65,8 @@ pub enum Event {
     },
     /// A recording could not be given storage for every frame it has covered.
     ///
-    /// Capture carries on, but the take is discarded when it finishes. Sent once per take.
+    /// The take is cut to the last whole bar it holds, or discarded if it holds none.
+    /// Sent once per take.
     RecordBufferLow {
         /// Which pad is recording.
         addr: SlotAddr,

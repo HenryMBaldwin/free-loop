@@ -380,7 +380,9 @@ impl Audio {
                     return;
                 };
                 // Capture carries on into the bar after the loop, and the recording is
-                // dropped once it has.
+                // dropped once it has. Anything already written past the loop is held
+                // storage and counts as tail.
+                recording.tail_written = recording.written.saturating_sub(tail_from);
                 recording.tail_until = Some(tail_from.saturating_add(self.tail_frames));
                 let Some(held) = self.clips[addr.track.index()][addr.slot.index()].as_mut() else {
                     return;
@@ -1243,10 +1245,12 @@ impl Engine {
                 recording.tail_written += as_u64(backed);
             } else {
                 recording.written += as_u64(backed);
-                if backed < run && !recording.starved {
-                    recording.starved = true;
+                if backed < run {
                     out_of_room |= pad_bit(addr);
-                    sink.event(Event::RecordBufferLow { addr });
+                    if !recording.starved {
+                        recording.starved = true;
+                        sink.event(Event::RecordBufferLow { addr });
+                    }
                 }
             }
             recording.frames += as_u64(run);
