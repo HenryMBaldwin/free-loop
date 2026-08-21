@@ -78,6 +78,9 @@ pub struct TrackEntry {
     /// Whether launching a clip plays it from its start.
     #[serde(default)]
     pub restart: bool,
+    /// Whether the track opens its loops from the tail rather than the head.
+    #[serde(default)]
+    pub pickup: bool,
     /// The step on the gain ladder the track plays at.
     ///
     /// Absent in a session saved before tracks carried their own level, where the levels
@@ -278,6 +281,7 @@ mod tests {
             track: 3,
             input: 1,
             restart: false,
+            pickup: false,
             gain_step: None,
             input_channels: None,
         };
@@ -292,6 +296,7 @@ mod tests {
             track: 3,
             input: 0,
             restart: false,
+            pickup: false,
             gain_step: Some(200),
             input_channels: None,
         }];
@@ -305,6 +310,7 @@ mod tests {
             track: 99,
             input: 0,
             restart: false,
+            pickup: false,
             gain_step: None,
             input_channels: None,
         }];
@@ -326,6 +332,7 @@ mod tests {
             track: 7,
             input: 2,
             restart: true,
+            pickup: false,
             gain_step: Some(3),
             input_channels: None,
         }];
