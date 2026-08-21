@@ -1218,8 +1218,10 @@ impl Engine {
             let Some(recording) = recordings[addr.track.index()][addr.slot.index()].as_mut() else {
                 continue;
             };
+            // A starved take writes nothing more, keeping its backed frames contiguous.
             let backed = clips[addr.track.index()][addr.slot.index()]
                 .as_mut()
+                .filter(|_| !recording.starved)
                 .and_then(Arc::get_mut)
                 .map_or(0, |clip| {
                     let written = if available > 0 {
@@ -1245,12 +1247,13 @@ impl Engine {
                 recording.tail_written += as_u64(backed);
             } else {
                 recording.written += as_u64(backed);
-                if backed < run {
+                if recording.starved {
+                    // A press can clear `ends_at`, so the end is forced again every block.
                     out_of_room |= pad_bit(addr);
-                    if !recording.starved {
-                        recording.starved = true;
-                        sink.event(Event::RecordBufferLow { addr });
-                    }
+                } else if backed < run {
+                    recording.starved = true;
+                    out_of_room |= pad_bit(addr);
+                    sink.event(Event::RecordBufferLow { addr });
                 }
             }
             recording.frames += as_u64(run);
