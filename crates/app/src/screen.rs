@@ -217,7 +217,8 @@ fn top(mode: Mode, control: Control) -> Role {
         (Mode::Perform | Mode::Subdivision, Control::ClickToggle) => Role::Click,
         (Mode::Perform, Control::StopAll) => Role::StopAll,
         (Mode::Perform, Control::Rewind) => Role::Rewind,
-        (Mode::Perform, Control::Axis) => Role::Axis,
+        // Grouping is what mute and solo do, so it is reachable from both of them.
+        (Mode::Perform | Mode::Mute | Mode::Solo, Control::Axis) => Role::Axis,
         (Mode::Perform | Mode::SavePicker | Mode::ConfirmSave(_), Control::SaveSession) => {
             Role::Open(Mode::SavePicker)
         }

@@ -85,13 +85,17 @@ mod tests {
     fn a_screen_names_only_what_it_uses() {
         let labels = for_mode(Mode::Mute);
 
-        // The top row belongs to the loops, not to mute, so it goes unnamed.
-        for control in Control::all() {
+        // The top row belongs to the loops, bar the grouping that mute itself uses.
+        for control in Control::all().filter(|control| *control != Control::Axis) {
             assert!(
                 labels.get(control_pad(control.index())).is_none(),
                 "{control:?} named on the mute screen"
             );
         }
+        assert_eq!(
+            labels.get(control_pad(Control::Axis.index())),
+            Some("group by row or column")
+        );
         // The way out and the transport are the two it does have.
         assert_eq!(labels.get(side_pad(MUTE_SIDE)), Some("leave mute"));
         assert_eq!(labels.get(side_pad(PAUSE_SIDE)), Some("play / pause"));
