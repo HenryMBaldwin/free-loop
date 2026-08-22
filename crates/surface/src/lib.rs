@@ -30,7 +30,7 @@ pub use mock::MockSurface;
 pub use paint::{
     Axis, BEAT_UNITS, BEATS_ROW, Chrome, INPUT_SIDE, MUTE_SIDE, MUTED, NEW_SIDE, NO_PAD,
     PAUSE_SIDE, PICKUP_COLUMN, RESTART_COLUMN, SELECTED, SETTINGS_SIDE, SOLO_SIDE, SOLOED,
-    SignaturePart, UNIT_ROW, VOLUME_SIDE, YES_PAD, signature_part,
+    SUBDIVISION_ROW, SignaturePart, UNIT_ROW, VOLUME_SIDE, YES_PAD, signature_part, subdivision_at,
 };
 pub use reconnect::Reconnecting;
 pub use surface::{ControlSurface, SurfaceError};

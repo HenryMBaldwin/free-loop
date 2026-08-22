@@ -12,8 +12,8 @@
 
 use free_loop_clip::{AudioBuffer, Clip, SegmentPool};
 use free_loop_core::{
-    ClipId, Command, Event, Frames, Settings, SlotAddr, SlotId, SlotState, Tempo, TimeSignature,
-    TrackId,
+    ClipId, Command, Event, Frames, Settings, SlotAddr, SlotId, SlotState, Subdivision, Tempo,
+    TimeSignature, TrackId,
 };
 use free_loop_engine::{ClickConfig, Engine, EngineConfig, Housekeeping, LoadMessage, Snapshot};
 use std::sync::Arc;
@@ -707,6 +707,61 @@ fn a_loaded_session_lands_on_the_grid_frozen() {
     assert!(
         (harness.engine.grid().tempo().bpm() - 90.0).abs() < 1e-9,
         "the session's tempo came with it"
+    );
+}
+
+/// Blips heard in `frames` of rendering, counted by silence between them.
+fn click_starts(harness: &mut Harness, frames: u64) -> usize {
+    let mut starts = 0;
+    let mut sounding = false;
+    let mut done = 0;
+    while done < frames {
+        let out = harness.run_frames(64);
+        let loud = out.iter().any(|s| s.abs() > 1e-6);
+        if loud && !sounding {
+            starts += 1;
+        }
+        sounding = loud;
+        done += 64;
+    }
+    starts
+}
+
+#[test]
+fn the_click_sounds_once_per_subdivision() {
+    // One bar of 4/4 at 120 bpm, so a beat is 24000 frames and a blip is far shorter.
+    for (subdivision, per_bar) in [
+        (Subdivision::Whole, 1),
+        (Subdivision::Half, 2),
+        (Subdivision::Quarter, 4),
+        (Subdivision::Eighth, 8),
+        (Subdivision::Triplet, 12),
+        (Subdivision::Sixteenth, 16),
+    ] {
+        let mut harness = Harness::with_click(64);
+        harness.command(Command::SetClickSubdivision(subdivision));
+
+        // Counted from the bar line it starts on, so one whole bar.
+        let heard = click_starts(&mut harness, BAR);
+        assert_eq!(
+            heard, per_bar,
+            "{subdivision:?} should click {per_bar} a bar"
+        );
+    }
+}
+
+#[test]
+fn a_coarse_click_still_lands_on_the_bar_line_in_an_odd_meter() {
+    let mut harness = Harness::with_click(64);
+    harness.command(Command::SetTimeSignature(TimeSignature::new(3, 4).unwrap()));
+    harness.command(Command::SetClickSubdivision(Subdivision::Whole));
+
+    // Four beats between clicks does not fit a three beat bar, so it counts from the line.
+    let bar = harness.engine.grid().bars(1).0;
+    assert_eq!(
+        click_starts(&mut harness, bar * 2),
+        2,
+        "once a bar, not adrift"
     );
 }
 
