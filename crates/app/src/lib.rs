@@ -8,6 +8,8 @@
 
 pub mod config;
 pub mod control;
+pub mod gui;
+pub mod labels;
 
 pub use config::{Config, ConfigError};
 pub use control::{Controller, Mode, Request, TextUpdate};

@@ -163,24 +163,26 @@ impl core::fmt::Debug for LaunchpadX {
     }
 }
 
-/// Every listed port whose name marks it as a Launchpad X, in the order listed.
-fn matching_outputs(midi: &midir::MidiOutput) -> Vec<midir::MidiOutputPort> {
+/// Every listed port `wanted` accepts, in the order listed.
+fn matching_outputs(
+    midi: &midir::MidiOutput,
+    wanted: &dyn Fn(&str) -> bool,
+) -> Vec<midir::MidiOutputPort> {
     midi.ports()
         .into_iter()
-        .filter(|port| matches_keyword(midi.port_name(port).ok().as_deref()))
+        .filter(|port| midi.port_name(port).ok().is_some_and(|name| wanted(&name)))
         .collect()
 }
 
 /// The input counterpart of [`matching_outputs`].
-fn matching_inputs(midi: &midir::MidiInput) -> Vec<midir::MidiInputPort> {
+fn matching_inputs(
+    midi: &midir::MidiInput,
+    wanted: &dyn Fn(&str) -> bool,
+) -> Vec<midir::MidiInputPort> {
     midi.ports()
         .into_iter()
-        .filter(|port| matches_keyword(midi.port_name(port).ok().as_deref()))
+        .filter(|port| midi.port_name(port).ok().is_some_and(|name| wanted(&name)))
         .collect()
-}
-
-fn matches_keyword(name: Option<&str>) -> bool {
-    name.is_some_and(|name| name.contains(LaunchpadX::PORT_KEYWORD))
 }
 
 /// Every MIDI output port the host can see, for working out why none matched.
@@ -205,10 +207,24 @@ impl LaunchpadX {
     /// [`SurfaceError::NotFound`] if no device is attached, [`SurfaceError::Device`] if
     /// one is but will not talk.
     pub fn connect() -> Result<Self, SurfaceError> {
+        Self::connect_matching(&|name| name.contains(Self::PORT_KEYWORD))
+    }
+
+    /// Finds a Launchpad X on the port named exactly `name`, which an emulator needs:
+    /// it publishes a port a keyword match cannot tell from the hardware's.
+    ///
+    /// # Errors
+    ///
+    /// As [`LaunchpadX::connect`].
+    pub fn connect_to(name: &str) -> Result<Self, SurfaceError> {
+        Self::connect_matching(&|found| found == name)
+    }
+
+    fn connect_matching(wanted: &dyn Fn(&str) -> bool) -> Result<Self, SurfaceError> {
         let midi_out = midir::MidiOutput::new(CLIENT_NAME).map_err(device)?;
         let midi_in = midir::MidiInput::new(CLIENT_NAME).map_err(device)?;
-        let outputs = matching_outputs(&midi_out);
-        let inputs = matching_inputs(&midi_in);
+        let outputs = matching_outputs(&midi_out, wanted);
+        let inputs = matching_inputs(&midi_in, wanted);
 
         if outputs.is_empty() || inputs.is_empty() {
             return Err(SurfaceError::NotFound);

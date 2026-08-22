@@ -128,6 +128,14 @@ impl Default for Engine {
     }
 }
 
+/// On-screen surface settings.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Gui {
+    /// Whether to open a window showing an emulated Launchpad.
+    pub enabled: bool,
+}
+
 /// Click settings.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -160,6 +168,8 @@ pub struct Config {
     pub engine: Engine,
     /// Click settings.
     pub click: Click,
+    /// On-screen surface settings.
+    pub gui: Gui,
 }
 
 impl Config {
@@ -328,6 +338,10 @@ declick_frames = 240
 [click]
 enabled = true
 level = 0.35
+
+[gui]
+# Open a window with an emulated Launchpad X, usable with or without the hardware.
+enabled = false
 "#;
 
 #[cfg(test)]
