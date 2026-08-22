@@ -23,6 +23,7 @@ use free_loop_core::{Command, Event, TimeSignature, TrackInput};
 use free_loop_engine::{Engine, Housekeeping, Loader, Snapshot};
 use free_loop_session::{SavedClip, SessionData, SessionStore, TrackSettings};
 use free_loop_surface::{ControlSurface, LaunchpadX, Reconnecting, SurfaceEvent};
+use tracing_subscriber::EnvFilter;
 
 /// How often the control loop runs.
 const TICK: Duration = Duration::from_millis(2);
@@ -77,25 +78,43 @@ fn describe_input(input: TrackInput) -> String {
     }
 }
 
+/// Sends traces to stderr at `info`, or whatever `RUST_LOG` asks for. `log_surface`
+/// raises this crate to `debug`, where surface gestures report.
+fn init_tracing(log_surface: bool) {
+    let fallback = if log_surface {
+        "info,free_loop=debug"
+    } else {
+        "info"
+    };
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(fallback));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .without_time()
+        .with_target(false)
+        .init();
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let Some(Args { path, log_surface }) = parse_args()? else {
         return Ok(());
     };
+    init_tracing(log_surface);
 
     let config = Config::load(&path)?;
     // A missing config falls back to the default devices, which sounds like broken
     // recording rather than like a missing file unless it says so here.
     if path.exists() {
-        println!("config: {}", path.display());
+        tracing::info!("config: {}", path.display());
     } else {
-        println!("config: {} not found, using defaults", path.display());
+        tracing::info!("config: {} not found, using defaults", path.display());
     }
 
     let opened = open(&config.audio())?;
     let negotiated = opened.negotiated();
-    println!("input:  {}", opened.input_name());
-    println!("output: {}", opened.output_name());
-    println!(
+    tracing::info!("input:  {}", opened.input_name());
+    tracing::info!("output: {}", opened.output_name());
+    tracing::info!(
         "audio: {} Hz, {} channels in / {} out, {} frames of cushion",
         negotiated.sample_rate,
         negotiated.input_channels,
@@ -103,7 +122,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         negotiated.cushion_frames
     );
     let input = config.track_input(negotiated.capture_channels);
-    println!("tracks start on {}", describe_input(input));
+    tracing::info!("tracks start on {}", describe_input(input));
 
     let (engine, mut housekeeping) = Engine::new(config.engine(
         negotiated.sample_rate,
@@ -122,7 +141,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let store = SessionStore::new(path.parent().unwrap_or(Path::new(".")).join("sessions"));
     // A save interrupted between its two renames leaves a session under another name.
     for trouble in store.recover() {
-        eprintln!("sessions: {trouble}");
+        tracing::warn!("sessions: {trouble}");
     }
     controller.set_sessions(store.index());
     controller.set_input_count(negotiated.capture_channels);
@@ -132,13 +151,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     controller.set_inputs([input; free_loop_core::TRACK_COUNT]);
     controller.set_launch_modes([config.launch_mode(); free_loop_core::TRACK_COUNT]);
 
-    println!(
+    tracing::info!(
         "transport: {:.1} bpm, {}/{}",
         controller.tempo(),
         config.transport.beats_per_bar,
         config.transport.beat_unit
     );
-    println!("running. ctrl-c to stop.");
+    tracing::info!("running. ctrl-c to stop.");
 
     let running = Arc::new(AtomicBool::new(true));
     ctrlc::set_handler({
@@ -154,15 +173,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         store: &store,
         config: &config,
         negotiated,
-        log_surface,
         running: &running,
     });
 
     // Leaving the grid lit after the process is gone looks like it is still running.
     if let Err(error) = surface.clear() {
-        eprintln!("surface: {error}");
+        tracing::warn!("surface: {error}");
     }
-    println!("\nstopped. device errors: {}", io.device_errors());
+    tracing::info!("stopped. device errors: {}", io.device_errors());
     Ok(())
 }
 
@@ -175,7 +193,6 @@ struct Session<'a> {
     store: &'a SessionStore,
     config: &'a Config,
     negotiated: Negotiated,
-    log_surface: bool,
     running: &'a AtomicBool,
 }
 
@@ -189,7 +206,6 @@ fn run(s: Session<'_>) {
         store,
         config,
         negotiated,
-        log_surface,
         running,
     } = s;
 
@@ -220,9 +236,7 @@ fn run(s: Session<'_>) {
         events.clear();
         surface.poll(&mut events);
         for event in events.drain(..) {
-            if log_surface {
-                println!("surface: {event:?}");
-            }
+            tracing::debug!("surface: {event:?}");
             controller.on_surface(event, now);
         }
         controller.tick(now);
@@ -330,7 +344,7 @@ impl XrunReport {
             return;
         }
 
-        eprintln!("capture came up short by {} frames", self.frames);
+        tracing::warn!("capture came up short by {} frames", self.frames);
         self.frames = 0;
         self.last = now;
     }
@@ -350,7 +364,7 @@ impl ClipReport {
             return;
         }
 
-        eprintln!(
+        tracing::warn!(
             "output is clipping ({} samples held); turn tracks down with the volume button",
             self.samples
         );
@@ -371,7 +385,7 @@ fn report_latency(io: &AudioIo, negotiated: &Negotiated, already: bool) -> bool 
         return false;
     }
     let millis = f64::from(frames) / f64::from(negotiated.sample_rate) * 1000.0;
-    println!("round trip: {frames} frames ({millis:.1} ms), compensated");
+    tracing::info!("round trip: {frames} frames ({millis:.1} ms), compensated");
     true
 }
 
@@ -395,7 +409,7 @@ fn load_session(
 ) {
     match load(store, addr, loader, negotiated, config) {
         Ok(restored) => {
-            println!("loaded session {}{}", addr.track.index(), addr.slot.index());
+            tracing::info!("loaded session {}{}", addr.track.index(), addr.slot.index());
             controller.set_gains(core::array::from_fn(|track| {
                 restored.tracks[track].gain_step
             }));
@@ -419,7 +433,7 @@ fn load_session(
             controller.session_loaded(addr, true);
         }
         Err(error) => {
-            eprintln!(
+            tracing::error!(
                 "load of session {}{} failed: {error}",
                 addr.track.index(),
                 addr.slot.index()
@@ -461,7 +475,7 @@ fn carry_out_save(
             true
         }
         SaveOutcome::Expired(addr) => {
-            eprintln!(
+            tracing::warn!(
                 "save to {}{} never completed; nothing was written",
                 addr.track.index(),
                 addr.slot.index()
@@ -532,9 +546,10 @@ fn settle_save(
     now: Duration,
 ) {
     if save.clips != save.expected {
-        eprintln!(
+        tracing::warn!(
             "save abandoned: {} of {} pads arrived",
-            save.clips, save.expected
+            save.clips,
+            save.expected
         );
         controller.save_failed(now);
         return;
@@ -633,7 +648,7 @@ fn repaint(surface: &mut dyn ControlSurface, controller: &mut Controller) {
     if let Some(frame) = controller.take_frame()
         && let Err(error) = surface.render(frame)
     {
-        eprintln!("surface: {error}");
+        tracing::warn!("surface: {error}");
     }
 
     if let Some(update) = controller.take_text() {
@@ -642,7 +657,7 @@ fn repaint(surface: &mut dyn ControlSurface, controller: &mut Controller) {
             TextUpdate::Stop => surface.stop_text(),
         };
         if let Err(error) = shown {
-            eprintln!("surface: {error}");
+            tracing::warn!("surface: {error}");
         }
     }
 }
@@ -730,11 +745,11 @@ fn write_session(
         &save_to.settings,
     ) {
         Ok(()) => {
-            println!("saved session {}{}", addr.track.index(), addr.slot.index());
+            tracing::info!("saved session {}{}", addr.track.index(), addr.slot.index());
             controller.session_saved(addr, now);
         }
         Err(error) => {
-            eprintln!("save failed: {error}");
+            tracing::error!("save failed: {error}");
             controller.save_failed(now);
         }
     }
@@ -750,7 +765,7 @@ fn forward_clock(surface: &mut dyn ControlSurface, total: Option<u64>, sent: u64
     if ticks > 0
         && let Err(error) = surface.send_clock(ticks)
     {
-        eprintln!("surface: {error}");
+        tracing::warn!("surface: {error}");
     }
     total
 }
@@ -800,7 +815,7 @@ fn resync_after_loss(io: &mut AudioIo, seen: DroppedEvents) -> DroppedEvents {
     if dropped == seen {
         return seen;
     }
-    eprintln!("missed engine reports: {}", lost_report(&dropped, &seen));
+    tracing::warn!("missed engine reports: {}", lost_report(&dropped, &seen));
 
     if !needs_resync(&dropped, &seen) {
         return dropped;
@@ -885,13 +900,13 @@ fn watch_devices(
             controller.device_lost(now);
             if pause_on_disconnect {
                 controller.pause();
-                eprintln!("audio: device gone ({loss}). paused");
+                tracing::warn!("audio: device gone ({loss}). paused");
             } else {
-                eprintln!("audio: device gone ({loss}). held where it stopped");
+                tracing::warn!("audio: device gone ({loss}). held where it stopped");
             }
         }
-        Some(DeviceChange::Back) => println!("audio: device back"),
-        Some(DeviceChange::Refused(error)) => eprintln!("audio: {error}"),
+        Some(DeviceChange::Back) => tracing::info!("audio: device back"),
+        Some(DeviceChange::Refused(error)) => tracing::error!("audio: {error}"),
         None => {}
     }
 }
@@ -905,9 +920,9 @@ fn watch_surface(surface: &mut dyn ControlSurface, now: Duration, connected: boo
     let attached = surface.is_connected();
     if attached != connected {
         if attached {
-            println!("surface: Launchpad X back");
+            tracing::info!("surface: Launchpad X back");
         } else {
-            eprintln!("surface: gone, still looking");
+            tracing::warn!("surface: gone, still looking");
         }
     }
     attached
@@ -919,17 +934,17 @@ fn watch_surface(surface: &mut dyn ControlSurface, now: Duration, connected: boo
 fn connect_surface() -> Box<dyn ControlSurface> {
     let surface = Reconnecting::new(LaunchpadX::connect);
     if surface.is_connected() {
-        println!("surface: Launchpad X");
+        tracing::info!("surface: Launchpad X");
     } else {
-        println!(
+        tracing::warn!(
             "surface: no port containing \"{}\", still looking",
             LaunchpadX::PORT_KEYWORD
         );
         let ports = free_loop_surface::output_ports();
         if ports.is_empty() {
-            println!("surface: the host lists no midi outputs at all");
+            tracing::warn!("surface: the host lists no midi outputs at all");
         } else {
-            println!("surface: midi outputs seen: {}", ports.join(", "));
+            tracing::warn!("surface: midi outputs seen: {}", ports.join(", "));
         }
     }
     Box::new(surface)
@@ -939,7 +954,7 @@ fn connect_surface() -> Box<dyn ControlSurface> {
 fn report(event: Event) {
     match event {
         Event::ClipRecorded { addr, len, .. } => {
-            println!(
+            tracing::info!(
                 "recorded track {} slot {}: {} frames",
                 addr.track.index(),
                 addr.slot.index(),
@@ -948,25 +963,25 @@ fn report(event: Event) {
         }
 
         Event::RecordingRefused { addr } => {
-            eprintln!(
+            tracing::warn!(
                 "no clip from track {} slot {}; the pad is left empty",
                 addr.track.index(),
                 addr.slot.index()
             );
         }
         Event::RecordBufferLow { addr } => {
-            eprintln!(
+            tracing::warn!(
                 "out of recording space on track {} slot {}; the take will be cut short",
                 addr.track.index(),
                 addr.slot.index()
             );
         }
         Event::LoadRefused { wanted, allowed } => {
-            eprintln!("session needs {wanted} segments but the pool holds {allowed}");
+            tracing::warn!("session needs {wanted} segments but the pool holds {allowed}");
         }
-        Event::TempoRejected => eprintln!("tempo is locked while clips exist"),
+        Event::TempoRejected => tracing::warn!("tempo is locked while clips exist"),
         Event::TimeSignatureRejected => {
-            eprintln!("the time signature is locked while clips exist");
+            tracing::warn!("the time signature is locked while clips exist");
         }
         // Clipping and short capture report per block, too often to print. `ClipReport`
         // and `XrunReport` throttle them. The tempo reports on every nudge, which a held
