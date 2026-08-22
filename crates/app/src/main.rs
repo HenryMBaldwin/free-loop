@@ -140,20 +140,29 @@ fn main() -> Result<(), Box<dyn Error>> {
     // The window has to hold the main thread, so the looper takes one of its own. Its
     // ports go up first, or the surface would spend a retry looking for them.
     let emulator = gui::open()?;
+    let stopped = Arc::new(AtomicBool::new(false));
     let worker = std::thread::spawn({
-        let (path, config, running) = (path.clone(), config.clone(), Arc::clone(&running));
+        let (path, config) = (path.clone(), config.clone());
+        let (running, stopped) = (Arc::clone(&running), Arc::clone(&stopped));
         move || {
-            if let Err(error) = play(&path, &config, Some(gui::PORT_NAME), &running) {
+            // Reduced to its text, which a `Box<dyn Error>` cannot cross a thread to give.
+            let outcome = play(&path, &config, Some(gui::PORT_NAME), &running).map_err(|error| {
+                // Reported here as well, or the window would close saying nothing.
                 tracing::error!("{error}");
-            }
+                error.to_string()
+            });
             running.store(false, Ordering::Relaxed);
+            stopped.store(true, Ordering::Relaxed);
+            outcome
         }
     });
 
-    let shown = gui::run(emulator, console, Arc::clone(&running));
+    let shown = gui::run(emulator, console, Arc::clone(&running), stopped);
     running.store(false, Ordering::Relaxed);
-    if worker.join().is_err() {
-        tracing::error!("the looper thread panicked");
+    // The looper's own failure is why the window closed, so it is the one to report.
+    match worker.join() {
+        Ok(outcome) => outcome?,
+        Err(_) => return Err("the looper thread stopped without saying why".into()),
     }
     shown?;
     Ok(())
