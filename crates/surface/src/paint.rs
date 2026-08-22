@@ -217,13 +217,14 @@ pub fn pause_button(chrome: Chrome) -> Led {
     }
 }
 
-/// Paints the beat indicator, white on the downbeat and blue on the rest, over whatever
-/// the one button it uses already shows.
+/// Paints the beat indicator over whatever the one button it uses already shows: red on
+/// the downbeat, flashing white on the rest, the flash running on the clock the device is
+/// sent.
 pub fn beat_indicator(frame: &mut LedFrame, chrome: Chrome) {
     let led = if chrome.beat == 0 {
-        Led::solid(LedColor::White)
+        Led::solid(LedColor::Red)
     } else {
-        Led::solid(LedColor::Blue)
+        Led::flash(LedColor::White)
     };
     frame.set_control(FIRST_BEAT_LED, led);
 }
@@ -557,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn the_downbeat_is_a_different_colour_from_the_rest() {
+    fn the_downbeat_is_steady_red_and_the_rest_blink() {
         let paint = |beat| {
             let mut frame = LedFrame::new();
             beat_indicator(
@@ -568,12 +569,12 @@ mod tests {
                     ..Chrome::default()
                 },
             );
-            frame.control(FIRST_BEAT_LED).color
+            frame.control(FIRST_BEAT_LED)
         };
 
-        assert_eq!(paint(0), LedColor::White);
+        assert_eq!(paint(0), Led::solid(LedColor::Red));
         for beat in 1..7 {
-            assert_eq!(paint(beat), LedColor::Blue, "beat {beat}");
+            assert_eq!(paint(beat), Led::flash(LedColor::White), "beat {beat}");
         }
     }
 
@@ -581,10 +582,10 @@ mod tests {
     fn the_buttons_the_indicator_shares_keep_their_own_colour() {
         let painted = frame(&SessionModel::new(), Chrome::default());
 
-        // Beat one is on the tempo up button, so that one is white.
+        // Beat one is on the tempo up button.
         assert_eq!(
-            painted.control(Control::TempoUp.index()).color,
-            LedColor::White
+            painted.control(Control::TempoUp.index()),
+            Led::solid(LedColor::Red)
         );
         // Tempo down is not the current beat, so it still shows its own state.
         assert_eq!(
@@ -718,7 +719,7 @@ mod tests {
     fn the_gauge_keeps_the_transport_and_beat() {
         let frame = tempo_gauge(120.0, Chrome::default());
         assert!(frame.side(PAUSE_SIDE).is_lit());
-        assert_eq!(frame.control(FIRST_BEAT_LED).color, LedColor::White);
+        assert_eq!(frame.control(FIRST_BEAT_LED).color, LedColor::Red);
     }
 
     #[test]
