@@ -687,6 +687,13 @@ fn load(
     let time_signature =
         free_loop_core::TimeSignature::new(manifest.beats_per_bar, manifest.beat_unit)?;
     let tempo = free_loop_core::Tempo::new(manifest.tempo)?;
+    // The engine can only take a grid it can measure, and it has already committed the
+    // clips by the time it finds out.
+    free_loop_core::BarGrid::new(
+        free_loop_core::SampleRate::new(negotiated.sample_rate)?,
+        tempo,
+        time_signature,
+    )?;
 
     let session = checked.materialise()?;
     let restored = Restored {
@@ -941,6 +948,7 @@ fn report(event: Event) {
         // and `XrunReport` throttle them. The tempo reports on every nudge, which a held
         // button repeats eight times a second; the controller wants it, a reader does not.
         Event::Tempo { .. }
+        | Event::TimeSignature { .. }
         | Event::Clipped { .. }
         | Event::Xrun { .. }
         | Event::SnapshotComplete { .. }

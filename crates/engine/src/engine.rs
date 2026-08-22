@@ -706,6 +706,7 @@ impl Engine {
                 sink.event(Event::Tempo {
                     bpm: self.grid.tempo().bpm(),
                 });
+                self.report_time_signature(sink);
                 for addr in SlotAddr::all() {
                     sink.event(Event::SlotChanged {
                         addr,
@@ -942,7 +943,7 @@ impl Engine {
         }
 
         if let Some((tempo, signature)) = self.audio.staged.time.take() {
-            self.adopt_musical_time(tempo, signature);
+            self.adopt_musical_time(tempo, signature, sink);
         }
         // A rewind or clear queued against the session just replaced would run against the
         // new one, and the commit has already zeroed the levels it was waiting on.
@@ -957,13 +958,20 @@ impl Engine {
     /// existing clips.
     ///
     /// Safe during a load, which replaces the grid wholesale.
-    fn adopt_musical_time(&mut self, tempo: Tempo, signature: TimeSignature) {
+    fn adopt_musical_time(
+        &mut self,
+        tempo: Tempo,
+        signature: TimeSignature,
+        sink: &mut impl EventSink,
+    ) {
         if let Ok(grid) = BarGrid::new(self.sample_rate, tempo, signature) {
             self.time_signature = signature;
             self.position = self.grid.rebase_onto(self.position, grid);
             self.set_grid(grid);
             self.resync_clock();
         }
+        // Whatever the grid ended up as, not what the load asked for.
+        self.report_time_signature(sink);
     }
 
     /// Takes a new bar grid, keeping anything measured against it in step.
@@ -1065,6 +1073,18 @@ impl Engine {
         self.position = self.grid.rebase_onto(self.position, grid);
         self.set_grid(grid);
         self.resync_clock();
+        // Reported on success as well as refusal, so a resync answer queued earlier cannot
+        // end up as the last word on the signature.
+        self.report_time_signature(sink);
+    }
+
+    /// Says what signature the transport is running at.
+    fn report_time_signature(&mut self, sink: &mut impl EventSink) {
+        let signature = self.grid.time_signature();
+        sink.event(Event::TimeSignature {
+            beats_per_bar: signature.beats_per_bar(),
+            beat_unit: signature.beat_unit(),
+        });
     }
 
     /// Renders one block.
@@ -1148,8 +1168,7 @@ impl Engine {
 
     /// Clicks the bar is cut into.
     fn clicks_per_bar(&self) -> u32 {
-        self.subdivision
-            .clicks_per_bar(self.grid.time_signature().beats_per_bar())
+        self.subdivision.clicks_per_bar(self.grid.time_signature())
     }
 
     /// Sounds the click if the transport has reached one of its instants.
