@@ -166,7 +166,10 @@ pub fn name(mode: Mode, button: Button) -> Option<String> {
             (track, PICKUP_COLUMN) => format!("track {track} pickup"),
             _ => return None,
         },
-        (Role::Beats(beats), _) => format!("{beats} beats to the bar"),
+        (Role::Beats(beats), _) => {
+            let plural = if beats == 1 { "beat" } else { "beats" };
+            format!("{beats} {plural} to the bar")
+        }
         (Role::Unit(unit), _) => format!("beat is a 1/{unit} note"),
         (Role::Rate(rate), _) => format!("click {}", rate.name()),
         (Role::Tempo(direction), _) => {
