@@ -10,7 +10,7 @@ use free_loop_core::{
 };
 
 use crate::event::Control;
-use crate::led::{BEAT_LEDS, FIRST_BEAT_LED, Led, LedColor, LedFrame, LedStyle, SHADES};
+use crate::led::{FIRST_BEAT_LED, Led, LedColor, LedFrame, LedStyle, SHADES};
 
 /// Surface state that does not come from the session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,26 +217,15 @@ pub fn pause_button(chrome: Chrome) -> Led {
     }
 }
 
-/// Paints the beat indicator over whatever the shared buttons already show.
-///
-/// One button lit at a time, beat one in white. Only the current beat is overwritten, so
-/// the buttons it shares keep their own colour the rest of the time. Meters wider than
-/// the indicator show only the beats that fit.
+/// Paints the beat indicator, white on the downbeat and blue on the rest, over whatever
+/// the one button it uses already shows.
 pub fn beat_indicator(frame: &mut LedFrame, chrome: Chrome) {
-    let shown = usize::try_from(chrome.beats_per_bar)
-        .unwrap_or(BEAT_LEDS)
-        .min(BEAT_LEDS);
-    let beat = usize::try_from(chrome.beat).unwrap_or(usize::MAX);
-    if beat >= shown {
-        return;
-    }
-
-    let led = if beat == 0 {
+    let led = if chrome.beat == 0 {
         Led::solid(LedColor::White)
     } else {
         Led::solid(LedColor::Blue)
     };
-    frame.set_control(FIRST_BEAT_LED + beat, led);
+    frame.set_control(FIRST_BEAT_LED, led);
 }
 
 /// Paints the tempo as a fill across the grid, spanning [`MIN_BPM`] to [`MAX_BPM`].
@@ -547,21 +536,44 @@ mod tests {
     }
 
     #[test]
-    fn the_beat_indicator_lights_one_button_at_a_time() {
-        for beat in 0..4 {
+    fn the_beat_indicator_stays_on_one_button_whatever_the_bar_holds() {
+        for beat in 0..9 {
             let mut frame = LedFrame::new();
             beat_indicator(
                 &mut frame,
                 Chrome {
                     beat,
+                    beats_per_bar: 9,
                     ..Chrome::default()
                 },
             );
 
-            let lit: Vec<usize> = (FIRST_BEAT_LED..FIRST_BEAT_LED + BEAT_LEDS)
+            let lit: Vec<usize> = Control::all()
+                .map(Control::index)
                 .filter(|i| frame.control(*i).is_lit())
                 .collect();
-            assert_eq!(lit, vec![FIRST_BEAT_LED + beat as usize]);
+            assert_eq!(lit, vec![FIRST_BEAT_LED], "beat {beat}");
+        }
+    }
+
+    #[test]
+    fn the_downbeat_is_a_different_colour_from_the_rest() {
+        let paint = |beat| {
+            let mut frame = LedFrame::new();
+            beat_indicator(
+                &mut frame,
+                Chrome {
+                    beat,
+                    beats_per_bar: 7,
+                    ..Chrome::default()
+                },
+            );
+            frame.control(FIRST_BEAT_LED).color
+        };
+
+        assert_eq!(paint(0), LedColor::White);
+        for beat in 1..7 {
+            assert_eq!(paint(beat), LedColor::Blue, "beat {beat}");
         }
     }
 
@@ -589,7 +601,7 @@ mod tests {
         };
         let painted = frame(&SessionModel::new(), chrome);
 
-        for button in Control::all().filter(|c| c.index() != 3) {
+        for button in Control::all().filter(|c| c.index() != FIRST_BEAT_LED) {
             assert_eq!(
                 painted.control(button.index()),
                 control(button, chrome),
@@ -612,39 +624,6 @@ mod tests {
         assert_ne!(running.side(PAUSE_SIDE), frozen.side(PAUSE_SIDE));
         assert!(running.side(PAUSE_SIDE).is_lit());
         assert!(frozen.side(PAUSE_SIDE).is_lit());
-    }
-
-    #[test]
-    fn beat_one_is_a_different_colour() {
-        let mut frame = LedFrame::new();
-        beat_indicator(&mut frame, Chrome::default());
-        assert_eq!(frame.control(FIRST_BEAT_LED).color, LedColor::White);
-
-        let mut frame = LedFrame::new();
-        beat_indicator(
-            &mut frame,
-            Chrome {
-                beat: 1,
-                ..Chrome::default()
-            },
-        );
-        assert_eq!(frame.control(FIRST_BEAT_LED + 1).color, LedColor::Blue);
-    }
-
-    #[test]
-    fn a_wide_meter_shows_only_the_beats_that_fit() {
-        let mut frame = LedFrame::new();
-        beat_indicator(
-            &mut frame,
-            Chrome {
-                beat: 6,
-                beats_per_bar: 7,
-                ..Chrome::default()
-            },
-        );
-        // Beat 7 of 7 has no button, so nothing lights rather than wrapping onto a
-        // control that means something else.
-        assert!((FIRST_BEAT_LED..FIRST_BEAT_LED + BEAT_LEDS).all(|i| !frame.control(i).is_lit()));
     }
 
     #[test]

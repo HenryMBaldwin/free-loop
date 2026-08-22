@@ -6,9 +6,7 @@ use free_loop_core::{SLOT_COUNT, SlotAddr, TRACK_COUNT};
 
 /// Buttons in the top row.
 pub const CONTROL_COUNT: usize = 8;
-/// Top-row buttons the beat indicator shares.
-pub const BEAT_LEDS: usize = 4;
-/// Index of the first beat indicator button.
+/// Index of the top-row button the beat indicator shares.
 pub const FIRST_BEAT_LED: usize = 0;
 /// Buttons in the right-hand column.
 pub const SIDE_COUNT: usize = 8;
