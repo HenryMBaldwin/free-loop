@@ -171,52 +171,62 @@ impl Default for TimeSignature {
     }
 }
 
-/// How often the click sounds, against the beat.
+/// How often the click sounds, against the beat. Ordered slowest first.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Subdivision {
     /// Once every four beats.
     Whole,
     /// Once every two beats.
     Half,
+    /// Three times every four beats.
+    HalfTriplet,
     /// Once a beat.
     #[default]
     Quarter,
+    /// Three times every two beats.
+    QuarterTriplet,
     /// Twice a beat.
     Eighth,
     /// Three times a beat.
-    Triplet,
+    EighthTriplet,
     /// Four times a beat.
     Sixteenth,
 }
 
 impl Subdivision {
-    /// Every one, coarsest first.
-    pub const ALL: [Self; 6] = [
+    /// Every one, slowest first.
+    pub const ALL: [Self; 8] = [
         Self::Whole,
         Self::Half,
+        Self::HalfTriplet,
         Self::Quarter,
+        Self::QuarterTriplet,
         Self::Eighth,
-        Self::Triplet,
+        Self::EighthTriplet,
         Self::Sixteenth,
     ];
 
-    /// Beats between clicks. Counted from the bar line, so a bar always clicks.
-    pub fn beats_per_click(self) -> u32 {
+    /// Clicks per beat, as a numerator over a denominator.
+    pub fn clicks_per_beat(self) -> (u32, u32) {
         match self {
-            Self::Whole => 4,
-            Self::Half => 2,
-            Self::Quarter | Self::Eighth | Self::Triplet | Self::Sixteenth => 1,
+            Self::Whole => (1, 4),
+            Self::Half => (1, 2),
+            Self::HalfTriplet => (3, 4),
+            Self::Quarter => (1, 1),
+            Self::QuarterTriplet => (3, 2),
+            Self::Eighth => (2, 1),
+            Self::EighthTriplet => (3, 1),
+            Self::Sixteenth => (4, 1),
         }
     }
 
-    /// Clicks within one beat.
-    pub fn clicks_per_beat(self) -> u32 {
-        match self {
-            Self::Whole | Self::Half | Self::Quarter => 1,
-            Self::Eighth => 2,
-            Self::Triplet => 3,
-            Self::Sixteenth => 4,
-        }
+    /// Clicks the bar is cut into, never fewer than one.
+    ///
+    /// A rate that does not divide the bar evenly is rounded down to one that does, so the
+    /// clicks stay evenly spaced and the bar line always carries one.
+    pub fn clicks_per_bar(self, beats_per_bar: u32) -> u32 {
+        let (num, den) = self.clicks_per_beat();
+        (beats_per_bar.saturating_mul(num) / den).max(1)
     }
 
     /// How it reads on a display.
@@ -224,9 +234,11 @@ impl Subdivision {
         match self {
             Self::Whole => "1/1",
             Self::Half => "1/2",
+            Self::HalfTriplet => "1/2T",
             Self::Quarter => "1/4",
+            Self::QuarterTriplet => "1/4T",
             Self::Eighth => "1/8",
-            Self::Triplet => "1/8T",
+            Self::EighthTriplet => "1/8T",
             Self::Sixteenth => "1/16",
         }
     }
@@ -467,6 +479,47 @@ mod tests {
         for beat in 0..4 {
             let on_beat = grid.beat_offset(beat).0;
             assert!(seen.contains(&on_beat) || on_beat == 0, "beat {beat}");
+        }
+    }
+
+    #[test]
+    fn every_subdivision_reads_faster_than_the_one_before() {
+        let rate = |s: Subdivision| {
+            let (num, den) = s.clicks_per_beat();
+            f64::from(num) / f64::from(den)
+        };
+        for pair in Subdivision::ALL.windows(2) {
+            assert!(
+                rate(pair[0]) < rate(pair[1]),
+                "{:?} should be slower than {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    #[test]
+    fn common_time_gives_every_subdivision_its_textbook_count() {
+        for (subdivision, per_bar) in [
+            (Subdivision::Whole, 1),
+            (Subdivision::Half, 2),
+            (Subdivision::HalfTriplet, 3),
+            (Subdivision::Quarter, 4),
+            (Subdivision::QuarterTriplet, 6),
+            (Subdivision::Eighth, 8),
+            (Subdivision::EighthTriplet, 12),
+            (Subdivision::Sixteenth, 16),
+        ] {
+            assert_eq!(subdivision.clicks_per_bar(4), per_bar, "{subdivision:?}");
+        }
+    }
+
+    #[test]
+    fn a_bar_always_carries_at_least_one_click() {
+        for subdivision in Subdivision::ALL {
+            for beats in 1..=16 {
+                assert!(subdivision.clicks_per_bar(beats) >= 1, "{subdivision:?}");
+            }
         }
     }
 
