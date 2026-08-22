@@ -15,7 +15,7 @@ use free_loop_core::{
     ClipId, Command, Event, Frames, Settings, SlotAddr, SlotId, SlotState, Subdivision, Tempo,
     TimeSignature, TrackId,
 };
-use free_loop_engine::{ClickConfig, Engine, EngineConfig, Housekeeping, LoadMessage, Snapshot};
+use free_loop_engine::{ClickConfig, Engine, EngineConfig, Housekeeping, Snapshot};
 use std::sync::Arc;
 
 const CHANNELS: usize = 2;
@@ -682,14 +682,9 @@ fn a_loaded_session_lands_on_the_grid_frozen() {
     harness
         .housekeeping
         .loader
-        .send(LoadMessage::Clip {
-            addr: pad,
-            clip: lent_clip(1_000, 0),
-            playing: true,
-            launch_anchor: None,
-        })
+        .clip(pad, lent_clip(1_000, 0), true, None)
         .unwrap();
-    harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+    harness.housekeeping.loader.end().unwrap();
 
     harness.run_frames(128);
 
@@ -845,14 +840,9 @@ fn a_session_in_another_time_signature_brings_it_along() {
     harness
         .housekeeping
         .loader
-        .send(LoadMessage::Clip {
-            addr: pad,
-            clip: lent_clip(1_000, 0),
-            playing: false,
-            launch_anchor: None,
-        })
+        .clip(pad, lent_clip(1_000, 0), false, None)
         .unwrap();
-    harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+    harness.housekeeping.loader.end().unwrap();
     harness.run_frames(128);
 
     assert_eq!(
@@ -876,7 +866,7 @@ fn a_signature_a_load_brought_outlives_a_later_tempo_change() {
         .loader
         .begin(Tempo::new(100.0).unwrap(), seven_eight)
         .unwrap();
-    harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+    harness.housekeeping.loader.end().unwrap();
     harness.run_frames(128);
 
     // Nothing was loaded onto a pad, so the tempo is not locked.
@@ -905,14 +895,9 @@ fn loading_replaces_what_was_on_the_grid() {
     harness
         .housekeeping
         .loader
-        .send(LoadMessage::Clip {
-            addr: loaded,
-            clip: lent_clip(500, 0),
-            playing: false,
-            launch_anchor: None,
-        })
+        .clip(loaded, lent_clip(500, 0), false, None)
         .unwrap();
-    harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+    harness.housekeeping.loader.end().unwrap();
     harness.run_frames(128);
 
     assert_eq!(harness.engine.state(recorded), SlotState::Empty);
@@ -936,14 +921,9 @@ fn lent_storage_comes_back_rather_than_joining_the_pool() {
     harness
         .housekeeping
         .loader
-        .send(LoadMessage::Clip {
-            addr: pad,
-            clip: lent_clip(1_000, 0),
-            playing: false,
-            launch_anchor: None,
-        })
+        .clip(pad, lent_clip(1_000, 0), false, None)
         .unwrap();
-    harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+    harness.housekeeping.loader.end().unwrap();
     harness.run_frames(128);
 
     assert_eq!(
@@ -980,15 +960,10 @@ fn a_load_leaves_less_room_to_record() {
         harness
             .housekeeping
             .loader
-            .send(LoadMessage::Clip {
-                addr: pad,
-                clip: lent_clip(1_000, 0),
-                playing: false,
-                launch_anchor: None,
-            })
+            .clip(pad, lent_clip(1_000, 0), false, None)
             .unwrap();
     }
-    harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+    harness.housekeeping.loader.end().unwrap();
     harness.run_frames(128);
 
     assert_eq!(harness.engine.segments_available(), 0, "the grid is full");
@@ -1183,14 +1158,9 @@ fn load_one(harness: &mut Harness, pad: SlotAddr, segments: usize) {
     harness
         .housekeeping
         .loader
-        .send(LoadMessage::Clip {
-            addr: pad,
-            clip: lent_clip(frames, 0),
-            playing: false,
-            launch_anchor: None,
-        })
+        .clip(pad, lent_clip(frames, 0), false, None)
         .unwrap();
-    harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+    harness.housekeeping.loader.end().unwrap();
     harness.run_frames(128);
 }
 
@@ -1208,14 +1178,9 @@ fn a_loaded_loop_plays_what_was_saved() {
     harness
         .housekeeping
         .loader
-        .send(LoadMessage::Clip {
-            addr: pad,
-            clip: lent_clip(len, 0),
-            playing: true,
-            launch_anchor: None,
-        })
+        .clip(pad, lent_clip(len, 0), true, None)
         .unwrap();
-    harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+    harness.housekeeping.loader.end().unwrap();
     harness.run_frames(128);
 
     harness.command(Command::SetPaused(false));
@@ -1404,14 +1369,9 @@ fn recording_onto_a_loaded_session_captures_audio() {
     harness
         .housekeeping
         .loader
-        .send(LoadMessage::Clip {
-            addr: loaded,
-            clip: lent_clip(BAR, 0),
-            playing: true,
-            launch_anchor: None,
-        })
+        .clip(loaded, lent_clip(BAR, 0), true, None)
         .unwrap();
-    harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+    harness.housekeeping.loader.end().unwrap();
     harness.run_frames(128);
 
     harness.command(Command::SetPaused(false));
@@ -1473,14 +1433,9 @@ fn a_loaded_session_starts_at_the_beginning() {
     harness
         .housekeeping
         .loader
-        .send(LoadMessage::Clip {
-            addr: pad,
-            clip: lent_clip(len, len - 64),
-            playing: true,
-            launch_anchor: None,
-        })
+        .clip(pad, lent_clip(len, len - 64), true, None)
         .unwrap();
-    harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+    harness.housekeeping.loader.end().unwrap();
     harness.run_frames(128);
 
     assert_eq!(harness.engine.position(), Frames::ZERO);
@@ -1803,14 +1758,9 @@ mod staged_load {
         harness
             .housekeeping
             .loader
-            .send(LoadMessage::Clip {
-                addr: loaded,
-                clip: lent_clip(BAR, 0),
-                playing: true,
-                launch_anchor: None,
-            })
+            .clip(loaded, lent_clip(BAR, 0), true, None)
             .unwrap();
-        harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+        harness.housekeeping.loader.end().unwrap();
         harness.run_frames(128);
 
         assert_eq!(harness.engine.state(addr(0, 0)), SlotState::Empty);
@@ -1837,7 +1787,7 @@ mod load_protocol {
         record(&mut harness, pad, 0, 1);
         let playing = harness.engine.state(pad);
 
-        harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+        harness.housekeeping.loader.end().unwrap();
         harness.run_frames(128);
 
         assert_eq!(harness.engine.state(pad), playing, "nothing was loaded");
@@ -1854,24 +1804,14 @@ mod load_protocol {
         harness
             .housekeeping
             .loader
-            .send(LoadMessage::Clip {
-                addr: addr(2, 3),
-                clip: lent_clip(BAR, 0),
-                playing: true,
-                launch_anchor: None,
-            })
+            .clip(addr(2, 3), lent_clip(BAR, 0), true, None)
             .unwrap();
-        harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+        harness.housekeeping.loader.end().unwrap();
         begin(&mut harness);
         harness
             .housekeeping
             .loader
-            .send(LoadMessage::Clip {
-                addr: addr(4, 5),
-                clip: lent_clip(BAR, 0),
-                playing: true,
-                launch_anchor: None,
-            })
+            .clip(addr(4, 5), lent_clip(BAR, 0), true, None)
             .unwrap();
         harness.run_frames(128);
 
@@ -1897,14 +1837,9 @@ mod load_protocol {
         harness
             .housekeeping
             .loader
-            .send(LoadMessage::Clip {
-                addr: addr(2, 3),
-                clip: lent_clip(BAR, 0),
-                playing: true,
-                launch_anchor: None,
-            })
+            .clip(addr(2, 3), lent_clip(BAR, 0), true, None)
             .unwrap();
-        harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+        harness.housekeeping.loader.end().unwrap();
         harness.run_blocks(4);
 
         assert!(
