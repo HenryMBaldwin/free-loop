@@ -2444,12 +2444,18 @@ mod tests {
 
         let frame = controller.take_frame().unwrap();
         assert_eq!(
-            frame.control(FIRST_BEAT_LED + 2),
+            frame.control(FIRST_BEAT_LED),
             Led::solid(LedColor::Blue),
-            "the current beat"
+            "off the downbeat"
         );
-        // Beat one shares the tempo up button, which keeps its own colour meanwhile.
-        assert_ne!(frame.control(FIRST_BEAT_LED), Led::solid(LedColor::White));
+
+        controller.on_engine(Event::Beat { bar: 4, beat: 0 }, T0);
+        let frame = controller.take_frame().unwrap();
+        assert_eq!(
+            frame.control(FIRST_BEAT_LED),
+            Led::solid(LedColor::White),
+            "the downbeat"
+        );
     }
 
     #[test]
