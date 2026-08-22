@@ -23,14 +23,15 @@ pub struct LoadGrid(BarGrid);
 
 impl LoadGrid {
     /// The grid itself.
-    pub fn get(self) -> BarGrid {
+    pub(crate) fn get(self) -> BarGrid {
         self.0
     }
 }
 
-/// One step of a load.
+/// One step of a load. Made and read inside the crate: a caller drives it through
+/// [`Loader`], so no protocol message can be manufactured or recovered.
 #[derive(Debug)]
-pub enum LoadMessage {
+pub(crate) enum LoadMessage {
     /// Empty the grid and take the session's musical time.
     Begin {
         /// The session's grid.
@@ -51,10 +52,10 @@ pub enum LoadMessage {
     End,
 }
 
-/// A load that could not be handed over.
+/// A step of a load that could not be handed over.
 #[derive(Debug, thiserror::Error)]
 #[error("the engine has not drained the load queue")]
-pub struct LoadFull(pub LoadMessage);
+pub struct LoadFull;
 
 /// A load that could not be started.
 #[derive(Debug, thiserror::Error)]
@@ -87,18 +88,42 @@ impl Loader {
         // The message is dropped: a grid handed back could be sent on to an engine
         // running at another rate.
         self.send(LoadMessage::Begin { grid })
-            .map_err(|_| BeginError::Full)
+            .map_err(|LoadFull| BeginError::Full)
     }
 
-    /// Queues one step.
+    /// Queues a clip for a pad.
     ///
     /// # Errors
     ///
-    /// [`LoadFull`] with the message back if the engine has not drained the queue.
-    pub fn send(&mut self, message: LoadMessage) -> Result<(), LoadFull> {
+    /// [`LoadFull`] if the engine has not drained the queue.
+    pub fn clip(
+        &mut self,
+        addr: SlotAddr,
+        clip: Arc<Clip>,
+        playing: bool,
+        launch_anchor: Option<Frames>,
+    ) -> Result<(), LoadFull> {
+        self.send(LoadMessage::Clip {
+            addr,
+            clip,
+            playing,
+            launch_anchor,
+        })
+    }
+
+    /// Says nothing more is coming, which puts the load in place.
+    ///
+    /// # Errors
+    ///
+    /// [`LoadFull`] if the engine has not drained the queue.
+    pub fn end(&mut self) -> Result<(), LoadFull> {
+        self.send(LoadMessage::End)
+    }
+
+    fn send(&mut self, message: LoadMessage) -> Result<(), LoadFull> {
         self.out
             .push(message)
-            .map_err(|PushError::Full(m)| LoadFull(m))
+            .map_err(|PushError::Full(_)| LoadFull)
     }
 
     /// Whether the queue has room for a whole session.
@@ -109,29 +134,22 @@ impl Loader {
 
 /// The engine's side.
 #[derive(Debug)]
-pub struct LoadInbox {
+pub(crate) struct LoadInbox {
     inbox: Consumer<LoadMessage>,
 }
 
 impl LoadInbox {
-    /// Takes everything queued.
-    pub fn drain(&mut self, mut take: impl FnMut(LoadMessage)) {
-        while let Some(message) = self.pop() {
-            take(message);
-        }
-    }
-
     /// Takes the next message, if there is one.
     ///
     /// For a reader that has to stop part way, such as one applying a load before it starts
     /// receiving the next.
-    pub fn pop(&mut self) -> Option<LoadMessage> {
+    pub(crate) fn pop(&mut self) -> Option<LoadMessage> {
         self.inbox.pop().ok()
     }
 }
 
 /// Builds both sides.
-pub fn channel(sample_rate: SampleRate) -> (Loader, LoadInbox) {
+pub(crate) fn channel(sample_rate: SampleRate) -> (Loader, LoadInbox) {
     let (out, inbox) = RingBuffer::new(SLOTS);
     (Loader { out, sample_rate }, LoadInbox { inbox })
 }
@@ -152,6 +170,30 @@ mod tests {
         SampleRate::new(48_000).unwrap()
     }
 
+    /// The protocol is crate-private, so this only compiles inside the crate. Outside it,
+    /// `LoadMessage`, `channel` and `LoadInbox` are all out of reach, which is what stops a
+    /// `Begin` made for one engine being sent to another.
+    #[test]
+    fn a_begin_cannot_be_taken_from_one_channel_to_another() {
+        let (mut mine, mut inbox) = channel(SampleRate::new(44_100).unwrap());
+        mine.begin(Tempo::new(120.0).unwrap(), TimeSignature::FOUR_FOUR)
+            .unwrap();
+
+        let taken = inbox.pop().unwrap();
+        let (mut other, mut other_inbox) = channel(rate());
+        other.send(taken).unwrap();
+
+        // Reachable here and nowhere else: the rate that arrived is not this engine's.
+        let mut arrived = None;
+        while let Some(message) = other_inbox.pop() {
+            if let LoadMessage::Begin { grid } = message {
+                arrived = Some(grid.get().sample_rate());
+            }
+        }
+        assert_eq!(arrived, Some(SampleRate::new(44_100).unwrap()));
+        assert_ne!(arrived, Some(rate()), "which is why callers cannot do this");
+    }
+
     #[test]
     fn a_begun_load_carries_the_rate_of_the_engine_it_went_to() {
         let (mut loader, mut inbox) = channel(rate());
@@ -160,11 +202,11 @@ mod tests {
             .unwrap();
 
         let mut rates = Vec::new();
-        inbox.drain(|message| {
+        while let Some(message) = inbox.pop() {
             if let LoadMessage::Begin { grid } = message {
                 rates.push(grid.get().sample_rate());
             }
-        });
+        }
         assert_eq!(rates, vec![rate()], "not the caller's choice");
     }
 
@@ -178,7 +220,9 @@ mod tests {
 
         assert!(matches!(refused, Err(BeginError::Time(_))));
         let mut seen = 0;
-        inbox.drain(|_| seen += 1);
+        while inbox.pop().is_some() {
+            seen += 1;
+        }
         assert_eq!(seen, 0, "nothing was sent");
     }
 
@@ -203,13 +247,13 @@ mod tests {
         loader.send(LoadMessage::End).unwrap();
 
         let mut seen = Vec::new();
-        inbox.drain(|m| {
-            seen.push(match m {
+        while let Some(message) = inbox.pop() {
+            seen.push(match message {
                 LoadMessage::Begin { .. } => "begin",
                 LoadMessage::Clip { .. } => "clip",
                 LoadMessage::End => "end",
             });
-        });
+        }
         assert_eq!(seen, vec!["begin", "clip", "end"]);
     }
 
@@ -229,7 +273,7 @@ mod tests {
         loader.send(LoadMessage::End).unwrap();
         assert!(!loader.ready());
 
-        inbox.drain(|_| {});
+        while inbox.pop().is_some() {}
         assert!(loader.ready());
     }
 }

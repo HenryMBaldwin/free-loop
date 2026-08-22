@@ -20,12 +20,9 @@ use free_loop::config::{self, Config};
 use free_loop::control::{Controller, Request, TextUpdate};
 use free_loop_audio::{AudioIo, DeviceChange, DroppedEvents, Negotiated, open};
 use free_loop_core::{Command, Event, TimeSignature, TrackInput};
-use free_loop_engine::{Engine, Housekeeping, LoadMessage, Loader, Snapshot};
+use free_loop_engine::{Engine, Housekeeping, Loader, Snapshot};
 use free_loop_session::{SavedClip, SessionData, SessionStore, TrackSettings};
 use free_loop_surface::{ControlSurface, LaunchpadX, Reconnecting, SurfaceEvent};
-
-/// Commands held for an engine that is not draining them. Beyond this the oldest go.
-const QUEUED_COMMANDS: usize = 256;
 
 /// How often the control loop runs.
 const TICK: Duration = Duration::from_millis(2);
@@ -232,40 +229,42 @@ fn run(s: Session<'_>) {
         // Returns clips the engine finished with while something else was reading them.
         housekeeping.recycler.run();
 
-        // Collected first: acting on a request touches the controller again.
-        let requests: Vec<Request> = controller.drain_requests().collect();
-        for request in requests {
-            match request {
-                Request::SaveSession(addr) => {
-                    next_request = next_request.wrapping_add(1);
-                    snapshots.clear();
-                    let save = ask_for_snapshot(&mut queued, next_request, addr, controller, now);
-                    pending_save = Some(save);
-                }
-                Request::LoadSession(addr) => load_session(
-                    store,
-                    addr,
-                    &mut housekeeping.loader,
-                    &negotiated,
-                    controller,
-                    config,
-                    now,
-                ),
-            }
-        }
-
         // Storage the engine has finished with comes back here to be dropped.
         housekeeping.recycler.take_borrowed().for_each(drop);
 
-        // Ahead of the commands, and never refused. Held back while any command is still
-        // waiting: the audio side reads this mailbox first, so publishing now would put a
-        // setting in front of a gesture made before it. Settings coalesce, so the wait
-        // costs nothing but the delay.
-        if let Some(settings) = controller.take_settings().filter(|_| queued.is_empty()) {
+        if let Some(settings) = settings_to_publish(controller, &queued) {
             io.publish_settings(settings);
         }
         queued.extend(controller.drain_commands());
-        hand_over(&mut queued, io);
+        send_commands(&mut queued, |command| io.send(command).is_ok());
+
+        // After the commands, and only once none are waiting. A load goes through its own
+        // channel, which the audio side applies after the command ring: starting one while
+        // a gesture is still queued would let the load land first.
+        if queued.is_empty() {
+            // Collected first: acting on a request touches the controller again.
+            let requests: Vec<Request> = controller.drain_requests().collect();
+            for request in requests {
+                match request {
+                    Request::SaveSession(addr) => {
+                        next_request = next_request.wrapping_add(1);
+                        snapshots.clear();
+                        let save =
+                            ask_for_snapshot(&mut queued, next_request, addr, controller, now);
+                        pending_save = Some(save);
+                    }
+                    Request::LoadSession(addr) => load_session(
+                        store,
+                        addr,
+                        &mut housekeeping.loader,
+                        &negotiated,
+                        controller,
+                        config,
+                        now,
+                    ),
+                }
+            }
+        }
 
         let Drained {
             answered,
@@ -691,14 +690,14 @@ fn load(
     // read and it carries the rate of the engine it is going to.
     loader.begin(tempo, time_signature)?;
     for loaded in session.clips {
-        loader.send(LoadMessage::Clip {
-            addr: loaded.addr,
-            clip: std::sync::Arc::new(loaded.clip),
-            playing: loaded.playing,
-            launch_anchor: loaded.launch_anchor,
-        })?;
+        loader.clip(
+            loaded.addr,
+            std::sync::Arc::new(loaded.clip),
+            loaded.playing,
+            loaded.launch_anchor,
+        )?;
     }
-    loader.send(LoadMessage::End)?;
+    loader.end()?;
     Ok(restored)
 }
 
@@ -813,6 +812,22 @@ fn resync_after_loss(io: &mut AudioIo, seen: DroppedEvents) -> DroppedEvents {
     dropped
 }
 
+/// The settings to hand over this pass, if any.
+///
+/// Ahead of the commands, and never refused. Held back while a command is still waiting:
+/// the audio side reads this mailbox first, so publishing now would put a setting in front
+/// of a gesture made before it. Not taken until it can be published, since taking one
+/// clears the flag that says it moved.
+fn settings_to_publish(
+    controller: &mut Controller,
+    queued: &[Command],
+) -> Option<free_loop_core::Settings> {
+    if !queued.is_empty() {
+        return None;
+    }
+    controller.take_settings()
+}
+
 /// Asks the engine to publish its clips, and starts the wait for them.
 fn ask_for_snapshot(
     queued: &mut Vec<Command>,
@@ -830,67 +845,6 @@ fn ask_for_snapshot(
         addr,
         settings: save_settings(controller),
     }
-}
-
-/// Sends what it can, then holds the rest to a bounded, still-complete backlog.
-fn hand_over(queued: &mut Vec<Command>, io: &mut AudioIo) {
-    send_commands(queued, |command| io.send(command).is_ok());
-    compact(queued);
-    drop_newest(queued);
-}
-
-/// Which setting a command carries, if the newer of two says everything the older did.
-///
-/// A held tempo button makes one of these every 120 ms, which is what fills a backlog.
-fn setting_of(command: Command) -> Option<u8> {
-    match command {
-        Command::SetTempo(_) => Some(0),
-        Command::SetTimeSignature(_) => Some(1),
-        Command::SetPaused(_) => Some(2),
-        Command::SetClickEnabled(_) => Some(3),
-        Command::SetClickLevel(_) => Some(4),
-        Command::SetClickSubdivision(_) => Some(5),
-        Command::Press(_)
-        | Command::Clear(_)
-        | Command::StopTrack(_)
-        | Command::StopAll
-        | Command::ClearAll
-        | Command::Resync
-        | Command::Snapshot { .. }
-        | Command::Rewind => None,
-    }
-}
-
-/// Forgets a setting a later one already replaced, keeping every action.
-///
-/// An action is not idempotent: dropping one of a pair of presses leaves a take running.
-fn compact(queued: &mut Vec<Command>) {
-    let mut latest = [false; 6];
-    let mut kept: Vec<Command> = Vec::with_capacity(queued.len());
-    for command in queued.iter().rev() {
-        if let Some(setting) = setting_of(*command) {
-            if latest[usize::from(setting)] {
-                continue;
-            }
-            latest[usize::from(setting)] = true;
-        }
-        kept.push(*command);
-    }
-    kept.reverse();
-    *queued = kept;
-}
-
-/// Forgets the newest commands once an engine that is not draining has this many waiting.
-///
-/// The newest go, not the oldest: what is left is a history with nothing missing from the
-/// middle, and a gesture that did nothing is plain to whoever made it.
-fn drop_newest(queued: &mut Vec<Command>) {
-    if queued.len() <= QUEUED_COMMANDS {
-        return;
-    }
-    let over = queued.len() - QUEUED_COMMANDS;
-    eprintln!("audio thread is not taking commands; dropped the last {over}");
-    queued.truncate(QUEUED_COMMANDS);
 }
 
 /// Hands `queued` over in order, keeping whatever there was no room for.
@@ -1113,76 +1067,22 @@ mod tests {
     }
 
     #[test]
-    fn a_backlog_of_settings_keeps_only_the_last_of_each() {
-        let pad = pad(1, 2);
-        let mut queued = vec![
-            Command::SetTempo(free_loop_core::Tempo::new(120.0).unwrap()),
-            Command::Press(pad),
-            Command::SetTempo(free_loop_core::Tempo::new(125.0).unwrap()),
-            Command::SetClickEnabled(false),
-            Command::SetTempo(free_loop_core::Tempo::new(130.0).unwrap()),
-            Command::Press(pad),
-        ];
+    fn a_setting_held_back_by_a_backlog_is_still_offered_later() {
+        let mut controller = Controller::new(120.0, TimeSignature::FOUR_FOUR, true);
+        let backlog = vec![Command::Press(pad(0, 0))];
 
-        compact(&mut queued);
-        assert_eq!(
-            queued,
-            vec![
-                Command::Press(pad),
-                Command::SetClickEnabled(false),
-                Command::SetTempo(free_loop_core::Tempo::new(130.0).unwrap()),
-                Command::Press(pad),
-            ],
-            "both presses, and the tempo it ended on"
+        // Dirty from construction, so there is something to hold back.
+        assert!(settings_to_publish(&mut controller, &backlog).is_none());
+        assert!(settings_to_publish(&mut controller, &backlog).is_none());
+
+        assert!(
+            settings_to_publish(&mut controller, &[]).is_some(),
+            "still on offer once the backlog clears"
         );
-    }
-
-    #[test]
-    fn compacting_keeps_every_action_however_long_the_backlog() {
-        let pad = pad(0, 0);
-        let mut queued: Vec<Command> = (0..500)
-            .map(|i| {
-                if i % 2 == 0 {
-                    Command::SetClickLevel(0.5)
-                } else {
-                    Command::Press(pad)
-                }
-            })
-            .collect();
-
-        compact(&mut queued);
-        let presses = queued
-            .iter()
-            .filter(|command| matches!(command, Command::Press(_)))
-            .count();
-        assert_eq!(presses, 250, "no action was forgotten");
-        assert_eq!(
-            queued
-                .iter()
-                .filter(|command| matches!(command, Command::SetClickLevel(_)))
-                .count(),
-            1,
-            "one level survives the 250 that were sent"
+        assert!(
+            settings_to_publish(&mut controller, &[]).is_none(),
+            "and only offered once"
         );
-    }
-
-    #[test]
-    fn a_backlog_past_the_bound_loses_its_newest() {
-        let pad = pad(0, 0);
-        let mut queued: Vec<Command> = (0..QUEUED_COMMANDS + 3)
-            .map(|_| Command::Press(pad))
-            .collect();
-
-        drop_newest(&mut queued);
-        assert_eq!(queued.len(), QUEUED_COMMANDS, "held to the bound");
-    }
-
-    #[test]
-    fn a_backlog_inside_the_bound_is_left_alone() {
-        let pad = pad(0, 0);
-        let mut queued = vec![Command::Press(pad), Command::Rewind];
-        drop_newest(&mut queued);
-        assert_eq!(queued, vec![Command::Press(pad), Command::Rewind]);
     }
 
     #[test]
