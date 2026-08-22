@@ -18,12 +18,16 @@ use std::time::{Duration, Instant};
 
 use free_loop::config::{self, Config};
 use free_loop::control::{Controller, Request, TextUpdate};
+use free_loop::gui;
 use free_loop_audio::{AudioIo, DeviceChange, DroppedEvents, Negotiated, open};
 use free_loop_core::{Command, Event, TimeSignature, TrackInput};
 use free_loop_engine::{Engine, Housekeeping, Loader, Snapshot};
 use free_loop_session::{SavedClip, SessionData, SessionStore, TrackSettings};
 use free_loop_surface::{ControlSurface, LaunchpadX, Reconnecting, SurfaceEvent};
+use launchpad_emulator_ui::Console;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
 
 /// How often the control loop runs.
 const TICK: Duration = Duration::from_millis(2);
@@ -80,28 +84,41 @@ fn describe_input(input: TrackInput) -> String {
 
 /// Sends traces to stderr at `info`, or whatever `RUST_LOG` asks for. `log_surface`
 /// raises this crate to `debug`, where surface gestures report.
-fn init_tracing(log_surface: bool) {
+fn init_tracing(log_surface: bool, console: Option<Console>) {
+    subscriber(log_surface, console).init();
+}
+
+/// The subscriber [`init_tracing`] installs, logging to the window's pane when there is
+/// a window.
+fn subscriber(
+    log_surface: bool,
+    console: Option<Console>,
+) -> impl tracing::Subscriber + Send + Sync {
     let fallback = if log_surface {
         "info,free_loop=debug"
     } else {
         "info"
     };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(fallback));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
+    // Stderr keeps the traces after the window closes, and outlives it either way.
+    let stderr = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .without_time()
-        .with_target(false)
-        .init();
+        .with_target(false);
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(stderr)
+        .with(console.map(|console| console.layer()))
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let Some(Args { path, log_surface }) = parse_args()? else {
         return Ok(());
     };
-    init_tracing(log_surface);
-
+    // Read before the traces are set up, since it says whether they need a console.
     let config = Config::load(&path)?;
+    let console = config.gui.enabled.then(Console::new);
+    init_tracing(log_surface, console.clone());
     // A missing config falls back to the default devices, which sounds like broken
     // recording rather than like a missing file unless it says so here.
     if path.exists() {
@@ -110,6 +127,46 @@ fn main() -> Result<(), Box<dyn Error>> {
         tracing::info!("config: {} not found, using defaults", path.display());
     }
 
+    let running = Arc::new(AtomicBool::new(true));
+    ctrlc::set_handler({
+        let running = Arc::clone(&running);
+        move || running.store(false, Ordering::Relaxed)
+    })?;
+
+    let Some(console) = console else {
+        return play(&path, &config, None, &running);
+    };
+
+    // The window has to hold the main thread, so the looper takes one of its own. Its
+    // ports go up first, or the surface would spend a retry looking for them.
+    let emulator = gui::open()?;
+    let worker = std::thread::spawn({
+        let (path, config, running) = (path.clone(), config.clone(), Arc::clone(&running));
+        move || {
+            if let Err(error) = play(&path, &config, Some(gui::PORT_NAME), &running) {
+                tracing::error!("{error}");
+            }
+            running.store(false, Ordering::Relaxed);
+        }
+    });
+
+    let shown = gui::run(emulator, console, Arc::clone(&running));
+    running.store(false, Ordering::Relaxed);
+    if worker.join().is_err() {
+        tracing::error!("the looper thread panicked");
+    }
+    shown?;
+    Ok(())
+}
+
+/// Opens the devices and runs the control loop until `running` clears, taking the surface
+/// from the exactly named `port` when one is given.
+fn play(
+    path: &Path,
+    config: &Config,
+    port: Option<&str>,
+    running: &AtomicBool,
+) -> Result<(), Box<dyn Error>> {
     let opened = open(&config.audio())?;
     let negotiated = opened.negotiated();
     tracing::info!("input:  {}", opened.input_name());
@@ -131,7 +188,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?)?;
     let mut io = opened.start(engine)?;
 
-    let mut surface = connect_surface();
+    let mut surface = connect_surface(port);
     let mut controller = Controller::new(
         config.transport.tempo,
         config.time_signature()?,
@@ -159,21 +216,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     tracing::info!("running. ctrl-c to stop.");
 
-    let running = Arc::new(AtomicBool::new(true));
-    ctrlc::set_handler({
-        let running = Arc::clone(&running);
-        move || running.store(false, Ordering::Relaxed)
-    })?;
-
     run(Session {
         io: &mut io,
         surface: surface.as_mut(),
         controller: &mut controller,
         housekeeping: &mut housekeeping,
         store: &store,
-        config: &config,
+        config,
         negotiated,
-        running: &running,
+        running,
     });
 
     // Leaving the grid lit after the process is gone looks like it is still running.
@@ -931,15 +982,23 @@ fn watch_surface(surface: &mut dyn ControlSurface, now: Duration, connected: boo
 /// Connects a Launchpad, and keeps looking for one as long as the process runs.
 ///
 /// A missing pad is not fatal: the click and the audio path still work.
-fn connect_surface() -> Box<dyn ControlSurface> {
-    let surface = Reconnecting::new(LaunchpadX::connect);
+fn connect_surface(port: Option<&str>) -> Box<dyn ControlSurface> {
+    let wanted = port.map(str::to_owned);
+    let surface = Reconnecting::new(move || match &wanted {
+        Some(name) => LaunchpadX::connect_to(name),
+        None => LaunchpadX::connect(),
+    });
     if surface.is_connected() {
-        tracing::info!("surface: Launchpad X");
+        tracing::info!("surface: {}", port.unwrap_or("Launchpad X"));
     } else {
-        tracing::warn!(
-            "surface: no port containing \"{}\", still looking",
-            LaunchpadX::PORT_KEYWORD
-        );
+        if let Some(name) = port {
+            tracing::warn!("surface: no port named \"{name}\", still looking");
+        } else {
+            tracing::warn!(
+                "surface: no port containing \"{}\", still looking",
+                LaunchpadX::PORT_KEYWORD
+            );
+        }
         let ports = free_loop_surface::output_ports();
         if ports.is_empty() {
             tracing::warn!("surface: the host lists no midi outputs at all");
@@ -1319,5 +1378,31 @@ mod tests {
             matches!(outcome, SaveOutcome::Answered(_)),
             "written, not abandoned"
         );
+    }
+    #[test]
+    fn the_window_log_keeps_what_was_reported() {
+        let console = Console::new();
+        let subscriber = subscriber(false, Some(console.clone()));
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("a line for the window");
+            tracing::debug!("below the level asked for");
+        });
+
+        let lines = console.lines().join("\n");
+        assert!(
+            lines.contains("a line for the window"),
+            "the console had {lines:?}"
+        );
+        assert!(
+            !lines.contains("below the level asked for"),
+            "the filter reaches the console too"
+        );
+    }
+
+    #[test]
+    fn a_run_without_a_window_has_nowhere_to_log_but_stderr() {
+        // Building it is the assertion: `None` has to satisfy the same layer types.
+        let _ = subscriber(true, None);
     }
 }
