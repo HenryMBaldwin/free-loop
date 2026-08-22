@@ -2445,7 +2445,7 @@ mod tests {
         let frame = controller.take_frame().unwrap();
         assert_eq!(
             frame.control(FIRST_BEAT_LED),
-            Led::solid(LedColor::Blue),
+            Led::flash(LedColor::White),
             "off the downbeat"
         );
 
@@ -2453,7 +2453,7 @@ mod tests {
         let frame = controller.take_frame().unwrap();
         assert_eq!(
             frame.control(FIRST_BEAT_LED),
-            Led::solid(LedColor::White),
+            Led::solid(LedColor::Red),
             "the downbeat"
         );
     }
