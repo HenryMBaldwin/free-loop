@@ -102,6 +102,18 @@ mod tests {
         assert!(labels.get(side_pad(VOLUME_SIDE)).is_none(), "out of reach");
     }
 
+    fn pad(track: u8, slot: u8) -> free_loop_core::SlotAddr {
+        free_loop_core::SlotAddr::new(TrackId::new(track).unwrap(), SlotId::new(slot).unwrap())
+    }
+
+    #[test]
+    fn a_confirm_screen_names_the_answer_it_wants() {
+        let labels = for_mode(Mode::ConfirmSave(pad(1, 2)));
+        assert_eq!(labels.get(grid_pad(0, 0)), Some("yes"));
+        assert_eq!(labels.get(grid_pad(0, SLOT_COUNT - 1)), Some("no"));
+        assert!(labels.get(grid_pad(3, 3)).is_none(), "no other answer");
+    }
+
     #[test]
     fn a_name_is_only_given_where_a_press_does_something() {
         for mode in [
@@ -115,6 +127,8 @@ mod tests {
             Mode::Subdivision,
             Mode::SavePicker,
             Mode::LoadPicker,
+            Mode::ConfirmSave(pad(0, 0)),
+            Mode::ConfirmLoad(pad(0, 0)),
         ] {
             let labels = for_mode(mode);
             for index in 0..SIDE_COUNT {
