@@ -32,6 +32,9 @@ const MIN_BOARD: f32 = 280.0;
 /// Narrowest the window may be, set by the controls rather than the surface.
 const MIN_WIDTH: f32 = 520.0;
 
+/// Longest the window waits for the looper to darken the surface as it closes.
+const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
+
 /// Publishes the emulated surface's ports, before anything looks for them.
 ///
 /// # Errors
@@ -53,6 +56,7 @@ pub fn run(
     emulator: Emulator<LaunchpadX>,
     console: Console,
     running: Arc<AtomicBool>,
+    stopped: Arc<AtomicBool>,
 ) -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         persist_window: false,
@@ -78,6 +82,7 @@ pub fn run(
                 emulator,
                 console,
                 running,
+                stopped,
                 hardware: false,
                 checked: Instant::now(),
             }))
@@ -92,6 +97,8 @@ struct Window {
     widget: LaunchpadUi,
     console: Console,
     running: Arc<AtomicBool>,
+    /// Set once the looper has stopped and darkened the surface.
+    stopped: Arc<AtomicBool>,
     hardware: bool,
     /// When the hardware was last looked for.
     checked: Instant,
@@ -201,9 +208,19 @@ impl eframe::App for Window {
     }
 }
 
-/// Stops the looper when the window goes away.
+/// Stops the looper when the window goes away, and waits for it.
 impl Drop for Window {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Relaxed);
+        // The looper darkens the surface on its way out, which only reaches attached
+        // hardware while this window still holds the ports it travels through.
+        let deadline = Instant::now() + SHUTDOWN_GRACE;
+        while !self.stopped.load(Ordering::Relaxed) {
+            if Instant::now() >= deadline {
+                tracing::warn!("the looper did not stop in time; the pad may be left lit");
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 }
