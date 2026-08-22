@@ -18,6 +18,6 @@ pub mod snapshot;
 
 pub use click::{Click, ClickConfig};
 pub use engine::{DEFAULT_DECLICK, Engine, EngineConfig, EngineError, EventSink, Housekeeping};
-pub use load::{BeginError, LoadMessage, Loader};
+pub use load::{BeginError, LoadFull, Loader};
 pub use recycle::{Recycler, Retirement};
 pub use snapshot::{Snapshot, SnapshotReader};
