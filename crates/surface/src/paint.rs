@@ -699,7 +699,7 @@ mod tests {
     #[test]
     fn each_row_shows_which_one_is_chosen() {
         let chrome = Chrome {
-            subdivision: Subdivision::Triplet,
+            subdivision: Subdivision::EighthTriplet,
             ..Chrome::default()
         };
         let frame = time_signature(TimeSignature::new(3, 8).unwrap(), chrome);
@@ -711,7 +711,7 @@ mod tests {
         assert_eq!(solid.len(), 3, "one per row, and nothing else");
         assert_eq!(signature_part(solid[0]), Some(SignaturePart::Beats(3)));
         assert_eq!(signature_part(solid[1]), Some(SignaturePart::Unit(8)));
-        assert_eq!(subdivision_at(solid[2]), Some(Subdivision::Triplet));
+        assert_eq!(subdivision_at(solid[2]), Some(Subdivision::EighthTriplet));
     }
 
     #[test]
