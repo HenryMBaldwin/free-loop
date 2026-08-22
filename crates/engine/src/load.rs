@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use free_loop_core::{BarGrid, Frames, SlotAddr};
+use free_loop_core::{BarGrid, Frames, SampleRate, SlotAddr, Tempo, TimeError, TimeSignature};
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 
 use free_loop_clip::Clip;
@@ -14,13 +14,26 @@ use free_loop_clip::Clip;
 /// Messages in flight before the engine drains any. One per pad plus the two markers.
 const SLOTS: usize = 80;
 
+/// A grid the engine can measure, at the engine's own sample rate.
+///
+/// Only [`Loader::grid`] builds one, so neither invariant can be sidestepped by a caller.
+#[derive(Debug, Clone, Copy)]
+pub struct LoadGrid(BarGrid);
+
+impl LoadGrid {
+    /// The grid itself.
+    pub fn get(self) -> BarGrid {
+        self.0
+    }
+}
+
 /// One step of a load.
 #[derive(Debug)]
 pub enum LoadMessage {
     /// Empty the grid and take the session's musical time.
     Begin {
-        /// The session's grid. Only exists if the engine can measure it.
-        grid: BarGrid,
+        /// The session's grid.
+        grid: LoadGrid,
     },
     /// Put a clip on a pad.
     Clip {
@@ -46,9 +59,24 @@ pub struct LoadFull(pub LoadMessage);
 #[derive(Debug)]
 pub struct Loader {
     out: Producer<LoadMessage>,
+    /// The rate the engine runs at, which every grid it is sent has to share.
+    sample_rate: SampleRate,
 }
 
 impl Loader {
+    /// Builds a grid for the engine this loader feeds.
+    ///
+    /// # Errors
+    ///
+    /// [`TimeError`] if the engine could not measure a bar of this musical time.
+    pub fn grid(&self, tempo: Tempo, time_signature: TimeSignature) -> Result<LoadGrid, TimeError> {
+        Ok(LoadGrid(BarGrid::new(
+            self.sample_rate,
+            tempo,
+            time_signature,
+        )?))
+    }
+
     /// Queues one step.
     ///
     /// # Errors
@@ -90,9 +118,9 @@ impl LoadInbox {
 }
 
 /// Builds both sides.
-pub fn channel() -> (Loader, LoadInbox) {
+pub fn channel(sample_rate: SampleRate) -> (Loader, LoadInbox) {
     let (out, inbox) = RingBuffer::new(SLOTS);
-    (Loader { out }, LoadInbox { inbox })
+    (Loader { out, sample_rate }, LoadInbox { inbox })
 }
 
 #[cfg(test)]
@@ -107,23 +135,40 @@ mod tests {
         Arc::new(Clip::new(AudioBuffer::new(1, 2), Frames(64), Frames(0), 2))
     }
 
+    fn rate() -> SampleRate {
+        SampleRate::new(48_000).unwrap()
+    }
+
+    #[test]
+    fn a_grid_carries_the_rate_the_engine_runs_at() {
+        let (loader, _inbox) = channel(rate());
+        let grid = loader
+            .grid(Tempo::new(120.0).unwrap(), TimeSignature::FOUR_FOUR)
+            .unwrap();
+        assert_eq!(grid.get().sample_rate(), rate(), "not the caller's choice");
+
+        // Unmeasurable musical time is refused here, before anything is queued.
+        assert!(
+            loader
+                .grid(
+                    Tempo::new(free_loop_core::MIN_BPM).unwrap(),
+                    TimeSignature::new(u32::MAX, 2).unwrap(),
+                )
+                .is_err()
+        );
+    }
+
     fn addr(track: u8, slot: u8) -> SlotAddr {
         SlotAddr::new(TrackId::new(track).unwrap(), SlotId::new(slot).unwrap())
     }
 
     #[test]
     fn messages_arrive_in_the_order_they_were_sent() {
-        let (mut loader, mut inbox) = channel();
-        loader
-            .send(LoadMessage::Begin {
-                grid: BarGrid::new(
-                    SampleRate::new(48_000).unwrap(),
-                    Tempo::new(120.0).unwrap(),
-                    TimeSignature::FOUR_FOUR,
-                )
-                .unwrap(),
-            })
+        let (mut loader, mut inbox) = channel(rate());
+        let grid = loader
+            .grid(Tempo::new(120.0).unwrap(), TimeSignature::FOUR_FOUR)
             .unwrap();
+        loader.send(LoadMessage::Begin { grid }).unwrap();
         loader
             .send(LoadMessage::Clip {
                 addr: addr(1, 2),
@@ -147,7 +192,7 @@ mod tests {
 
     #[test]
     fn a_full_queue_hands_the_message_back() {
-        let (mut loader, _inbox) = channel();
+        let (mut loader, _inbox) = channel(rate());
         for _ in 0..SLOTS {
             loader.send(LoadMessage::End).unwrap();
         }
@@ -157,7 +202,7 @@ mod tests {
 
     #[test]
     fn a_drained_queue_has_room_for_a_whole_session() {
-        let (mut loader, mut inbox) = channel();
+        let (mut loader, mut inbox) = channel(rate());
         loader.send(LoadMessage::End).unwrap();
         assert!(!loader.ready());
 

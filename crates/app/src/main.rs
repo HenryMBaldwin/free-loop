@@ -24,6 +24,9 @@ use free_loop_engine::{Engine, Housekeeping, LoadMessage, Loader, Snapshot};
 use free_loop_session::{SavedClip, SessionData, SessionStore, TrackSettings};
 use free_loop_surface::{ControlSurface, LaunchpadX, Reconnecting, SurfaceEvent};
 
+/// Commands held for an engine that is not draining them. Beyond this the oldest go.
+const QUEUED_COMMANDS: usize = 256;
+
 /// How often the control loop runs.
 const TICK: Duration = Duration::from_millis(2);
 
@@ -208,8 +211,8 @@ fn run(s: Session<'_>) {
     let mut missed_reports = DroppedEvents::default();
     // Clock ticks the device has had, against the running total the engine reports.
     let mut clock_sent = 0_u64;
-    // A command the engine never received, waiting for room to ask it to report again.
-    let mut owed_resync = false;
+    // Commands the engine had no room for, sent again before anything newer.
+    let mut queued: Vec<Command> = Vec::new();
 
     while running.load(Ordering::Relaxed) {
         let now = started.elapsed();
@@ -259,10 +262,9 @@ fn run(s: Session<'_>) {
         if let Some(settings) = controller.take_settings() {
             io.publish_settings(settings);
         }
-        owed_resync |= send_commands(io, controller);
-        if owed_resync && io.send(Command::Resync).is_ok() {
-            owed_resync = false;
-        }
+        queued.extend(controller.drain_commands());
+        send_commands(&mut queued, |command| io.send(command).is_ok());
+        drop_oldest(&mut queued);
 
         let drained = drain_engine(io, controller, now);
         let Drained {
@@ -688,13 +690,9 @@ fn load(
     let time_signature =
         free_loop_core::TimeSignature::new(manifest.beats_per_bar, manifest.beat_unit)?;
     let tempo = free_loop_core::Tempo::new(manifest.tempo)?;
-    // The engine takes the grid itself, so an unmeasurable one is refused before any
-    // clip is read.
-    let grid = free_loop_core::BarGrid::new(
-        free_loop_core::SampleRate::new(negotiated.sample_rate)?,
-        tempo,
-        time_signature,
-    )?;
+    // Built by the loader, so it carries the engine's own rate and an unmeasurable one is
+    // refused before any clip is read.
+    let grid = loader.grid(tempo, time_signature)?;
 
     let session = checked.materialise()?;
     let restored = Restored {
@@ -830,19 +828,23 @@ fn resync_after_loss(io: &mut AudioIo, seen: DroppedEvents) -> DroppedEvents {
     dropped
 }
 
-/// Hands the queued commands over. `true` if the engine missed one.
-///
-/// A command the engine never saw leaves the controller showing state the engine does not
-/// have, which only the engine can settle.
-fn send_commands(io: &mut AudioIo, controller: &mut Controller) -> bool {
-    let mut lost = false;
-    for command in controller.drain_commands() {
-        if io.send(command).is_err() {
-            eprintln!("audio thread is not keeping up; dropped {command:?}");
-            lost = true;
-        }
+/// Forgets the oldest commands once too many are waiting for an engine not taking them.
+fn drop_oldest(queued: &mut Vec<Command>) {
+    if queued.len() <= QUEUED_COMMANDS {
+        return;
     }
-    lost
+    let over = queued.len() - QUEUED_COMMANDS;
+    eprintln!("audio thread is not keeping up; dropped {over} commands");
+    queued.drain(..over);
+}
+
+/// Hands `queued` over in order, keeping whatever there was no room for.
+///
+/// Order is kept: a press toggles, so anything behind a command that did not fit waits for
+/// it. `send` reports whether the engine took the command.
+fn send_commands(queued: &mut Vec<Command>, mut send: impl FnMut(Command) -> bool) {
+    let taken = queued.iter().take_while(|queued| send(**queued)).count();
+    queued.drain(..taken);
 }
 
 /// Whether asking the engine again would put any of what was lost right.
@@ -1002,6 +1004,57 @@ mod tests {
             describe_input(TrackInput::Pair(0, 1)),
             "input channels 0 and 1"
         );
+    }
+
+    #[test]
+    fn a_command_the_engine_had_no_room_for_is_sent_again() {
+        let pad = pad(1, 2);
+        let mut queued = vec![
+            Command::Press(pad),
+            Command::SetClickEnabled(false),
+            Command::SetPaused(true),
+        ];
+
+        // Room for the first only.
+        let mut room = 1;
+        let mut taken = Vec::new();
+        send_commands(&mut queued, |command| {
+            if room == 0 {
+                return false;
+            }
+            room -= 1;
+            taken.push(command);
+            true
+        });
+        assert_eq!(taken, vec![Command::Press(pad)]);
+        assert_eq!(
+            queued,
+            vec![Command::SetClickEnabled(false), Command::SetPaused(true)],
+            "the rest wait rather than being dropped"
+        );
+
+        // Room for the rest, in the order they were made.
+        let mut rest = Vec::new();
+        send_commands(&mut queued, |command| {
+            rest.push(command);
+            true
+        });
+        assert_eq!(
+            rest,
+            vec![Command::SetClickEnabled(false), Command::SetPaused(true)]
+        );
+        assert!(queued.is_empty());
+    }
+
+    #[test]
+    fn nothing_overtakes_a_command_that_did_not_fit() {
+        let pad = pad(0, 0);
+        let mut queued = vec![Command::Press(pad), Command::Press(pad)];
+
+        // The first press is refused, so the second must not be applied on its own: two
+        // presses are a record and a stop, one is a take left running.
+        send_commands(&mut queued, |_| false);
+        assert_eq!(queued.len(), 2, "both still waiting");
     }
 
     #[test]

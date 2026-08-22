@@ -515,7 +515,7 @@ impl Engine {
 
         let (retirement, recycler) = channel();
         let (snapshots, snapshot_reader) = crate::snapshot::channel();
-        let (loader, loads) = crate::load::channel();
+        let (loader, loads) = crate::load::channel(config.sample_rate);
         let shells = (0..TRACK_COUNT * SLOT_COUNT)
             .map(|_| Arc::new(Clip::empty(max_segments, config.channels)))
             .collect();
@@ -848,7 +848,7 @@ impl Engine {
                     // Anything staged belongs to a load that never finished arriving.
                     audio.staged.abandon(&mut audio.retirement);
                     audio.staged.receiving = true;
-                    audio.staged.grid = Some(grid);
+                    audio.staged.grid = Some(grid.get());
                 }
                 LoadMessage::Clip {
                     addr,
