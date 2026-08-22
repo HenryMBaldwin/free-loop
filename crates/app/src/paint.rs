@@ -9,8 +9,7 @@ use free_loop_core::{
     Subdivision, TRACK_COUNT, TimeSignature, TrackInput, UNITY_STEP, pad_bit,
 };
 
-use crate::event::Control;
-use crate::led::{FIRST_BEAT_LED, Led, LedColor, LedFrame, LedStyle, SHADES};
+use free_loop_surface::{Control, FIRST_BEAT_LED, Led, LedColor, LedFrame, LedStyle, SHADES};
 
 /// Surface state that does not come from the session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -570,7 +569,7 @@ mod tests {
     use super::*;
     use free_loop_core::{ClipId, Frames, SlotId, TrackId, row_mask};
 
-    use crate::led::LedStyle;
+    use free_loop_surface::LedStyle;
 
     fn bit(addr: SlotAddr) -> u64 {
         1 << (addr.track.index() * SLOT_COUNT + addr.slot.index())
@@ -1253,7 +1252,7 @@ mod tests {
 
     #[test]
     fn the_unbound_side_buttons_stay_dark() {
-        use crate::led::SIDE_COUNT;
+        use free_loop_surface::SIDE_COUNT;
 
         let painted = frame(&SessionModel::new(), Chrome::default());
         let bound = [

@@ -1,9 +1,10 @@
 //! What each button does, for the on-screen surface to name.
 
 use free_loop_core::{SLOT_COUNT, TRACK_COUNT};
-use free_loop_surface::{
-    Control, INPUT_SIDE, MUTE_SIDE, NEW_SIDE, PAUSE_SIDE, SETTINGS_SIDE, SIDE_COUNT, SOLO_SIDE,
-    VOLUME_SIDE,
+use free_loop_surface::{Control, SIDE_COUNT};
+
+use crate::paint::{
+    INPUT_SIDE, MUTE_SIDE, NEW_SIDE, PAUSE_SIDE, SETTINGS_SIDE, SOLO_SIDE, VOLUME_SIDE,
 };
 use launchpad_emulator::Pad;
 use launchpad_emulator_ui::Labels;
