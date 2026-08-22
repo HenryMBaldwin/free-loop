@@ -125,8 +125,7 @@ impl Tempo {
     }
 }
 
-/// A time signature. The grid math is generic, though only
-/// [`TimeSignature::FOUR_FOUR`] is used today.
+/// A time signature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TimeSignature {
     beats_per_bar: u32,
@@ -206,35 +205,54 @@ impl Subdivision {
         Self::Sixteenth,
     ];
 
-    /// Clicks per beat, as a numerator over a denominator.
-    pub fn clicks_per_beat(self) -> (u32, u32) {
+    /// How many of these fit in a whole note. The note value the name reads as.
+    pub fn per_whole_note(self) -> u32 {
         match self {
-            Self::Whole => (1, 4),
-            Self::Half => (1, 2),
-            Self::HalfTriplet => (3, 4),
-            Self::Quarter => (1, 1),
-            Self::QuarterTriplet => (3, 2),
-            Self::Eighth => (2, 1),
-            Self::EighthTriplet => (3, 1),
-            Self::Sixteenth => (4, 1),
+            Self::Whole => 1,
+            Self::Half => 2,
+            Self::HalfTriplet => 3,
+            Self::Quarter => 4,
+            Self::QuarterTriplet => 6,
+            Self::Eighth => 8,
+            Self::EighthTriplet => 12,
+            Self::Sixteenth => 16,
         }
     }
 
     /// Clicks the bar is cut into, never fewer than one.
     ///
-    /// A rate that does not divide the bar evenly is rounded down to one that does, so the
-    /// clicks stay evenly spaced and the bar line always carries one.
-    pub fn clicks_per_bar(self, beats_per_bar: u32) -> u32 {
-        let (num, den) = self.clicks_per_beat();
-        (beats_per_bar.saturating_mul(num) / den).max(1)
+    /// A bar holds `beats_per_bar / beat_unit` whole notes, so the denominator counts as
+    /// much as the numerator. A rate that does not divide the bar evenly is rounded down to
+    /// one that does.
+    pub fn clicks_per_bar(self, signature: TimeSignature) -> u32 {
+        let notes = self
+            .per_whole_note()
+            .saturating_mul(signature.beats_per_bar());
+        (notes / signature.beat_unit()).max(1)
     }
 
-    /// Whether this rate divides a bar of `beats_per_bar` exactly.
+    /// Whether notes of this value tile the bar exactly.
+    pub fn fits(self, signature: TimeSignature) -> bool {
+        let notes = self
+            .per_whole_note()
+            .saturating_mul(signature.beats_per_bar());
+        notes.is_multiple_of(signature.beat_unit())
+    }
+
+    /// The rate that sounds once a beat, which always tiles the bar.
     ///
-    /// [`Self::Quarter`] fits every bar, so there is always one to fall back to.
-    pub fn fits(self, beats_per_bar: u32) -> bool {
-        let (num, den) = self.clicks_per_beat();
-        beats_per_bar.saturating_mul(num) % den == 0
+    /// `None` for a beat unit finer than the coarsest rate offered.
+    pub fn on_the_beat(signature: TimeSignature) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|rate| rate.per_whole_note() == signature.beat_unit())
+    }
+
+    /// A rate that tiles this bar, one click a beat where that is offered.
+    pub fn fitting(signature: TimeSignature) -> Self {
+        Self::on_the_beat(signature)
+            .or_else(|| Self::ALL.into_iter().find(|rate| rate.fits(signature)))
+            .unwrap_or(Self::Quarter)
     }
 
     /// How it reads on a display.
@@ -492,13 +510,9 @@ mod tests {
 
     #[test]
     fn every_subdivision_reads_faster_than_the_one_before() {
-        let rate = |s: Subdivision| {
-            let (num, den) = s.clicks_per_beat();
-            f64::from(num) / f64::from(den)
-        };
         for pair in Subdivision::ALL.windows(2) {
             assert!(
-                rate(pair[0]) < rate(pair[1]),
+                pair[0].per_whole_note() < pair[1].per_whole_note(),
                 "{:?} should be slower than {:?}",
                 pair[0],
                 pair[1]
@@ -508,32 +522,84 @@ mod tests {
 
     #[test]
     fn common_time_gives_every_subdivision_its_textbook_count() {
-        for (subdivision, per_bar) in [
-            (Subdivision::Whole, 1),
-            (Subdivision::Half, 2),
-            (Subdivision::HalfTriplet, 3),
-            (Subdivision::Quarter, 4),
-            (Subdivision::QuarterTriplet, 6),
-            (Subdivision::Eighth, 8),
-            (Subdivision::EighthTriplet, 12),
-            (Subdivision::Sixteenth, 16),
-        ] {
-            assert_eq!(subdivision.clicks_per_bar(4), per_bar, "{subdivision:?}");
+        // A 4/4 bar is one whole note, so the count is the note value itself.
+        for subdivision in Subdivision::ALL {
+            assert_eq!(
+                subdivision.clicks_per_bar(TimeSignature::FOUR_FOUR),
+                subdivision.per_whole_note(),
+                "{subdivision:?}"
+            );
         }
     }
 
     #[test]
-    fn a_quarter_fits_every_bar_there_is() {
-        for beats in 1..=32 {
-            assert!(Subdivision::Quarter.fits(beats), "{beats} beats");
+    fn the_denominator_counts_as_much_as_the_numerator() {
+        let six_eight = TimeSignature::new(6, 8).unwrap();
+        // Six eighth notes to the bar is three quarter notes, not six.
+        assert_eq!(Subdivision::Quarter.clicks_per_bar(six_eight), 3);
+        assert_eq!(Subdivision::Eighth.clicks_per_bar(six_eight), 6);
+        assert_eq!(Subdivision::Sixteenth.clicks_per_bar(six_eight), 12);
+
+        // The same bar length written in quarters gives the same clicks.
+        let three_four = TimeSignature::new(3, 4).unwrap();
+        for subdivision in Subdivision::ALL {
+            assert_eq!(
+                subdivision.clicks_per_bar(three_four),
+                subdivision.clicks_per_bar(six_eight),
+                "{subdivision:?} in 3/4 against 6/8"
+            );
         }
     }
 
     #[test]
-    fn what_fits_is_what_divides_the_bar_exactly() {
-        // Three beats take neither a two nor a four beat grouping.
-        let fitting: Vec<Subdivision> =
-            Subdivision::ALL.into_iter().filter(|s| s.fits(3)).collect();
+    fn a_structurally_valid_signature_can_still_be_unmeasurable() {
+        let rate = SampleRate::new(48_000).unwrap();
+        let slow = Tempo::new(MIN_BPM).unwrap();
+
+        // A power-of-two denominator, so the signature itself is accepted.
+        let huge = TimeSignature::new(u32::MAX, 2).unwrap();
+        assert_eq!(
+            BarGrid::new(rate, slow, huge),
+            Err(TimeError::BarLengthUnrepresentable),
+            "a bar this long has no frame count"
+        );
+
+        // The same numerator against a fine unit is measurable.
+        assert!(BarGrid::new(rate, slow, TimeSignature::new(7, 8).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn there_is_always_a_rate_that_fits() {
+        for beats in 1..=16 {
+            for unit in [2, 4, 8, 16] {
+                let signature = TimeSignature::new(beats, unit).unwrap();
+                let fitting = Subdivision::fitting(signature);
+                assert!(fitting.fits(signature), "{beats}/{unit} gave {fitting:?}");
+
+                // One click a beat, so the count is the beats themselves.
+                assert_eq!(
+                    fitting.clicks_per_bar(signature),
+                    beats,
+                    "{beats}/{unit} should click once a beat"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_quarter_does_not_tile_an_eighth_note_bar() {
+        let three_eight = TimeSignature::new(3, 8).unwrap();
+        assert!(!Subdivision::Quarter.fits(three_eight));
+        assert_eq!(Subdivision::fitting(three_eight), Subdivision::Eighth);
+    }
+
+    #[test]
+    fn what_fits_is_what_tiles_the_bar_exactly() {
+        let three_four = TimeSignature::new(3, 4).unwrap();
+        let fitting: Vec<Subdivision> = Subdivision::ALL
+            .into_iter()
+            .filter(|s| s.fits(three_four))
+            .collect();
         assert_eq!(
             fitting,
             vec![
@@ -544,15 +610,24 @@ mod tests {
             ]
         );
 
-        // Common time takes all of them.
-        assert!(Subdivision::ALL.into_iter().all(|s| s.fits(4)));
+        assert!(
+            Subdivision::ALL
+                .into_iter()
+                .all(|s| s.fits(TimeSignature::FOUR_FOUR))
+        );
 
+        // Whatever fits divides the bar with nothing left over.
         for subdivision in Subdivision::ALL {
             for beats in 1..=16 {
-                if subdivision.fits(beats) {
-                    let per_bar = subdivision.clicks_per_bar(beats);
-                    let (num, den) = subdivision.clicks_per_beat();
-                    assert_eq!(per_bar * den, beats * num, "{subdivision:?} in {beats}");
+                for unit in [2, 4, 8, 16] {
+                    let signature = TimeSignature::new(beats, unit).unwrap();
+                    if subdivision.fits(signature) {
+                        assert_eq!(
+                            subdivision.clicks_per_bar(signature) * unit,
+                            subdivision.per_whole_note() * beats,
+                            "{subdivision:?} in {beats}/{unit}"
+                        );
+                    }
                 }
             }
         }
@@ -562,7 +637,13 @@ mod tests {
     fn a_bar_always_carries_at_least_one_click() {
         for subdivision in Subdivision::ALL {
             for beats in 1..=16 {
-                assert!(subdivision.clicks_per_bar(beats) >= 1, "{subdivision:?}");
+                for unit in [2, 4, 8, 16] {
+                    let signature = TimeSignature::new(beats, unit).unwrap();
+                    assert!(
+                        subdivision.clicks_per_bar(signature) >= 1,
+                        "{subdivision:?}"
+                    );
+                }
             }
         }
     }
