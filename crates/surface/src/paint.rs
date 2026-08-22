@@ -234,27 +234,55 @@ pub fn beat_indicator(frame: &mut LedFrame, chrome: Chrome) {
     frame.set_control(FIRST_BEAT_LED, led);
 }
 
-/// Beat units the signature page offers, one per row.
+/// Beat units the signature page offers, left to right.
 pub const BEAT_UNITS: [u32; 4] = [2, 4, 8, 16];
 
-/// The signature a pad stands for: row picks the beat unit, column the beats to the bar.
-pub fn signature_at(addr: SlotAddr) -> Option<TimeSignature> {
-    let unit = *BEAT_UNITS.get(addr.track.index())?;
-    let beats = u32::try_from(addr.slot.index()).ok()? + 1;
-    TimeSignature::new(beats, unit).ok()
+/// Grid row picking the beats in a bar, the signature's top number.
+pub const BEATS_ROW: usize = 2;
+
+/// Grid row picking the note that gets the beat, the signature's bottom number.
+pub const UNIT_ROW: usize = 5;
+
+/// Colour of the row picking the beats in a bar.
+pub const BEATS: LedColor = LedColor::Amber;
+
+/// Colour of the row picking the note that gets the beat.
+pub const UNIT: LedColor = LedColor::Blue;
+
+/// Which number of a time signature a pad on the signature page changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignaturePart {
+    /// Beats in a bar.
+    Beats(u32),
+    /// Note that gets the beat.
+    Unit(u32),
 }
 
-/// Paints every signature the page offers, with the one in use standing out.
+/// What a pad on the signature page changes, if it changes anything.
+pub fn signature_part(addr: SlotAddr) -> Option<SignaturePart> {
+    let column = addr.slot.index();
+    match addr.track.index() {
+        BEATS_ROW => Some(SignaturePart::Beats(u32::try_from(column).ok()? + 1)),
+        UNIT_ROW => BEAT_UNITS.get(column).copied().map(SignaturePart::Unit),
+        _ => None,
+    }
+}
+
+/// Paints both numbers of `current`, each row's chosen value standing out.
 pub fn time_signature(current: TimeSignature, chrome: Chrome) -> LedFrame {
     let mut frame = LedFrame::new();
     for addr in SlotAddr::all() {
-        let Some(signature) = signature_at(addr) else {
+        let Some(part) = signature_part(addr) else {
             continue;
         };
-        let led = if signature == current {
-            Led::solid(SELECTED)
+        let (color, chosen) = match part {
+            SignaturePart::Beats(beats) => (BEATS, beats == current.beats_per_bar()),
+            SignaturePart::Unit(unit) => (UNIT, unit == current.beat_unit()),
+        };
+        let led = if chosen {
+            Led::solid(color)
         } else {
-            Led::dim(SETTING)
+            Led::dim(color)
         };
         frame.set_pad(addr, led);
     }
@@ -612,43 +640,44 @@ mod tests {
     }
 
     #[test]
-    fn the_signature_page_offers_every_valid_choice_and_nothing_else() {
-        let current = TimeSignature::FOUR_FOUR;
-        let frame = time_signature(current, Chrome::default());
+    fn the_signature_page_offers_one_row_per_number() {
+        let frame = time_signature(TimeSignature::FOUR_FOUR, Chrome::default());
 
         for addr in SlotAddr::all() {
             let row = addr.track.index();
             let column = addr.slot.index();
-            if let Some(signature) = signature_at(addr) {
-                assert_eq!(signature.beat_unit(), BEAT_UNITS[row], "row {row}");
-                assert_eq!(
-                    signature.beats_per_bar(),
-                    u32::try_from(column).unwrap() + 1,
-                    "column {column}"
-                );
-                assert!(frame.pad(addr).is_lit(), "{row},{column} should offer one");
-            } else {
-                assert!(
-                    row >= BEAT_UNITS.len(),
-                    "only rows past the units are blank"
-                );
-                assert!(!frame.pad(addr).is_lit(), "{row},{column} offers nothing");
+            match signature_part(addr) {
+                Some(SignaturePart::Beats(beats)) => {
+                    assert_eq!(row, BEATS_ROW);
+                    assert_eq!(beats, u32::try_from(column).unwrap() + 1);
+                    assert_eq!(frame.pad(addr).color, BEATS, "top number is one colour");
+                }
+                Some(SignaturePart::Unit(unit)) => {
+                    assert_eq!(row, UNIT_ROW);
+                    assert_eq!(unit, BEAT_UNITS[column]);
+                    assert_eq!(frame.pad(addr).color, UNIT, "bottom number another");
+                }
+                None => assert!(!frame.pad(addr).is_lit(), "{row},{column} means nothing"),
             }
         }
+        assert_ne!(BEATS, UNIT, "the two rows have to be told apart");
+        const { assert!(BEATS_ROW < UNIT_ROW, "top number above the bottom one") }
     }
 
     #[test]
-    fn the_signature_in_use_stands_out_from_the_rest() {
-        let current = TimeSignature::new(3, 8).unwrap();
-        let frame = time_signature(current, Chrome::default());
+    fn each_row_shows_which_number_is_chosen() {
+        let frame = time_signature(TimeSignature::new(3, 8).unwrap(), Chrome::default());
 
-        let mut standing_out = Vec::new();
-        for addr in SlotAddr::all() {
-            if frame.pad(addr) == Led::solid(SELECTED) {
-                standing_out.push(signature_at(addr));
-            }
-        }
-        assert_eq!(standing_out, vec![Some(current)], "exactly the one in use");
+        let solid: Vec<Option<SignaturePart>> = SlotAddr::all()
+            .filter(|addr| frame.pad(*addr).style == LedStyle::Solid)
+            .filter(|addr| frame.pad(*addr).is_lit())
+            .map(signature_part)
+            .collect();
+        assert_eq!(
+            solid,
+            vec![Some(SignaturePart::Beats(3)), Some(SignaturePart::Unit(8))],
+            "one per row, and nothing else"
+        );
     }
 
     #[test]
