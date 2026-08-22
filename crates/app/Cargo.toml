@@ -19,11 +19,14 @@ path = "src/main.rs"
 
 [dependencies]
 ctrlc.workspace = true
+eframe.workspace = true
 free-loop-audio.workspace = true
 free-loop-core.workspace = true
 free-loop-engine.workspace = true
 free-loop-session.workspace = true
 free-loop-surface.workspace = true
+launchpad-emulator.workspace = true
+launchpad-emulator-ui.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true
