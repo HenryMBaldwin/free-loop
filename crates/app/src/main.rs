@@ -128,6 +128,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     controller.set_input_count(negotiated.capture_channels);
     controller.set_default_input(input);
     controller.set_default_launch_mode(config.launch_mode());
+    controller.set_default_time_signature(config.time_signature()?);
     controller.set_inputs([input; free_loop_core::TRACK_COUNT]);
     controller.set_launch_modes([config.launch_mode(); free_loop_core::TRACK_COUNT]);
 
@@ -933,6 +934,9 @@ fn report(event: Event) {
             eprintln!("session needs {wanted} segments but the pool holds {allowed}");
         }
         Event::TempoRejected => eprintln!("tempo is locked while clips exist"),
+        Event::TimeSignatureRejected => {
+            eprintln!("the time signature is locked while clips exist");
+        }
         // Clipping and short capture report per block, too often to print. `ClipReport`
         // and `XrunReport` throttle them. The tempo reports on every nudge, which a held
         // button repeats eight times a second; the controller wants it, a reader does not.

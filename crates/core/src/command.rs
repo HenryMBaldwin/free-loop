@@ -3,7 +3,7 @@
 //! Only instructions whose effect depends on when they arrive.
 
 use crate::ids::{SlotAddr, TrackId};
-use crate::time::Tempo;
+use crate::time::{Tempo, TimeSignature};
 
 /// An instruction for the realtime side.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -39,4 +39,7 @@ pub enum Command {
     /// Change the tempo. Rejected once any clip exists, with
     /// [`crate::event::Event::TempoRejected`].
     SetTempo(Tempo),
+    /// Change the time signature. Rejected once any clip exists, with
+    /// [`crate::event::Event::TimeSignatureRejected`].
+    SetTimeSignature(TimeSignature),
 }

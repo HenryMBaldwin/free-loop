@@ -6,7 +6,7 @@ use core::cmp::Ordering;
 
 use free_loop_core::{
     LaunchMode, MAX_BPM, MIN_BPM, PadMask, SLOT_COUNT, SessionModel, SlotAddr, SlotState,
-    TRACK_COUNT, TrackInput, UNITY_STEP, pad_bit,
+    TRACK_COUNT, TimeSignature, TrackInput, UNITY_STEP, pad_bit,
 };
 
 use crate::event::Control;
@@ -232,6 +232,34 @@ pub fn beat_indicator(frame: &mut LedFrame, chrome: Chrome) {
         Led::solid(LedColor::White)
     };
     frame.set_control(FIRST_BEAT_LED, led);
+}
+
+/// Beat units the signature page offers, one per row.
+pub const BEAT_UNITS: [u32; 4] = [2, 4, 8, 16];
+
+/// The signature a pad stands for: row picks the beat unit, column the beats to the bar.
+pub fn signature_at(addr: SlotAddr) -> Option<TimeSignature> {
+    let unit = *BEAT_UNITS.get(addr.track.index())?;
+    let beats = u32::try_from(addr.slot.index()).ok()? + 1;
+    TimeSignature::new(beats, unit).ok()
+}
+
+/// Paints every signature the page offers, with the one in use standing out.
+pub fn time_signature(current: TimeSignature, chrome: Chrome) -> LedFrame {
+    let mut frame = LedFrame::new();
+    for addr in SlotAddr::all() {
+        let Some(signature) = signature_at(addr) else {
+            continue;
+        };
+        let led = if signature == current {
+            Led::solid(SELECTED)
+        } else {
+            Led::dim(SETTING)
+        };
+        frame.set_pad(addr, led);
+    }
+    finish(&mut frame, chrome);
+    frame
 }
 
 /// Paints the tempo as a fill across the grid, spanning [`MIN_BPM`] to [`MAX_BPM`].
@@ -581,6 +609,46 @@ mod tests {
         for beat in 1..7 {
             assert_eq!(paint(beat), Led::solid(LedColor::White), "beat {beat}");
         }
+    }
+
+    #[test]
+    fn the_signature_page_offers_every_valid_choice_and_nothing_else() {
+        let current = TimeSignature::FOUR_FOUR;
+        let frame = time_signature(current, Chrome::default());
+
+        for addr in SlotAddr::all() {
+            let row = addr.track.index();
+            let column = addr.slot.index();
+            if let Some(signature) = signature_at(addr) {
+                assert_eq!(signature.beat_unit(), BEAT_UNITS[row], "row {row}");
+                assert_eq!(
+                    signature.beats_per_bar(),
+                    u32::try_from(column).unwrap() + 1,
+                    "column {column}"
+                );
+                assert!(frame.pad(addr).is_lit(), "{row},{column} should offer one");
+            } else {
+                assert!(
+                    row >= BEAT_UNITS.len(),
+                    "only rows past the units are blank"
+                );
+                assert!(!frame.pad(addr).is_lit(), "{row},{column} offers nothing");
+            }
+        }
+    }
+
+    #[test]
+    fn the_signature_in_use_stands_out_from_the_rest() {
+        let current = TimeSignature::new(3, 8).unwrap();
+        let frame = time_signature(current, Chrome::default());
+
+        let mut standing_out = Vec::new();
+        for addr in SlotAddr::all() {
+            if frame.pad(addr) == Led::solid(SELECTED) {
+                standing_out.push(signature_at(addr));
+            }
+        }
+        assert_eq!(standing_out, vec![Some(current)], "exactly the one in use");
     }
 
     #[test]
