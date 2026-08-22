@@ -247,12 +247,18 @@ pub const BEATS_ROW: usize = 0;
 pub const UNIT_ROW: usize = 2;
 
 /// Grid row picking how often the click sounds.
-pub const SUBDIVISION_ROW: usize = 5;
+pub const SUBDIVISION_ROW: usize = 0;
 
 /// Colour the signature page is shown in.
 pub const SIGNATURE: LedColor = LedColor::Blue;
 
-/// The click subdivision a pad on the signature page picks, if it picks one.
+/// Colour the click's own page is shown in, matching its button.
+pub const CLICK: LedColor = LedColor::Blue;
+
+/// Colour of a rate the current bar cannot be cut into.
+pub const UNAVAILABLE: LedColor = LedColor::White;
+
+/// The click subdivision a pad picks, if it picks one.
 pub fn subdivision_at(addr: SlotAddr) -> Option<Subdivision> {
     if addr.track.index() != SUBDIVISION_ROW {
         return None;
@@ -298,18 +304,28 @@ pub fn time_signature(current: TimeSignature, chrome: Chrome) -> LedFrame {
         frame.set_pad(addr, led);
     }
 
+    finish(&mut frame, chrome);
+    frame
+}
+
+/// Paints how often the click sounds, slowest on the left.
+///
+/// A rate the bar cannot be cut into evenly is greyed out.
+pub fn subdivisions(chrome: Chrome) -> LedFrame {
+    let mut frame = LedFrame::new();
     for addr in SlotAddr::all() {
         let Some(subdivision) = subdivision_at(addr) else {
             continue;
         };
-        let led = if subdivision == chrome.subdivision {
-            Led::solid(SIGNATURE)
+        let led = if !subdivision.fits(chrome.beats_per_bar) {
+            Led::dim(UNAVAILABLE)
+        } else if subdivision == chrome.subdivision {
+            Led::solid(CLICK)
         } else {
-            Led::dim(SIGNATURE)
+            Led::dim(CLICK)
         };
         frame.set_pad(addr, led);
     }
-
     finish(&mut frame, chrome);
     frame
 }
@@ -664,54 +680,92 @@ mod tests {
     }
 
     #[test]
-    fn the_signature_page_offers_one_row_per_thing_it_sets() {
+    fn the_signature_page_offers_one_row_per_number() {
         let frame = time_signature(TimeSignature::FOUR_FOUR, Chrome::default());
 
         for addr in SlotAddr::all() {
             let row = addr.track.index();
             let column = addr.slot.index();
-            if let Some(part) = signature_part(addr) {
-                match part {
-                    SignaturePart::Beats(beats) => {
-                        assert_eq!(row, BEATS_ROW);
-                        assert_eq!(beats, u32::try_from(column).unwrap() + 1);
-                    }
-                    SignaturePart::Unit(unit) => {
-                        assert_eq!(row, UNIT_ROW);
-                        assert_eq!(unit, BEAT_UNITS[column]);
-                    }
+            match signature_part(addr) {
+                Some(SignaturePart::Beats(beats)) => {
+                    assert_eq!(row, BEATS_ROW);
+                    assert_eq!(beats, u32::try_from(column).unwrap() + 1);
+                    assert_eq!(frame.pad(addr).color, SIGNATURE);
                 }
-                assert_eq!(frame.pad(addr).color, SIGNATURE);
-            } else if let Some(subdivision) = subdivision_at(addr) {
-                assert_eq!(row, SUBDIVISION_ROW);
-                assert_eq!(subdivision, Subdivision::ALL[column]);
-                assert_eq!(frame.pad(addr).color, SIGNATURE);
-            } else {
-                assert!(!frame.pad(addr).is_lit(), "{row},{column} means nothing");
+                Some(SignaturePart::Unit(unit)) => {
+                    assert_eq!(row, UNIT_ROW);
+                    assert_eq!(unit, BEAT_UNITS[column]);
+                    assert_eq!(frame.pad(addr).color, SIGNATURE);
+                }
+                None => assert!(!frame.pad(addr).is_lit(), "{row},{column} means nothing"),
             }
         }
-        const {
-            assert!(BEATS_ROW < UNIT_ROW, "top number above the bottom one");
-            assert!(UNIT_ROW < SUBDIVISION_ROW, "the click below both");
+        const { assert!(BEATS_ROW < UNIT_ROW, "top number above the bottom one") }
+    }
+
+    #[test]
+    fn each_signature_row_shows_which_number_is_chosen() {
+        let frame = time_signature(TimeSignature::new(3, 8).unwrap(), Chrome::default());
+
+        let solid: Vec<Option<SignaturePart>> = SlotAddr::all()
+            .filter(|addr| frame.pad(*addr).style == LedStyle::Solid)
+            .filter(|addr| frame.pad(*addr).is_lit())
+            .map(signature_part)
+            .collect();
+        assert_eq!(
+            solid,
+            vec![Some(SignaturePart::Beats(3)), Some(SignaturePart::Unit(8))],
+            "one per row, and nothing else"
+        );
+    }
+
+    #[test]
+    fn a_rate_the_bar_cannot_be_cut_into_is_greyed_out() {
+        let chrome = Chrome {
+            beats_per_bar: 3,
+            subdivision: Subdivision::Quarter,
+            ..Chrome::default()
+        };
+        let frame = subdivisions(chrome);
+
+        for addr in SlotAddr::all() {
+            let Some(subdivision) = subdivision_at(addr) else {
+                continue;
+            };
+            let led = frame.pad(addr);
+            if subdivision.fits(3) {
+                assert_eq!(led.color, CLICK, "{subdivision:?} is on offer");
+            } else {
+                assert_eq!(led.color, UNAVAILABLE, "{subdivision:?} does not fit");
+                assert_eq!(led.style, LedStyle::Dim);
+            }
         }
     }
 
     #[test]
-    fn each_row_shows_which_one_is_chosen() {
+    fn the_click_page_offers_every_subdivision_slowest_first() {
         let chrome = Chrome {
-            subdivision: Subdivision::EighthTriplet,
+            subdivision: Subdivision::QuarterTriplet,
             ..Chrome::default()
         };
-        let frame = time_signature(TimeSignature::new(3, 8).unwrap(), chrome);
+        let frame = subdivisions(chrome);
 
-        let solid: Vec<SlotAddr> = SlotAddr::all()
-            .filter(|addr| frame.pad(*addr).style == LedStyle::Solid)
-            .filter(|addr| frame.pad(*addr).is_lit())
-            .collect();
-        assert_eq!(solid.len(), 3, "one per row, and nothing else");
-        assert_eq!(signature_part(solid[0]), Some(SignaturePart::Beats(3)));
-        assert_eq!(signature_part(solid[1]), Some(SignaturePart::Unit(8)));
-        assert_eq!(subdivision_at(solid[2]), Some(Subdivision::EighthTriplet));
+        let mut offered = Vec::new();
+        let mut solid = Vec::new();
+        for addr in SlotAddr::all() {
+            if let Some(subdivision) = subdivision_at(addr) {
+                assert_eq!(addr.track.index(), SUBDIVISION_ROW);
+                assert_eq!(frame.pad(addr).color, CLICK);
+                offered.push(subdivision);
+                if frame.pad(addr).style == LedStyle::Solid {
+                    solid.push(subdivision);
+                }
+            } else {
+                assert!(!frame.pad(addr).is_lit(), "{addr:?} means nothing");
+            }
+        }
+        assert_eq!(offered, Subdivision::ALL.to_vec(), "all of them, in order");
+        assert_eq!(solid, vec![Subdivision::QuarterTriplet], "the one in use");
     }
 
     #[test]
