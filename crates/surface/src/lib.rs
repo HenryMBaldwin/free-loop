@@ -28,9 +28,9 @@ pub use led::{
 };
 pub use mock::MockSurface;
 pub use paint::{
-    Axis, BEAT_UNITS, Chrome, INPUT_SIDE, MUTE_SIDE, MUTED, NEW_SIDE, NO_PAD, PAUSE_SIDE,
-    PICKUP_COLUMN, RESTART_COLUMN, SELECTED, SETTINGS_SIDE, SOLO_SIDE, SOLOED, VOLUME_SIDE,
-    YES_PAD, signature_at,
+    Axis, BEAT_UNITS, BEATS_ROW, Chrome, INPUT_SIDE, MUTE_SIDE, MUTED, NEW_SIDE, NO_PAD,
+    PAUSE_SIDE, PICKUP_COLUMN, RESTART_COLUMN, SELECTED, SETTINGS_SIDE, SOLO_SIDE, SOLOED,
+    SignaturePart, UNIT_ROW, VOLUME_SIDE, YES_PAD, signature_part,
 };
 pub use reconnect::Reconnecting;
 pub use surface::{ControlSurface, SurfaceError};
