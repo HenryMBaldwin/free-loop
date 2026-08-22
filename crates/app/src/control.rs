@@ -164,6 +164,8 @@ pub struct Controller {
     requests: Vec<Request>,
     /// A tempo button being held down.
     tempo_hold: Option<TempoHold>,
+    /// When the beat indicator goes dark again.
+    beat_off: Option<Duration>,
     /// A display change the caller has not picked up yet.
     text: Option<TextUpdate>,
     /// When the grid comes back, while text has it.
@@ -190,6 +192,7 @@ impl Controller {
             pickups: [0; TRACK_COUNT],
             input_count: 2,
             beat: 0,
+            beat_lit: true,
             beats_per_bar: time_signature.beats_per_bar(),
             click_enabled,
             paused: false,
@@ -216,6 +219,7 @@ impl Controller {
             settings_changed: true,
             requests: Vec::new(),
             tempo_hold: None,
+            beat_off: None,
             text: None,
             text_until: None,
             text_running: false,
@@ -701,6 +705,12 @@ impl Controller {
     pub fn tick(&mut self, now: Duration) {
         self.repeat_tempo(now);
 
+        if self.beat_off.is_some_and(|until| now >= until) {
+            self.beat_off = None;
+            self.chrome.beat_lit = false;
+            self.dirty = true;
+        }
+
         if let Some(flash) = self.flash.take_if(|flash| now >= flash.until) {
             if let Some(text) = flash.then {
                 self.scroll(text, now);
@@ -792,6 +802,11 @@ impl Controller {
         self.scroll(shown.to_string(), now);
     }
 
+    /// How long the beat indicator stays lit: half a beat.
+    fn lit_for(&self) -> Duration {
+        Duration::from_secs_f64(30.0 / self.tempo.clamp(MIN_BPM, MAX_BPM))
+    }
+
     /// Moves the tempo again while a button stays down.
     fn repeat_tempo(&mut self, now: Duration) {
         let Some(hold) = self.tempo_hold else {
@@ -832,10 +847,12 @@ impl Controller {
                 self.dirty = true;
             }
             Event::Beat { beat, .. } => {
-                if beat != self.chrome.beat {
+                if beat != self.chrome.beat || !self.chrome.beat_lit {
                     self.chrome.beat = beat;
+                    self.chrome.beat_lit = true;
                     self.dirty = true;
                 }
+                self.beat_off = Some(now + self.lit_for());
             }
             Event::TempoRejected => {
                 self.tempo = self.tempo_before_request;
@@ -2445,7 +2462,7 @@ mod tests {
         let frame = controller.take_frame().unwrap();
         assert_eq!(
             frame.control(FIRST_BEAT_LED),
-            Led::flash(LedColor::White),
+            Led::solid(LedColor::White),
             "off the downbeat"
         );
 
@@ -2455,6 +2472,37 @@ mod tests {
             frame.control(FIRST_BEAT_LED),
             Led::solid(LedColor::Red),
             "the downbeat"
+        );
+    }
+
+    #[test]
+    fn the_beat_goes_dark_between_beats_and_lights_again_on_the_next() {
+        use free_loop_surface::FIRST_BEAT_LED;
+
+        let mut controller = controller();
+        controller.on_engine(Event::Beat { bar: 0, beat: 1 }, T0);
+        controller.take_frame();
+
+        // Half a beat at 120 bpm.
+        controller.tick(T0 + millis(249));
+        assert!(
+            controller.take_frame().is_none(),
+            "still lit up to the halfway point"
+        );
+
+        controller.tick(T0 + millis(250));
+        let dark = controller.take_frame().unwrap();
+        assert_eq!(
+            dark.control(FIRST_BEAT_LED),
+            free_loop_surface::paint::control(Control::TempoUp, Chrome::default()),
+            "the button it shares gets its own colour back"
+        );
+
+        controller.on_engine(Event::Beat { bar: 0, beat: 2 }, T0 + millis(500));
+        assert_eq!(
+            controller.take_frame().unwrap().control(FIRST_BEAT_LED),
+            Led::solid(LedColor::White),
+            "lit again on the next beat"
         );
     }
 
