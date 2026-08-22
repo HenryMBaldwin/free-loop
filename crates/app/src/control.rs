@@ -1332,6 +1332,20 @@ mod tests {
     }
 
     #[test]
+    fn the_grouping_can_be_flipped_from_the_screen_it_groups() {
+        let mut controller = controller();
+        controller.on_surface(side(MUTE_SIDE), T0);
+
+        // The axis says what a pad in this screen silences, so it belongs on it.
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Axis), T0);
+        press(&mut controller, addr(2, 5), T0);
+
+        let settings = settings(&mut controller);
+        assert_eq!(settings.muted, column_mask(SlotId::new(5).unwrap()));
+        assert_eq!(controller.mode(), Mode::Mute, "and does not leave it");
+    }
+
+    #[test]
     fn the_axis_button_switches_to_columns() {
         let mut controller = controller();
         controller.on_surface(SurfaceEvent::ControlPressed(Control::Axis), T0);
@@ -1364,9 +1378,9 @@ mod tests {
         controller.on_surface(side(MUTE_SIDE), T0);
         let frame = controller.take_frame().unwrap();
 
-        // Nothing on the top row belongs to the mute screen.
+        // Only the grouping belongs up there, plus the button the beat shares.
         for control in Control::all() {
-            if control.index() == FIRST_BEAT_LED {
+            if control.index() == FIRST_BEAT_LED || control == Control::Axis {
                 continue;
             }
             assert!(
@@ -1374,6 +1388,10 @@ mod tests {
                 "{control:?} is still offering itself"
             );
         }
+        assert!(
+            frame.control(Control::Axis.index()).is_lit(),
+            "grouping stays"
+        );
         for index in [VOLUME_SIDE, INPUT_SIDE, SETTINGS_SIDE, SOLO_SIDE, NEW_SIDE] {
             assert!(!frame.side(index).is_lit(), "side {index} is still lit");
         }
