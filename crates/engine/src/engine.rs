@@ -201,7 +201,8 @@ struct StagedClip {
 struct Staging {
     /// Whether a `Begin` has arrived and its `End` has not.
     receiving: bool,
-    tempo: Option<Tempo>,
+    /// The musical time the arriving session was recorded in.
+    time: Option<(Tempo, TimeSignature)>,
     clips: [[Option<StagedClip>; SLOT_COUNT]; TRACK_COUNT],
 }
 
@@ -209,7 +210,7 @@ impl Staging {
     fn new() -> Self {
         Self {
             receiving: false,
-            tempo: None,
+            time: None,
             clips: core::array::from_fn(|_| core::array::from_fn(|_| None)),
         }
     }
@@ -231,7 +232,7 @@ impl Staging {
     /// than being dropped here.
     fn abandon(&mut self, retirement: &mut Retirement) {
         self.receiving = false;
-        self.tempo = None;
+        self.time = None;
         for row in &mut self.clips {
             for slot in row {
                 if let Some(staged) = slot.take() {
@@ -869,11 +870,14 @@ impl Engine {
         let mut complete = false;
         while let Some(message) = loads.pop() {
             match message {
-                LoadMessage::Begin { tempo } => {
+                LoadMessage::Begin {
+                    tempo,
+                    time_signature,
+                } => {
                     // Anything staged belongs to a load that never finished arriving.
                     audio.staged.abandon(&mut audio.retirement);
                     audio.staged.receiving = true;
-                    audio.staged.tempo = Some(tempo);
+                    audio.staged.time = Some((tempo, time_signature));
                 }
                 LoadMessage::Clip {
                     addr,
@@ -964,8 +968,8 @@ impl Engine {
             );
         }
 
-        if let Some(tempo) = self.audio.staged.tempo.take() {
-            self.set_tempo_unchecked(tempo);
+        if let Some((tempo, signature)) = self.audio.staged.time.take() {
+            self.adopt_musical_time(tempo, signature);
         }
         // A rewind or clear queued against the session just replaced would run against the
         // new one, and the commit has already zeroed the levels it was waiting on.
@@ -976,11 +980,13 @@ impl Engine {
         self.rewind(sink);
     }
 
-    /// Sets the tempo without the guard that protects existing clips.
+    /// Takes a session's tempo and time signature, without the guard that protects
+    /// existing clips.
     ///
     /// Safe during a load, which replaces the grid wholesale.
-    fn set_tempo_unchecked(&mut self, tempo: Tempo) {
-        if let Ok(grid) = BarGrid::new(self.sample_rate, tempo, self.time_signature) {
+    fn adopt_musical_time(&mut self, tempo: Tempo, signature: TimeSignature) {
+        if let Ok(grid) = BarGrid::new(self.sample_rate, tempo, signature) {
+            self.time_signature = signature;
             self.position = self.grid.rebase_onto(self.position, grid);
             self.set_grid(grid);
             self.resync_clock();
