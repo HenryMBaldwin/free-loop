@@ -201,8 +201,8 @@ struct StagedClip {
 struct Staging {
     /// Whether a `Begin` has arrived and its `End` has not.
     receiving: bool,
-    /// The musical time the arriving session was recorded in.
-    time: Option<(Tempo, TimeSignature)>,
+    /// The grid the arriving session was recorded on.
+    grid: Option<BarGrid>,
     clips: [[Option<StagedClip>; SLOT_COUNT]; TRACK_COUNT],
 }
 
@@ -210,7 +210,7 @@ impl Staging {
     fn new() -> Self {
         Self {
             receiving: false,
-            time: None,
+            grid: None,
             clips: core::array::from_fn(|_| core::array::from_fn(|_| None)),
         }
     }
@@ -232,7 +232,7 @@ impl Staging {
     /// than being dropped here.
     fn abandon(&mut self, retirement: &mut Retirement) {
         self.receiving = false;
-        self.time = None;
+        self.grid = None;
         for row in &mut self.clips {
             for slot in row {
                 if let Some(staged) = slot.take() {
@@ -844,14 +844,11 @@ impl Engine {
         let mut complete = false;
         while let Some(message) = loads.pop() {
             match message {
-                LoadMessage::Begin {
-                    tempo,
-                    time_signature,
-                } => {
+                LoadMessage::Begin { grid } => {
                     // Anything staged belongs to a load that never finished arriving.
                     audio.staged.abandon(&mut audio.retirement);
                     audio.staged.receiving = true;
-                    audio.staged.time = Some((tempo, time_signature));
+                    audio.staged.grid = Some(grid);
                 }
                 LoadMessage::Clip {
                     addr,
@@ -942,8 +939,8 @@ impl Engine {
             );
         }
 
-        if let Some((tempo, signature)) = self.audio.staged.time.take() {
-            self.adopt_musical_time(tempo, signature, sink);
+        if let Some(grid) = self.audio.staged.grid.take() {
+            self.adopt_grid(grid, sink);
         }
         // A rewind or clear queued against the session just replaced would run against the
         // new one, and the commit has already zeroed the levels it was waiting on.
@@ -954,23 +951,14 @@ impl Engine {
         self.rewind(sink);
     }
 
-    /// Takes a session's tempo and time signature, without the guard that protects
-    /// existing clips.
+    /// Takes a loaded session's grid, without the guard that protects existing clips.
     ///
-    /// Safe during a load, which replaces the grid wholesale.
-    fn adopt_musical_time(
-        &mut self,
-        tempo: Tempo,
-        signature: TimeSignature,
-        sink: &mut impl EventSink,
-    ) {
-        if let Ok(grid) = BarGrid::new(self.sample_rate, tempo, signature) {
-            self.time_signature = signature;
-            self.position = self.grid.rebase_onto(self.position, grid);
-            self.set_grid(grid);
-            self.resync_clock();
-        }
-        // Whatever the grid ended up as, not what the load asked for.
+    /// The grid exists, so there is nothing here that can fail after the clips are in.
+    fn adopt_grid(&mut self, grid: BarGrid, sink: &mut impl EventSink) {
+        self.time_signature = grid.time_signature();
+        self.position = self.grid.rebase_onto(self.position, grid);
+        self.set_grid(grid);
+        self.resync_clock();
         self.report_time_signature(sink);
     }
 
