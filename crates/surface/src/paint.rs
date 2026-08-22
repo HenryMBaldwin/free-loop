@@ -17,6 +17,8 @@ use crate::led::{FIRST_BEAT_LED, Led, LedColor, LedFrame, LedStyle, SHADES};
 pub struct Chrome {
     /// Beat within the bar, zero-based.
     pub beat: u32,
+    /// Whether the beat is lit now or in the gap after it.
+    pub beat_lit: bool,
     /// Beats in a bar.
     pub beats_per_bar: u32,
     /// Whether the click is sounding.
@@ -90,6 +92,7 @@ impl Default for Chrome {
     fn default() -> Self {
         Self {
             beat: 0,
+            beat_lit: true,
             beats_per_bar: 4,
             click_enabled: true,
             paused: false,
@@ -218,13 +221,15 @@ pub fn pause_button(chrome: Chrome) -> Led {
 }
 
 /// Paints the beat indicator over whatever the one button it uses already shows: red on
-/// the downbeat, flashing white on the rest, the flash running on the clock the device is
-/// sent.
+/// the downbeat, white on the rest, and the button's own colour in the gap between beats.
 pub fn beat_indicator(frame: &mut LedFrame, chrome: Chrome) {
+    if !chrome.beat_lit {
+        return;
+    }
     let led = if chrome.beat == 0 {
         Led::solid(LedColor::Red)
     } else {
-        Led::flash(LedColor::White)
+        Led::solid(LedColor::White)
     };
     frame.set_control(FIRST_BEAT_LED, led);
 }
@@ -558,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn the_downbeat_is_steady_red_and_the_rest_blink() {
+    fn the_downbeat_is_red_and_the_rest_are_white() {
         let paint = |beat| {
             let mut frame = LedFrame::new();
             beat_indicator(
@@ -574,8 +579,23 @@ mod tests {
 
         assert_eq!(paint(0), Led::solid(LedColor::Red));
         for beat in 1..7 {
-            assert_eq!(paint(beat), Led::flash(LedColor::White), "beat {beat}");
+            assert_eq!(paint(beat), Led::solid(LedColor::White), "beat {beat}");
         }
+    }
+
+    #[test]
+    fn the_gap_after_a_beat_leaves_the_button_alone() {
+        let mut frame = LedFrame::new();
+        let before = frame.control(FIRST_BEAT_LED);
+        beat_indicator(
+            &mut frame,
+            Chrome {
+                beat: 0,
+                beat_lit: false,
+                ..Chrome::default()
+            },
+        );
+        assert_eq!(frame.control(FIRST_BEAT_LED), before);
     }
 
     #[test]
