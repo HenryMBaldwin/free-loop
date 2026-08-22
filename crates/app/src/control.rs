@@ -30,6 +30,9 @@ pub const CLEAR_WARNING: Duration = Duration::from_millis(400);
 /// Beats per minute a tempo button moves once it starts repeating.
 pub const TEMPO_HOLD_STEP: f64 = 5.0;
 
+/// How long the click button must be held to open its own page.
+pub const CLICK_HOLD: Duration = Duration::from_millis(400);
+
 /// How long a tempo button must be held before it starts repeating.
 pub const TEMPO_HOLD_DELAY: Duration = Duration::from_millis(400);
 
@@ -70,6 +73,8 @@ pub enum Mode {
     Settings,
     /// Beats to the bar and the note that gets the beat.
     TimeSignature,
+    /// How often the click sounds.
+    Subdivision,
     /// Waiting for yes or no before saving over the pad it holds.
     ConfirmSave(SlotAddr),
     /// Waiting for yes or no before loading over what is on the grid.
@@ -89,7 +94,8 @@ impl Mode {
             | Self::Volume
             | Self::Input
             | Self::Settings
-            | Self::TimeSignature => None,
+            | Self::TimeSignature
+            | Self::Subdivision => None,
         }
     }
 }
@@ -154,6 +160,8 @@ pub struct Controller {
     default_time_signature: TimeSignature,
     /// Signature to fall back to if the engine turns a change down.
     signature_before_request: TimeSignature,
+    /// When the click button went down, and whether the hold has already been used.
+    click_hold: Option<(Duration, bool)>,
     /// The input a fresh session puts every track on.
     default_input: TrackInput,
     /// The launch mode a fresh session puts every track on.
@@ -220,6 +228,7 @@ impl Controller {
             time_signature,
             default_time_signature: time_signature,
             signature_before_request: time_signature,
+            click_hold: None,
             default_input: TrackInput::default(),
             default_launch_mode: LaunchMode::Follow,
             tempo_before_request: tempo,
@@ -255,6 +264,11 @@ impl Controller {
     /// Whether the click is believed to be sounding.
     pub fn click_enabled(&self) -> bool {
         self.chrome.click_enabled
+    }
+
+    /// How often the click sounds.
+    pub fn subdivision(&self) -> Subdivision {
+        self.chrome.subdivision
     }
 
     /// Whether the transport is believed to be frozen.
@@ -541,6 +555,12 @@ impl Controller {
     fn set_signature(&mut self, signature: TimeSignature) {
         self.time_signature = signature;
         self.chrome.beats_per_bar = signature.beats_per_bar();
+        // A rate the new bar cannot be cut into falls back to the one every bar takes.
+        if !self.chrome.subdivision.fits(signature.beats_per_bar()) {
+            self.chrome.subdivision = Subdivision::Quarter;
+            self.commands
+                .push(Command::SetClickSubdivision(Subdivision::Quarter));
+        }
         // A pickup cannot reach past the bar it opens from.
         let degrees = signature.beats_per_bar().saturating_sub(1);
         let degrees = u8::try_from(degrees).unwrap_or(u8::MAX).min(SHADES - 1);
@@ -550,17 +570,12 @@ impl Controller {
         self.dirty = true;
     }
 
-    /// Takes a press on the signature page, whichever row it landed on.
-    fn press_signature_page(&mut self, addr: SlotAddr, now: Duration) {
-        if let Some(subdivision) = paint::subdivision_at(addr) {
-            self.press_subdivision(subdivision, now);
+    /// Changes how often the click sounds. Never locked: no clip depends on it.
+    fn press_subdivision(&mut self, subdivision: Subdivision, now: Duration) {
+        // A rate the bar cannot be cut into is shown greyed, and does nothing.
+        if !subdivision.fits(self.chrome.beats_per_bar) {
             return;
         }
-        self.press_time_signature(addr, now);
-    }
-
-    /// Changes how often the click sounds.
-    fn press_subdivision(&mut self, subdivision: Subdivision, now: Duration) {
         if subdivision != self.chrome.subdivision {
             self.chrome.subdivision = subdivision;
             self.commands
@@ -715,7 +730,12 @@ impl Controller {
                 self.toggle_setting(addr);
             }
             SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::TimeSignature => {
-                self.press_signature_page(addr, now);
+                self.press_time_signature(addr, now);
+            }
+            SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::Subdivision => {
+                if let Some(subdivision) = paint::subdivision_at(addr) {
+                    self.press_subdivision(subdivision, now);
+                }
             }
             SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::LoadPicker => {
                 self.press_load(addr);
@@ -737,12 +757,8 @@ impl Controller {
                     self.commands.push(Command::Press(addr));
                 }
             }
-            SurfaceEvent::ControlPressed(Control::ClickToggle) => {
-                self.chrome.click_enabled = !self.chrome.click_enabled;
-                self.commands
-                    .push(Command::SetClickEnabled(self.chrome.click_enabled));
-                self.dirty = true;
-            }
+            SurfaceEvent::ControlPressed(Control::ClickToggle) => self.press_click(now),
+            SurfaceEvent::ControlReleased(Control::ClickToggle) => self.release_click(),
             SurfaceEvent::ControlPressed(Control::TempoDown) => self.press_tempo(-1.0, now),
             SurfaceEvent::ControlPressed(Control::TempoUp) => self.press_tempo(1.0, now),
             SurfaceEvent::ControlReleased(Control::TempoDown | Control::TempoUp) => {
@@ -799,6 +815,7 @@ impl Controller {
     /// arrives.
     pub fn tick(&mut self, now: Duration) {
         self.repeat_tempo(now);
+        self.open_click_page(now);
 
         if self.beat_off.is_some_and(|until| now >= until) {
             self.beat_off = None;
@@ -906,6 +923,46 @@ impl Controller {
         let shown = bpm as i32;
 
         self.scroll(shown.to_string(), now);
+    }
+
+    /// Arms the hold that opens the click's page, or leaves the page if it is open.
+    fn press_click(&mut self, now: Duration) {
+        if self.mode == Mode::Subdivision {
+            self.mode = Mode::Perform;
+            self.dirty = true;
+            // Used, so letting go does not turn the click off as well.
+            self.click_hold = Some((now, true));
+        } else {
+            self.click_hold = Some((now, false));
+        }
+    }
+
+    /// A tap turns the click on or off. A hold has opened the page already.
+    fn release_click(&mut self) {
+        if let Some((_, false)) = self.click_hold.take() {
+            self.toggle_click();
+        }
+    }
+
+    /// Opens the click's page once its button has been held long enough.
+    fn open_click_page(&mut self, now: Duration) {
+        let Some((since, used)) = self.click_hold else {
+            return;
+        };
+        if used || now.saturating_sub(since) < CLICK_HOLD {
+            return;
+        }
+        self.click_hold = Some((since, true));
+        self.mode = Mode::Subdivision;
+        self.dirty = true;
+    }
+
+    /// Turns the click on or off.
+    fn toggle_click(&mut self) {
+        self.chrome.click_enabled = !self.chrome.click_enabled;
+        self.commands
+            .push(Command::SetClickEnabled(self.chrome.click_enabled));
+        self.dirty = true;
     }
 
     /// How long the beat indicator stays lit: half a beat.
@@ -1031,6 +1088,9 @@ impl Controller {
             Mode::Settings => self.frame.set_side(SETTINGS_SIDE, Led::flash(SELECTED)),
             Mode::Mute => self.frame.set_side(MUTE_SIDE, Led::flash(SELECTED)),
             Mode::Solo => self.frame.set_side(SOLO_SIDE, Led::flash(SELECTED)),
+            Mode::Subdivision => self
+                .frame
+                .set_control(Control::ClickToggle.index(), Led::flash(SELECTED)),
             _ => {}
         }
 
@@ -1069,6 +1129,8 @@ impl Controller {
             paint::settings(self.chrome)
         } else if self.mode == Mode::TimeSignature {
             paint::time_signature(self.time_signature, self.chrome)
+        } else if self.mode == Mode::Subdivision {
+            paint::subdivisions(self.chrome)
         } else if self.tempo_repeating() {
             // A number cannot track a tempo that is still moving, so the grid shows it
             // instead until the button is let go.
@@ -1105,7 +1167,7 @@ mod tests {
 
     use super::*;
     use free_loop_core::{ClipId, Frames, SlotId, SlotState, TrackId, column_mask, row_mask};
-    use free_loop_surface::{BEATS_ROW, UNIT_ROW};
+    use free_loop_surface::{BEATS_ROW, SUBDIVISION_ROW, UNIT_ROW};
 
     const T0: Duration = Duration::ZERO;
 
@@ -1965,20 +2027,154 @@ mod tests {
     #[test]
     fn the_click_toggle_tracks_its_own_state() {
         let mut controller = controller();
-        assert!(controller.click_enabled());
+        let tap = |controller: &mut Controller| {
+            controller.on_surface(SurfaceEvent::ControlPressed(Control::ClickToggle), T0);
+            controller.on_surface(SurfaceEvent::ControlReleased(Control::ClickToggle), T0);
+        };
 
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::ClickToggle), T0);
+        tap(&mut controller);
         assert!(!controller.click_enabled());
         assert_eq!(
             commands(&mut controller),
             vec![Command::SetClickEnabled(false)]
         );
 
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::ClickToggle), T0);
+        tap(&mut controller);
         assert!(controller.click_enabled());
         assert_eq!(
             commands(&mut controller),
             vec![Command::SetClickEnabled(true)]
+        );
+    }
+
+    #[test]
+    fn holding_the_click_button_opens_its_page_without_toggling() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::ClickToggle), T0);
+        controller.tick(T0 + CLICK_HOLD);
+
+        let subdivision_row = u8::try_from(SUBDIVISION_ROW).unwrap();
+        let frame = controller.take_frame().unwrap();
+        assert!(
+            frame.pad(addr(subdivision_row, 0)).is_lit(),
+            "the page opened"
+        );
+
+        controller.on_surface(
+            SurfaceEvent::ControlReleased(Control::ClickToggle),
+            T0 + CLICK_HOLD,
+        );
+        assert!(controller.click_enabled(), "the click was left alone");
+        assert!(commands(&mut controller).is_empty());
+    }
+
+    #[test]
+    fn the_click_button_closes_its_own_page() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::ClickToggle), T0);
+        controller.tick(T0 + CLICK_HOLD);
+        controller.on_surface(
+            SurfaceEvent::ControlReleased(Control::ClickToggle),
+            T0 + CLICK_HOLD,
+        );
+        let _ = controller.take_frame();
+
+        // A tap on the way out neither toggles the click nor leaves the page behind.
+        let later = T0 + CLICK_HOLD * 2;
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::ClickToggle), later);
+        controller.on_surface(SurfaceEvent::ControlReleased(Control::ClickToggle), later);
+        assert!(controller.click_enabled(), "still on");
+        assert!(commands(&mut controller).is_empty());
+
+        // Back on the loops, so a pad is a pad again.
+        let pad = addr(0, 0);
+        press(&mut controller, pad, later);
+        controller.on_surface(SurfaceEvent::PadReleased { addr: pad }, later);
+        assert_eq!(commands(&mut controller), vec![Command::Press(pad)]);
+    }
+
+    #[test]
+    fn a_rate_the_bar_cannot_take_is_not_selectable() {
+        let mut controller = controller();
+        controller.set_loaded_time_signature(TimeSignature::new(3, 4).unwrap());
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::ClickToggle), T0);
+        controller.tick(T0 + CLICK_HOLD);
+        controller.on_surface(
+            SurfaceEvent::ControlReleased(Control::ClickToggle),
+            T0 + CLICK_HOLD,
+        );
+        let _ = commands(&mut controller);
+
+        // Halves do not divide a three beat bar.
+        let row = u8::try_from(SUBDIVISION_ROW).unwrap();
+        press(&mut controller, addr(row, 1), T0);
+        assert!(
+            commands(&mut controller).is_empty(),
+            "nothing was asked for"
+        );
+        assert_eq!(controller.subdivision(), Subdivision::Quarter);
+
+        // Eighths do.
+        press(&mut controller, addr(row, 5), T0);
+        assert_eq!(
+            commands(&mut controller),
+            vec![Command::SetClickSubdivision(Subdivision::Eighth)]
+        );
+    }
+
+    #[test]
+    fn a_signature_that_breaks_the_rate_falls_back_to_the_quarter() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::ClickToggle), T0);
+        controller.tick(T0 + CLICK_HOLD);
+        controller.on_surface(
+            SurfaceEvent::ControlReleased(Control::ClickToggle),
+            T0 + CLICK_HOLD,
+        );
+
+        let row = u8::try_from(SUBDIVISION_ROW).unwrap();
+        press(&mut controller, addr(row, 2), T0);
+        assert_eq!(controller.subdivision(), Subdivision::HalfTriplet);
+        let _ = commands(&mut controller);
+
+        // Three beats cannot be cut into three halves.
+        controller.set_loaded_time_signature(TimeSignature::new(3, 4).unwrap());
+        assert_eq!(controller.subdivision(), Subdivision::Quarter);
+        assert_eq!(
+            commands(&mut controller),
+            vec![Command::SetClickSubdivision(Subdivision::Quarter)]
+        );
+    }
+
+    #[test]
+    fn the_click_page_works_with_clips_on_the_grid() {
+        let mut controller = controller();
+        controller.on_engine(
+            Event::SlotChanged {
+                addr: addr(0, 0),
+                state: SlotState::Stopped { clip: ClipId(0) },
+            },
+            T0,
+        );
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::ClickToggle), T0);
+        controller.tick(T0 + CLICK_HOLD);
+        controller.on_surface(
+            SurfaceEvent::ControlReleased(Control::ClickToggle),
+            T0 + CLICK_HOLD,
+        );
+        let _ = commands(&mut controller);
+
+        // Unlike the tempo and the signature, nothing here is bound to a recording.
+        let subdivision_row = u8::try_from(SUBDIVISION_ROW).unwrap();
+        press(&mut controller, addr(subdivision_row, 7), T0);
+
+        assert_eq!(
+            commands(&mut controller),
+            vec![Command::SetClickSubdivision(Subdivision::Sixteenth)]
+        );
+        assert_eq!(
+            controller.take_text(),
+            Some(TextUpdate::Show("1/16".to_owned()))
         );
     }
 
