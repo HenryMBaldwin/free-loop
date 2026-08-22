@@ -1337,13 +1337,13 @@ fn recording_onto_a_loaded_session_captures_audio() {
 }
 
 #[test]
-fn rewinding_keeps_loops_where_they_were_against_each_other() {
+fn rewinding_puts_every_loop_at_its_beginning() {
     let mut harness = Harness::new(128);
     let two_bar = addr(0, 0);
     let four_bar = addr(1, 0);
 
     // Two bars from the top, then four bars starting on an odd bar, so the two bar loop
-    // is halfway through when the four bar one begins. That relationship is the music.
+    // is halfway through when the four bar one begins.
     record(&mut harness, two_bar, 0, 2);
     harness.run_to(3 * BAR);
     record(&mut harness, four_bar, 3 * BAR, 4);
@@ -1356,9 +1356,9 @@ fn rewinding_keeps_loops_where_they_were_against_each_other() {
         let frame = (i / CHANNELS) as u64;
         let channel = i % CHANNELS;
 
-        // The longest loop is at its beginning, and the shorter one is still halfway.
+        // Both from their own first frame, whatever they were doing before.
         let four = signal(3 * BAR + frame, channel);
-        let two = signal(BAR + frame, channel);
+        let two = signal(frame, channel);
         assert_eq!(*sample, two + four, "frame {frame}");
     }
 }
@@ -2274,25 +2274,23 @@ mod launch_mode {
     }
 
     #[test]
-    fn a_rewind_does_not_send_a_sounding_clip_back_to_its_start() {
+    fn a_rewind_sends_a_sounding_clip_back_to_its_start() {
         let mut harness = Harness::new(128);
         let pad = addr(0, 0);
         restart(&mut harness, 0);
-        let (start, end) = record(&mut harness, pad, 0, 2);
-        let len = end - start;
+        let (start, _) = record(&mut harness, pad, 0, 2);
 
+        // Mid loop when the rewind lands.
         harness.run_to(harness.position() + BAR + BAR / 2);
         harness.command(Command::Rewind);
-        harness.run_frames(128);
+        assert_eq!(harness.engine.position(), Frames::ZERO);
 
-        let from = harness.position();
         let out = harness.run_frames(64);
-        assert!(
-            out.iter().any(|s| *s != 0.0),
-            "still sounding after the rewind"
-        );
-        let phase = (from + (harness.position() - from)) % len;
-        assert_ne!(phase, 0, "and carrying on rather than jumping to its start");
+        for (i, sample) in out.iter().enumerate() {
+            let frame = (i / CHANNELS) as u64;
+            let channel = i % CHANNELS;
+            assert_eq!(*sample, signal(start + frame, channel), "frame {frame}");
+        }
     }
 }
 

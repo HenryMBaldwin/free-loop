@@ -54,15 +54,15 @@ fn limit(output: &mut [f32], sink: &mut impl EventSink) {
     }
 }
 
-/// Moves an anchor back by `shift`, wrapped into the loop rather than clamped.
+/// The anchor a clip recorded from the transport's start would hold.
 ///
-/// Only `recorded_at` modulo the loop length affects playback, so wrapping keeps the
-/// phase exact.
-fn shifted_anchor(recorded_at: Frames, len: Frames, shift: Frames) -> Frames {
+/// Frame zero was captured `capture_offset` after the beat it belongs to, so the anchor
+/// sits that far back.
+fn anchor_at_start(len: Frames, capture_offset: Frames) -> Frames {
     if len.0 == 0 {
         return Frames::ZERO;
     }
-    Frames((recorded_at.0 % len.0 + len.0 - shift.0 % len.0) % len.0)
+    Frames((len.0 - capture_offset.0 % len.0) % len.0)
 }
 
 /// Capture kept past a loop: every beat of the bar after it but the last.
@@ -795,8 +795,6 @@ impl Engine {
     /// Every anchor moves by the same amount, which keeps the loops where they were
     /// against each other. The longest loop is the reference.
     fn rewind(&mut self, sink: &mut impl EventSink) {
-        let shift = self.reference_anchor();
-
         // A take spanning a rewind splices two moments together.
         let ctx = self.ctx();
         self.with_session(|session, audio| {
@@ -812,53 +810,23 @@ impl Engine {
         self.session.retarget_pending(Frames::ZERO);
 
         for addr in SlotAddr::all() {
-            // A pad that is not sounding takes a fresh anchor when it is next launched, so
-            // there is nothing to keep.
             let (track, slot) = (addr.track.index(), addr.slot.index());
-            self.audio.anchors[track][slot] = self.audio.anchors[track][slot]
-                .filter(|_| self.session.state(addr).is_sounding())
-                .map(|anchor| {
-                    let len = self.audio.clips[track][slot]
-                        .as_ref()
-                        .map_or(Frames::ZERO, |clip| clip.len());
-                    shifted_anchor(anchor, len, shift)
-                });
-
-            let Some(clip) = self.audio.clips[addr.track.index()][addr.slot.index()].as_mut()
-            else {
+            let Some(clip) = self.audio.clips[track][slot].as_mut() else {
+                self.audio.anchors[track][slot] = None;
                 continue;
             };
-            let moved = shifted_anchor(clip.recorded_at(), clip.len(), shift);
+            let start = anchor_at_start(clip.len(), clip.capture_offset());
             // A clip somebody is reading keeps its old anchor. Rare, and the next rewind
             // catches it.
             if let Some(inner) = Arc::get_mut(clip) {
-                inner.set_recorded_at(moved);
+                inner.set_recorded_at(start);
             }
+            // A pad that is not sounding takes a fresh anchor when it is next launched, so
+            // there is nothing to keep.
+            self.audio.anchors[track][slot] = self.audio.anchors[track][slot]
+                .filter(|_| self.session.state(addr).is_sounding())
+                .map(|_| start);
         }
-    }
-
-    /// The anchor everything is measured against when rewinding.
-    ///
-    /// The longest loop, earliest first, so the choice is stable across rewinds.
-    fn reference_anchor(&self) -> Frames {
-        // Sounding pads first: a pad that is silent may hold an anchor from a launch that
-        // is over, or one it has not taken yet, and neither describes what is playing.
-        let sounding = self.longest_anchor(|addr| self.session.state(addr).is_sounding());
-        sounding.unwrap_or_else(|| self.longest_anchor(|_| true).unwrap_or(Frames::ZERO))
-    }
-
-    /// The anchor of the longest clip on a pad `wanted` accepts, earliest first.
-    fn longest_anchor(&self, wanted: impl Fn(SlotAddr) -> bool) -> Option<Frames> {
-        SlotAddr::all()
-            .filter(|addr| wanted(*addr))
-            .filter_map(|addr| self.audio.clip(addr).map(|clip| (addr, clip)))
-            .min_by_key(|(addr, clip)| {
-                (
-                    core::cmp::Reverse(clip.len()),
-                    self.audio.anchor(*addr, clip),
-                )
-            })
-            .map(|(addr, clip)| self.audio.anchor(addr, clip))
     }
 
     /// Installs anything the loader has queued.
@@ -1383,38 +1351,21 @@ mod tests {
     }
 
     #[test]
-    fn an_anchor_before_the_reference_wraps_rather_than_clamping() {
+    fn a_start_anchor_puts_the_downbeat_on_the_transport() {
         let len = Frames(1_000);
 
-        // Recorded 300 frames before the reference. Clamping would put it at zero and
-        // lose the relationship.
-        let moved = shifted_anchor(Frames(700), len, Frames(1_000));
-        assert_eq!(moved, Frames(700));
-
-        let reference = shifted_anchor(Frames(1_000), len, Frames(1_000));
-        assert_eq!(reference, Frames::ZERO);
+        // Frame zero was captured 40 frames after the beat it belongs to, so the anchor
+        // sits 40 frames back and the beat itself lands on the transport.
+        assert_eq!(anchor_at_start(len, Frames(40)), Frames(960));
+        assert_eq!(anchor_at_start(len, Frames::ZERO), Frames::ZERO);
     }
 
     #[test]
-    fn a_uniform_shift_keeps_every_gap() {
-        let len = Frames(1_000);
-        let shift = Frames(2_345);
-
-        let gap = |a: u64, b: u64| {
-            let one = shifted_anchor(Frames(a), len, shift).0;
-            let two = shifted_anchor(Frames(b), len, shift).0;
-            (one + len.0 - two) % len.0
-        };
-
-        assert_eq!(gap(700, 400), 300);
-        assert_eq!(gap(400, 700), 700);
-    }
-
-    #[test]
-    fn a_shifted_anchor_stays_inside_the_loop() {
-        for recorded_at in [0, 1, 999, 1_000, 123_456] {
-            let moved = shifted_anchor(Frames(recorded_at), Frames(1_000), Frames(7_777));
-            assert!(moved.0 < 1_000);
+    fn a_start_anchor_stays_inside_the_loop() {
+        for offset in [0, 1, 999, 1_000, 123_456] {
+            let anchor = anchor_at_start(Frames(1_000), Frames(offset));
+            assert!(anchor.0 < 1_000, "offset {offset} gave {anchor:?}");
         }
+        assert_eq!(anchor_at_start(Frames::ZERO, Frames(7)), Frames::ZERO);
     }
 }
