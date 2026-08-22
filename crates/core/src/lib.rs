@@ -30,6 +30,6 @@ pub use session::SessionModel;
 pub use settings::Settings;
 pub use slot::{Ctx, Effect, Effects, SlotInput, SlotState, step};
 pub use time::{
-    BarGrid, CLOCK_TICKS_PER_QUARTER, Frames, MAX_BPM, MIN_BPM, SampleRate, Tempo, TimeError,
-    TimeSignature,
+    BarGrid, CLOCK_TICKS_PER_QUARTER, Frames, MAX_BPM, MIN_BPM, SampleRate, Subdivision, Tempo,
+    TimeError, TimeSignature,
 };

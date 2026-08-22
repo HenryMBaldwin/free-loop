@@ -9,7 +9,8 @@ use core::time::Duration;
 
 use free_loop_core::{
     Command, Event, LaunchMode, MAX_BPM, MIN_BPM, SLOT_COUNT, SessionModel, Settings, SlotAddr,
-    TRACK_COUNT, Tempo, TimeSignature, TrackInput, UNITY_STEP, column_mask, pad_bit, row_mask,
+    Subdivision, TRACK_COUNT, Tempo, TimeSignature, TrackInput, UNITY_STEP, column_mask, pad_bit,
+    row_mask,
 };
 use free_loop_surface::{
     Axis, Chrome, Control, INPUT_SIDE, Led, LedColor, LedFrame, MUTE_SIDE, NEW_SIDE, NO_PAD,
@@ -200,6 +201,7 @@ impl Controller {
             input_count: 2,
             beat: 0,
             beat_lit: true,
+            subdivision: Subdivision::default(),
             beats_per_bar: time_signature.beats_per_bar(),
             click_enabled,
             paused: false,
@@ -548,6 +550,26 @@ impl Controller {
         self.dirty = true;
     }
 
+    /// Takes a press on the signature page, whichever row it landed on.
+    fn press_signature_page(&mut self, addr: SlotAddr, now: Duration) {
+        if let Some(subdivision) = paint::subdivision_at(addr) {
+            self.press_subdivision(subdivision, now);
+            return;
+        }
+        self.press_time_signature(addr, now);
+    }
+
+    /// Changes how often the click sounds.
+    fn press_subdivision(&mut self, subdivision: Subdivision, now: Duration) {
+        if subdivision != self.chrome.subdivision {
+            self.chrome.subdivision = subdivision;
+            self.commands
+                .push(Command::SetClickSubdivision(subdivision));
+            self.dirty = true;
+        }
+        self.scroll(subdivision.name().to_owned(), now);
+    }
+
     /// Changes one number of the signature, taking effect at once so it can be heard.
     fn press_time_signature(&mut self, addr: SlotAddr, now: Duration) {
         let Some(part) = paint::signature_part(addr) else {
@@ -693,7 +715,7 @@ impl Controller {
                 self.toggle_setting(addr);
             }
             SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::TimeSignature => {
-                self.press_time_signature(addr, now);
+                self.press_signature_page(addr, now);
             }
             SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::LoadPicker => {
                 self.press_load(addr);

@@ -3,7 +3,7 @@
 //! Only instructions whose effect depends on when they arrive.
 
 use crate::ids::{SlotAddr, TrackId};
-use crate::time::{Tempo, TimeSignature};
+use crate::time::{Subdivision, Tempo, TimeSignature};
 
 /// An instruction for the realtime side.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -36,6 +36,8 @@ pub enum Command {
     SetClickEnabled(bool),
     /// Set the click level, `0.0..=1.0`.
     SetClickLevel(f32),
+    /// Set how often the click sounds.
+    SetClickSubdivision(Subdivision),
     /// Change the tempo. Rejected once any clip exists, with
     /// [`crate::event::Event::TempoRejected`].
     SetTempo(Tempo),

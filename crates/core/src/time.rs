@@ -171,6 +171,67 @@ impl Default for TimeSignature {
     }
 }
 
+/// How often the click sounds, against the beat.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Subdivision {
+    /// Once every four beats.
+    Whole,
+    /// Once every two beats.
+    Half,
+    /// Once a beat.
+    #[default]
+    Quarter,
+    /// Twice a beat.
+    Eighth,
+    /// Three times a beat.
+    Triplet,
+    /// Four times a beat.
+    Sixteenth,
+}
+
+impl Subdivision {
+    /// Every one, coarsest first.
+    pub const ALL: [Self; 6] = [
+        Self::Whole,
+        Self::Half,
+        Self::Quarter,
+        Self::Eighth,
+        Self::Triplet,
+        Self::Sixteenth,
+    ];
+
+    /// Beats between clicks. Counted from the bar line, so a bar always clicks.
+    pub fn beats_per_click(self) -> u32 {
+        match self {
+            Self::Whole => 4,
+            Self::Half => 2,
+            Self::Quarter | Self::Eighth | Self::Triplet | Self::Sixteenth => 1,
+        }
+    }
+
+    /// Clicks within one beat.
+    pub fn clicks_per_beat(self) -> u32 {
+        match self {
+            Self::Whole | Self::Half | Self::Quarter => 1,
+            Self::Eighth => 2,
+            Self::Triplet => 3,
+            Self::Sixteenth => 4,
+        }
+    }
+
+    /// How it reads on a display.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Whole => "1/1",
+            Self::Half => "1/2",
+            Self::Quarter => "1/4",
+            Self::Eighth => "1/8",
+            Self::Triplet => "1/8T",
+            Self::Sixteenth => "1/16",
+        }
+    }
+}
+
 /// Maps frame positions to musical time. `Copy` and stateless.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BarGrid {
@@ -304,6 +365,37 @@ impl BarGrid {
         }
     }
 
+    /// The instant strictly after `pos` when the bar is cut into `slices` equal parts.
+    ///
+    /// Every beat boundary is a slice boundary when `slices` is a multiple of the beats in
+    /// a bar.
+    pub fn next_slice(self, pos: Frames, slices: u32) -> Frames {
+        let slices = u64::from(slices.max(1));
+        let bar = self.bar_of(pos);
+        let into_bar = pos.0 - bar * self.frames_per_bar;
+
+        // Offsets are floored, so the index this estimates can land on or before `pos`.
+        let mut index = into_bar * slices / self.frames_per_bar;
+        while index < slices && self.frames_per_bar * index / slices <= into_bar {
+            index += 1;
+        }
+        if index >= slices {
+            self.bar_start(bar + 1)
+        } else {
+            Frames(bar * self.frames_per_bar + self.frames_per_bar * index / slices)
+        }
+    }
+
+    /// Whether `pos` is exactly one of the instants [`Self::next_slice`] steps through.
+    pub fn on_slice(self, pos: Frames, slices: u32) -> bool {
+        let slices = u64::from(slices.max(1));
+        let into_bar = pos.0 % self.frames_per_bar;
+        // Offsets are floored, so the index this estimates can be one short.
+        let estimate = into_bar * slices / self.frames_per_bar;
+        (estimate..=estimate + 1)
+            .any(|index| index < slices && self.frames_per_bar * index / slices == into_bar)
+    }
+
     /// How many MIDI clock ticks have passed by `pos`.
     ///
     /// Ticks are counted per quarter note rather than per beat, so a bar of 7/8 carries
@@ -350,6 +442,85 @@ mod tests {
             TimeSignature::FOUR_FOUR,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn slices_land_on_every_beat_when_they_divide_it() {
+        let grid = BarGrid::new(
+            SampleRate::new(48_000).unwrap(),
+            Tempo::new(120.0).unwrap(),
+            TimeSignature::FOUR_FOUR,
+        )
+        .unwrap();
+
+        // Four beats cut in two: eighth notes, so every beat is still a slice.
+        let mut at = Frames::ZERO;
+        let mut seen = Vec::new();
+        for _ in 0..8 {
+            at = grid.next_slice(at, 8);
+            seen.push(at.0);
+        }
+        let bar = grid.frames_per_bar().0;
+        let expected: Vec<u64> = (1..=8).map(|k| bar * k / 8).collect();
+        assert_eq!(seen, expected);
+
+        for beat in 0..4 {
+            let on_beat = grid.beat_offset(beat).0;
+            assert!(seen.contains(&on_beat) || on_beat == 0, "beat {beat}");
+        }
+    }
+
+    #[test]
+    fn a_slice_boundary_is_recognised_wherever_it_falls() {
+        for (bpm, beats, unit, slices) in [
+            (120.0, 4, 4, 8),
+            (133.0, 7, 8, 21),
+            (90.0, 5, 4, 15),
+            (300.0, 3, 4, 12),
+        ] {
+            let grid = BarGrid::new(
+                SampleRate::new(48_000).unwrap(),
+                Tempo::new(bpm).unwrap(),
+                TimeSignature::new(beats, unit).unwrap(),
+            )
+            .unwrap();
+
+            let mut at = Frames::ZERO;
+            assert!(grid.on_slice(at, slices), "the bar line is one");
+            for _ in 0..40 {
+                let next = grid.next_slice(at, slices);
+                assert!(
+                    grid.on_slice(next, slices),
+                    "{bpm} {beats}/{unit}: {} should be a slice",
+                    next.0
+                );
+                // The frame before a slice is not one, or the click would double up.
+                if next.0 > 0 {
+                    assert!(!grid.on_slice(Frames(next.0 - 1), slices) || next.0 - 1 == at.0);
+                }
+                at = next;
+            }
+        }
+    }
+
+    #[test]
+    fn a_slice_always_moves_forward() {
+        let grid = BarGrid::new(
+            SampleRate::new(44_100).unwrap(),
+            Tempo::new(133.0).unwrap(),
+            TimeSignature::new(7, 8).unwrap(),
+        )
+        .unwrap();
+
+        // An awkward bar length and a count that does not divide it evenly.
+        for slices in [1, 2, 3, 7, 12, 21] {
+            let mut at = Frames::ZERO;
+            for _ in 0..64 {
+                let next = grid.next_slice(at, slices);
+                assert!(next.0 > at.0, "{slices} slices stalled at {}", at.0);
+                at = next;
+            }
+        }
     }
 
     #[test]
