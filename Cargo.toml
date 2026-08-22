@@ -36,6 +36,12 @@ serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 toml = "1"
 
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
 [workspace.lints.rust]
 future_incompatible = { level = "deny", priority = -1 }
 missing_debug_implementations = "warn"
