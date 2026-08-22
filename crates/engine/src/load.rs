@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use free_loop_core::{Frames, SlotAddr, Tempo};
+use free_loop_core::{Frames, SlotAddr, Tempo, TimeSignature};
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 
 use free_loop_clip::Clip;
@@ -17,10 +17,12 @@ const SLOTS: usize = 80;
 /// One step of a load.
 #[derive(Debug)]
 pub enum LoadMessage {
-    /// Empty the grid and take the session's tempo.
+    /// Empty the grid and take the session's musical time.
     Begin {
         /// Tempo the session was recorded at.
         tempo: Tempo,
+        /// Time signature the session was recorded in.
+        time_signature: TimeSignature,
     },
     /// Put a clip on a pad.
     Clip {
@@ -117,6 +119,7 @@ mod tests {
         loader
             .send(LoadMessage::Begin {
                 tempo: Tempo::new(120.0).unwrap(),
+                time_signature: TimeSignature::FOUR_FOUR,
             })
             .unwrap();
         loader

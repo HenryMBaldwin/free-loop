@@ -12,7 +12,8 @@
 
 use free_loop_clip::{AudioBuffer, Clip, SegmentPool};
 use free_loop_core::{
-    ClipId, Command, Event, Frames, Settings, SlotAddr, SlotId, SlotState, Tempo, TrackId,
+    ClipId, Command, Event, Frames, Settings, SlotAddr, SlotId, SlotState, Tempo, TimeSignature,
+    TrackId,
 };
 use free_loop_engine::{ClickConfig, Engine, EngineConfig, Housekeeping, LoadMessage, Snapshot};
 use std::sync::Arc;
@@ -678,6 +679,7 @@ fn a_loaded_session_lands_on_the_grid_frozen() {
         .loader
         .send(LoadMessage::Begin {
             tempo: Tempo::new(90.0).unwrap(),
+            time_signature: TimeSignature::FOUR_FOUR,
         })
         .unwrap();
     harness
@@ -709,6 +711,73 @@ fn a_loaded_session_lands_on_the_grid_frozen() {
 }
 
 #[test]
+fn a_session_in_another_time_signature_brings_it_along() {
+    let mut harness = Harness::new(128);
+    let pad = addr(2, 3);
+    harness.run_to(BAR);
+    let four_four = harness.engine.grid().bars(1);
+
+    let three_four = TimeSignature::new(3, 4).unwrap();
+    harness
+        .housekeeping
+        .loader
+        .send(LoadMessage::Begin {
+            tempo: Tempo::new(120.0).unwrap(),
+            time_signature: three_four,
+        })
+        .unwrap();
+    harness
+        .housekeeping
+        .loader
+        .send(LoadMessage::Clip {
+            addr: pad,
+            clip: lent_clip(1_000, 0),
+            playing: false,
+            launch_anchor: None,
+        })
+        .unwrap();
+    harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+    harness.run_frames(128);
+
+    assert_eq!(
+        harness.engine.grid().time_signature(),
+        three_four,
+        "the session's signature came with it"
+    );
+    assert_eq!(
+        harness.engine.grid().bars(1).0 * 4,
+        four_four.0 * 3,
+        "three beats to the bar at the same tempo"
+    );
+}
+
+#[test]
+fn a_signature_a_load_brought_outlives_a_later_tempo_change() {
+    let mut harness = Harness::new(128);
+    let seven_eight = TimeSignature::new(7, 8).unwrap();
+    harness
+        .housekeeping
+        .loader
+        .send(LoadMessage::Begin {
+            tempo: Tempo::new(100.0).unwrap(),
+            time_signature: seven_eight,
+        })
+        .unwrap();
+    harness.housekeeping.loader.send(LoadMessage::End).unwrap();
+    harness.run_frames(128);
+
+    // Nothing was loaded onto a pad, so the tempo is not locked.
+    harness.command(Command::SetTempo(Tempo::new(140.0).unwrap()));
+    harness.run_frames(128);
+
+    assert_eq!(
+        harness.engine.grid().time_signature(),
+        seven_eight,
+        "the signature is the engine's now, not the load's"
+    );
+}
+
+#[test]
 fn loading_replaces_what_was_on_the_grid() {
     let mut harness = Harness::new(128);
     let recorded = addr(0, 0);
@@ -720,6 +789,7 @@ fn loading_replaces_what_was_on_the_grid() {
         .loader
         .send(LoadMessage::Begin {
             tempo: Tempo::new(120.0).unwrap(),
+            time_signature: TimeSignature::FOUR_FOUR,
         })
         .unwrap();
     harness
@@ -753,6 +823,7 @@ fn lent_storage_comes_back_rather_than_joining_the_pool() {
         .loader
         .send(LoadMessage::Begin {
             tempo: Tempo::new(120.0).unwrap(),
+            time_signature: TimeSignature::FOUR_FOUR,
         })
         .unwrap();
     harness
@@ -798,6 +869,7 @@ fn a_load_leaves_less_room_to_record() {
         .loader
         .send(LoadMessage::Begin {
             tempo: Tempo::new(120.0).unwrap(),
+            time_signature: TimeSignature::FOUR_FOUR,
         })
         .unwrap();
     for pad in SlotAddr::all().take(available) {
@@ -1004,6 +1076,7 @@ fn load_one(harness: &mut Harness, pad: SlotAddr, segments: usize) {
         .loader
         .send(LoadMessage::Begin {
             tempo: Tempo::new(120.0).unwrap(),
+            time_signature: TimeSignature::FOUR_FOUR,
         })
         .unwrap();
     harness
@@ -1031,6 +1104,7 @@ fn a_loaded_loop_plays_what_was_saved() {
         .loader
         .send(LoadMessage::Begin {
             tempo: Tempo::new(120.0).unwrap(),
+            time_signature: TimeSignature::FOUR_FOUR,
         })
         .unwrap();
     harness
@@ -1229,6 +1303,7 @@ fn recording_onto_a_loaded_session_captures_audio() {
         .loader
         .send(LoadMessage::Begin {
             tempo: Tempo::new(120.0).unwrap(),
+            time_signature: TimeSignature::FOUR_FOUR,
         })
         .unwrap();
     harness
@@ -1300,6 +1375,7 @@ fn a_loaded_session_starts_at_the_beginning() {
         .loader
         .send(LoadMessage::Begin {
             tempo: Tempo::new(120.0).unwrap(),
+            time_signature: TimeSignature::FOUR_FOUR,
         })
         .unwrap();
     harness
@@ -1610,6 +1686,7 @@ mod staged_load {
             .loader
             .send(LoadMessage::Begin {
                 tempo: Tempo::new(90.0).unwrap(),
+                time_signature: TimeSignature::FOUR_FOUR,
             })
             .unwrap();
         harness.run_frames(128);
@@ -1633,6 +1710,7 @@ mod staged_load {
             .loader
             .send(LoadMessage::Begin {
                 tempo: Tempo::new(90.0).unwrap(),
+                time_signature: TimeSignature::FOUR_FOUR,
             })
             .unwrap();
         harness.run_frames(128);
@@ -1664,6 +1742,7 @@ mod load_protocol {
             .loader
             .send(LoadMessage::Begin {
                 tempo: Tempo::new(90.0).unwrap(),
+                time_signature: TimeSignature::FOUR_FOUR,
             })
             .unwrap();
     }
