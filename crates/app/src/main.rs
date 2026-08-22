@@ -145,15 +145,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         let (path, config) = (path.clone(), config.clone());
         let (running, stopped) = (Arc::clone(&running), Arc::clone(&stopped));
         move || {
+            // On drop rather than after the call, so a panic still closes the window.
+            let _stopping = Stopping {
+                running: Arc::clone(&running),
+                stopped,
+            };
             // Reduced to its text, which a `Box<dyn Error>` cannot cross a thread to give.
-            let outcome = play(&path, &config, Some(gui::PORT_NAME), &running).map_err(|error| {
+            play(&path, &config, Some(gui::PORT_NAME), &running).map_err(|error| {
                 // Reported here as well, or the window would close saying nothing.
                 tracing::error!("{error}");
                 error.to_string()
-            });
-            running.store(false, Ordering::Relaxed);
-            stopped.store(true, Ordering::Relaxed);
-            outcome
+            })
         }
     });
 
@@ -166,6 +168,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     shown?;
     Ok(())
+}
+
+/// Tells the window the looper has finished, however its thread ended.
+struct Stopping {
+    running: Arc<AtomicBool>,
+    stopped: Arc<AtomicBool>,
+}
+
+impl Drop for Stopping {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+        self.stopped.store(true, Ordering::Relaxed);
+    }
 }
 
 /// Opens the devices and runs the control loop until `running` clears, taking the surface
