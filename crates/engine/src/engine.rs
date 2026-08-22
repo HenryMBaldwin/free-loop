@@ -10,8 +10,8 @@
 
 use free_loop_core::{
     BarGrid, ClipId, Command, Ctx, Effect, Event, Frames, LaunchMode, PadMask, SLOT_COUNT,
-    SampleRate, SessionModel, Settings, SlotAddr, SlotState, TRACK_COUNT, Tempo, TimeError,
-    TimeSignature, TrackInput, UNITY_STEP, gain_for_step, pad_bit,
+    SampleRate, SessionModel, Settings, SlotAddr, SlotState, Subdivision, TRACK_COUNT, Tempo,
+    TimeError, TimeSignature, TrackInput, UNITY_STEP, gain_for_step, pad_bit,
 };
 
 use std::sync::Arc;
@@ -459,6 +459,8 @@ pub struct Engine {
     session: SessionModel,
     audio: Audio,
     click: Click,
+    /// How often the click sounds.
+    subdivision: Subdivision,
     loads: LoadInbox,
     channels: usize,
     /// Width of the input buffer, which a track picks one or two channels from.
@@ -541,6 +543,7 @@ impl Engine {
                 staged: Staging::new(),
             },
             click: Click::new(config.click, config.sample_rate),
+            subdivision: Subdivision::default(),
             loads,
             channels: config.channels,
             capture_channels: config.capture_channels,
@@ -714,6 +717,7 @@ impl Engine {
             Command::SetPaused(paused) => self.set_paused(paused, sink),
             Command::SetClickEnabled(enabled) => self.click.set_enabled(enabled),
             Command::SetClickLevel(level) => self.click.set_level(level),
+            Command::SetClickSubdivision(subdivision) => self.subdivision = subdivision,
             Command::SetTempo(tempo) => self.set_tempo(tempo, sink),
             Command::SetTimeSignature(signature) => self.set_time_signature(signature, sink),
         }
@@ -1101,8 +1105,12 @@ impl Engine {
         let mut done = 0;
         while done < frames {
             self.reach_boundary(sink);
+            self.reach_click();
 
-            let next = self.grid.next_beat_boundary(self.position);
+            let next = self
+                .grid
+                .next_beat_boundary(self.position)
+                .min(self.grid.next_slice(self.position, self.clicks_per_bar()));
             let run = as_usize(next.saturating_sub(self.position).0).min(frames - done);
             self.render(input, output, done, run, input_frames, sink);
 
@@ -1138,6 +1146,31 @@ impl Engine {
         self.last_clock = self.grid.clock_ticks_at(self.position);
     }
 
+    /// Clicks the bar is cut into, so every beat is one of them.
+    fn clicks_per_bar(&self) -> u32 {
+        self.grid
+            .time_signature()
+            .beats_per_bar()
+            .saturating_mul(self.subdivision.clicks_per_beat())
+    }
+
+    /// Sounds the click if the transport has reached one of its instants.
+    fn reach_click(&mut self) {
+        let per_beat = self.subdivision.clicks_per_beat();
+        let (bar, beat) = self.grid.beat_of(self.position);
+        let beat_start = self.grid.bar_start(bar) + self.grid.beat_offset(beat);
+        let on_beat = beat_start == self.position;
+
+        if on_beat {
+            // Counted from the bar line, so the downbeat always sounds.
+            if beat % self.subdivision.beats_per_click() == 0 {
+                self.click.trigger(beat == 0);
+            }
+        } else if per_beat > 1 && self.grid.on_slice(self.position, self.clicks_per_bar()) {
+            self.click.trigger(false);
+        }
+    }
+
     /// Fires anything scheduled for the exact frame the transport has reached.
     fn reach_boundary(&mut self, sink: &mut impl EventSink) {
         let (bar, beat) = self.grid.beat_of(self.position);
@@ -1151,7 +1184,6 @@ impl Engine {
             sink.event(Event::Bar { bar });
         }
         sink.event(Event::Beat { bar, beat });
-        self.click.trigger(beat == 0);
 
         let before = self.session;
         let ctx = self.ctx();
