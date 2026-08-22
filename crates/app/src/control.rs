@@ -1441,7 +1441,7 @@ mod tests {
 
     /// Does whatever leaves the screen showing: all of its buttons down, then up.
     ///
-    /// Together rather than in turn, since a screen taking two of them wants them held.
+    /// All down before any up: a screen taking two of them wants them held together.
     fn press_the_way_out(controller: &mut Controller) {
         let ways: Vec<Button> = crate::screen::exits(controller.mode())
             .into_iter()
