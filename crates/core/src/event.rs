@@ -83,6 +83,8 @@ pub enum Event {
     },
     /// A tempo change was refused because clips already exist.
     TempoRejected,
+    /// A time signature change was refused because a clip exists.
+    TimeSignatureRejected,
     /// A load held more audio than the pool allows, and was refused whole.
     LoadRefused {
         /// Segments the session needs.
@@ -128,6 +130,8 @@ pub enum EventKind {
     Xrun,
     /// [`Event::TempoRejected`].
     TempoRejected,
+    /// [`Event::TimeSignatureRejected`].
+    TimeSignatureRejected,
     /// [`Event::LoadRefused`].
     LoadRefused,
     /// [`Event::SnapshotComplete`].
@@ -136,7 +140,7 @@ pub enum EventKind {
 
 impl EventKind {
     /// Every kind, in the order they index a per-kind count.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::SlotChanged,
         Self::Bar,
         Self::Clock,
@@ -149,6 +153,7 @@ impl EventKind {
         Self::Clipped,
         Self::Xrun,
         Self::TempoRejected,
+        Self::TimeSignatureRejected,
         Self::LoadRefused,
         Self::SnapshotComplete,
     ];
@@ -186,6 +191,7 @@ impl EventKind {
             Self::Clipped => "clipping report",
             Self::Xrun => "short capture report",
             Self::TempoRejected => "tempo refusal",
+            Self::TimeSignatureRejected => "time signature refusal",
             Self::LoadRefused => "load refusal",
             Self::SnapshotComplete => "snapshot completion",
         }
@@ -208,6 +214,7 @@ impl Event {
             Self::Clipped { .. } => EventKind::Clipped,
             Self::Xrun { .. } => EventKind::Xrun,
             Self::TempoRejected => EventKind::TempoRejected,
+            Self::TimeSignatureRejected => EventKind::TimeSignatureRejected,
             Self::LoadRefused { .. } => EventKind::LoadRefused,
             Self::SnapshotComplete { .. } => EventKind::SnapshotComplete,
         }

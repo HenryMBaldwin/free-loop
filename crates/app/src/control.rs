@@ -67,6 +67,8 @@ pub enum Mode {
     Input,
     /// One row of settings per track.
     Settings,
+    /// Beats to the bar and the note that gets the beat.
+    TimeSignature,
     /// Waiting for yes or no before saving over the pad it holds.
     ConfirmSave(SlotAddr),
     /// Waiting for yes or no before loading over what is on the grid.
@@ -85,7 +87,8 @@ impl Mode {
             | Self::Solo
             | Self::Volume
             | Self::Input
-            | Self::Settings => None,
+            | Self::Settings
+            | Self::TimeSignature => None,
         }
     }
 }
@@ -146,6 +149,10 @@ pub struct Controller {
     default_tempo: f64,
     /// The musical time the loaded material is in.
     time_signature: TimeSignature,
+    /// What the config asked for, which a fresh session goes back to.
+    default_time_signature: TimeSignature,
+    /// Signature to fall back to if the engine turns a change down.
+    signature_before_request: TimeSignature,
     /// The input a fresh session puts every track on.
     default_input: TrackInput,
     /// The launch mode a fresh session puts every track on.
@@ -209,6 +216,8 @@ impl Controller {
             tempo,
             default_tempo: tempo,
             time_signature,
+            default_time_signature: time_signature,
+            signature_before_request: time_signature,
             default_input: TrackInput::default(),
             default_launch_mode: LaunchMode::Follow,
             tempo_before_request: tempo,
@@ -447,6 +456,9 @@ impl Controller {
         if let Ok(tempo) = Tempo::new(self.default_tempo) {
             self.commands.push(Command::SetTempo(tempo));
         }
+        self.set_signature(self.default_time_signature);
+        self.commands
+            .push(Command::SetTimeSignature(self.default_time_signature));
         self.dirty = true;
     }
 
@@ -515,9 +527,41 @@ impl Controller {
 
     /// Takes the time signature a loaded session was recorded in.
     pub fn set_loaded_time_signature(&mut self, signature: TimeSignature) {
+        self.set_signature(signature);
+        self.signature_before_request = signature;
+    }
+
+    /// The signature a fresh session goes back to.
+    pub fn set_default_time_signature(&mut self, signature: TimeSignature) {
+        self.default_time_signature = signature;
+    }
+
+    fn set_signature(&mut self, signature: TimeSignature) {
         self.time_signature = signature;
         self.chrome.beats_per_bar = signature.beats_per_bar();
+        // A pickup cannot reach past the bar it opens from.
+        let degrees = signature.beats_per_bar().saturating_sub(1);
+        let degrees = u8::try_from(degrees).unwrap_or(u8::MAX).min(SHADES - 1);
+        for pickup in &mut self.chrome.pickups {
+            *pickup = (*pickup).min(degrees);
+        }
         self.dirty = true;
+    }
+
+    /// Takes the signature the pressed pad stands for, and leaves the page.
+    fn press_time_signature(&mut self, addr: SlotAddr) {
+        let Some(signature) = paint::signature_at(addr) else {
+            return;
+        };
+        self.mode = Mode::Perform;
+        self.dirty = true;
+        if signature == self.time_signature {
+            return;
+        }
+        self.signature_before_request = self.time_signature;
+        self.set_signature(signature);
+        self.settings_changed = true;
+        self.commands.push(Command::SetTimeSignature(signature));
     }
 
     /// The time signature the transport is in.
@@ -621,6 +665,9 @@ impl Controller {
             }
             SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::Settings => {
                 self.toggle_setting(addr);
+            }
+            SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::TimeSignature => {
+                self.press_time_signature(addr);
             }
             SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::LoadPicker => {
                 self.press_load(addr);
@@ -752,6 +799,13 @@ impl Controller {
     ///
     /// The tempo cannot move once a clip exists.
     fn press_tempo(&mut self, direction: f64, now: Duration) {
+        // Both tempo buttons at once asks for the signature, so the first nudge is undone.
+        if let Some(hold) = self.tempo_hold.take() {
+            self.tempo = hold.started_at;
+            self.mode = Mode::TimeSignature;
+            self.dirty = true;
+            return;
+        }
         if self.session.has_any_clip() {
             self.show_tempo(now);
             return;
@@ -853,6 +907,9 @@ impl Controller {
                     self.dirty = true;
                 }
                 self.beat_off = Some(now + self.lit_for());
+            }
+            Event::TimeSignatureRejected => {
+                self.set_signature(self.signature_before_request);
             }
             Event::TempoRejected => {
                 self.tempo = self.tempo_before_request;
@@ -958,6 +1015,8 @@ impl Controller {
             paint::inputs(self.chrome)
         } else if self.mode == Mode::Settings {
             paint::settings(self.chrome)
+        } else if self.mode == Mode::TimeSignature {
+            paint::time_signature(self.time_signature, self.chrome)
         } else if self.tempo_repeating() {
             // A number cannot track a tempo that is still moving, so the grid shows it
             // instead until the button is let go.
@@ -1873,11 +1932,16 @@ mod tests {
     #[test]
     fn tempo_moves_by_one_beat_per_press() {
         let mut controller = controller();
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
+        let tap = |controller: &mut Controller, button| {
+            controller.on_surface(SurfaceEvent::ControlPressed(button), T0);
+            controller.on_surface(SurfaceEvent::ControlReleased(button), T0);
+        };
+
+        tap(&mut controller, Control::TempoUp);
         assert_eq!(controller.tempo(), 121.0);
 
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoDown), T0);
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoDown), T0);
+        tap(&mut controller, Control::TempoDown);
+        tap(&mut controller, Control::TempoDown);
         assert_eq!(controller.tempo(), 119.0);
         assert_eq!(commands(&mut controller).len(), 3);
     }
@@ -2051,6 +2115,86 @@ mod tests {
         assert!(
             commands(&mut controller).is_empty(),
             "the engine took it from the load itself"
+        );
+    }
+
+    #[test]
+    fn both_tempo_buttons_open_the_signature_page_and_undo_the_nudge() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
+        assert_eq!(controller.tempo(), 121.0);
+
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoDown), T0);
+        assert_eq!(controller.tempo(), 120.0, "the nudge is put back");
+
+        let frame = controller.take_frame().unwrap();
+        let five_four = SlotAddr::new(TrackId::new(1).unwrap(), SlotId::new(4).unwrap());
+        assert!(frame.pad(five_four).is_lit(), "the page is showing");
+    }
+
+    #[test]
+    fn picking_a_signature_sends_it_and_leaves_the_page() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoDown), T0);
+        let _ = commands(&mut controller);
+
+        // Row one is a quarter-note beat, column two is three beats to the bar.
+        let three_four = SlotAddr::new(TrackId::new(1).unwrap(), SlotId::new(2).unwrap());
+        controller.on_surface(
+            SurfaceEvent::PadPressed {
+                addr: three_four,
+                velocity: 127,
+            },
+            T0,
+        );
+
+        let wanted = TimeSignature::new(3, 4).unwrap();
+        assert_eq!(controller.time_signature(), wanted);
+        assert_eq!(
+            commands(&mut controller),
+            vec![Command::SetTimeSignature(wanted)]
+        );
+    }
+
+    #[test]
+    fn a_refused_signature_change_is_rolled_back() {
+        let mut controller = controller();
+        controller.set_loaded_time_signature(TimeSignature::new(7, 8).unwrap());
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoDown), T0);
+
+        let pad = SlotAddr::new(TrackId::new(1).unwrap(), SlotId::new(2).unwrap());
+        controller.on_surface(
+            SurfaceEvent::PadPressed {
+                addr: pad,
+                velocity: 127,
+            },
+            T0,
+        );
+        assert_eq!(
+            controller.time_signature(),
+            TimeSignature::new(3, 4).unwrap()
+        );
+
+        controller.on_engine(Event::TimeSignatureRejected, T0);
+        assert_eq!(
+            controller.time_signature(),
+            TimeSignature::new(7, 8).unwrap(),
+            "back to what the engine still has"
+        );
+    }
+
+    #[test]
+    fn a_narrower_bar_pulls_a_pickup_in_with_it() {
+        let mut controller = controller();
+        controller.set_pickups([3; TRACK_COUNT]);
+
+        controller.set_loaded_time_signature(TimeSignature::new(2, 4).unwrap());
+        assert_eq!(
+            controller.pickups(),
+            [1; TRACK_COUNT],
+            "two beats to the bar leaves one to open from"
         );
     }
 
