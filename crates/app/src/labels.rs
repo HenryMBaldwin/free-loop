@@ -1,11 +1,12 @@
 //! What each button does, for the on-screen surface to name.
+//!
+//! Read from [`crate::screen`], so a name says what a press will actually do.
 
-use free_loop_core::{SLOT_COUNT, TRACK_COUNT};
+use free_loop_core::{SLOT_COUNT, SlotAddr, SlotId, TRACK_COUNT, TrackId};
 use free_loop_surface::{Control, SIDE_COUNT};
 
-use crate::paint::{
-    INPUT_SIDE, MUTE_SIDE, NEW_SIDE, PAUSE_SIDE, SETTINGS_SIDE, SOLO_SIDE, VOLUME_SIDE,
-};
+use crate::control::Mode;
+use crate::screen::{self, Button};
 use launchpad_emulator::Pad;
 use launchpad_emulator_ui::Labels;
 
@@ -29,46 +30,21 @@ fn as_u8(value: usize) -> u8 {
     u8::try_from(value).unwrap_or(u8::MAX)
 }
 
-/// What the right-hand button at `index` opens.
-fn side_name(index: usize) -> &'static str {
-    match index {
-        VOLUME_SIDE => "volume",
-        INPUT_SIDE => "input",
-        SETTINGS_SIDE => "settings",
-        PAUSE_SIDE => "play / pause",
-        MUTE_SIDE => "mute",
-        SOLO_SIDE => "solo",
-        NEW_SIDE => "new session",
-        _ => "unused",
-    }
-}
+/// Every button named by what it does on `mode`, with the rest left blank.
+pub fn for_mode(mode: Mode) -> Labels {
+    let named = |button: Button, pad: Pad| screen::name(mode, button).map(|name| (pad, name));
 
-/// What the top-row `control` does.
-fn control_name(control: Control) -> &'static str {
-    match control {
-        Control::TempoUp => "tempo up",
-        Control::TempoDown => "tempo down",
-        Control::Rewind => "rewind",
-        Control::Axis => "mute and solo by row or column",
-        Control::LoadSession => "load session",
-        Control::ClickToggle => "click",
-        Control::StopAll => "stop all",
-        Control::SaveSession => "save session",
-    }
-}
-
-/// Every button named by the job it always has.
-pub fn fixed() -> Labels {
-    let controls = Control::all().map(|control| {
-        (
-            control_pad(control.index()),
-            control_name(control).to_owned(),
-        )
-    });
-    let sides = (0..SIDE_COUNT).map(|index| (side_pad(index), side_name(index).to_owned()));
-    let pads = (0..TRACK_COUNT).flat_map(|track| {
-        (0..SLOT_COUNT)
-            .map(move |slot| (grid_pad(track, slot), format!("track {track} slot {slot}")))
+    let controls = Control::all()
+        .filter_map(|control| named(Button::Top(control), control_pad(control.index())));
+    let sides = (0..SIDE_COUNT).filter_map(|index| named(Button::Side(index), side_pad(index)));
+    let pads = (0..TRACK_COUNT).flat_map(move |track| {
+        (0..SLOT_COUNT).filter_map(move |slot| {
+            let addr = SlotAddr::new(
+                TrackId::new(as_u8(track)).ok()?,
+                SlotId::new(as_u8(slot)).ok()?,
+            );
+            named(Button::Grid(addr), grid_pad(track, slot))
+        })
     });
 
     Labels::none()
@@ -82,12 +58,13 @@ mod tests {
     #![allow(clippy::unwrap_used, reason = "tests should fail loudly")]
 
     use super::*;
+    use crate::paint::{MUTE_SIDE, PAUSE_SIDE, VOLUME_SIDE};
     use launchpad_emulator::DeviceSpec;
     use launchpad_emulator::devices::LaunchpadX;
 
     #[test]
-    fn every_button_the_looper_uses_is_named() {
-        let labels = fixed();
+    fn the_loops_screen_names_every_button_it_binds() {
+        let labels = for_mode(Mode::Perform);
         for track in 0..TRACK_COUNT {
             for slot in 0..SLOT_COUNT {
                 assert!(
@@ -96,14 +73,56 @@ mod tests {
                 );
             }
         }
-        for index in 0..SIDE_COUNT {
-            assert!(labels.get(side_pad(index)).is_some(), "side {index}");
-        }
         for control in Control::all() {
             assert!(
                 labels.get(control_pad(control.index())).is_some(),
                 "{control:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_screen_names_only_what_it_uses() {
+        let labels = for_mode(Mode::Mute);
+
+        // The top row belongs to the loops, not to mute, so it goes unnamed.
+        for control in Control::all() {
+            assert!(
+                labels.get(control_pad(control.index())).is_none(),
+                "{control:?} named on the mute screen"
+            );
+        }
+        // The way out and the transport are the two it does have.
+        assert_eq!(labels.get(side_pad(MUTE_SIDE)), Some("leave mute"));
+        assert_eq!(labels.get(side_pad(PAUSE_SIDE)), Some("play / pause"));
+        assert!(labels.get(side_pad(VOLUME_SIDE)).is_none(), "out of reach");
+    }
+
+    #[test]
+    fn a_name_is_only_given_where_a_press_does_something() {
+        for mode in [
+            Mode::Perform,
+            Mode::Mute,
+            Mode::Solo,
+            Mode::Volume,
+            Mode::Input,
+            Mode::Settings,
+            Mode::TimeSignature,
+            Mode::Subdivision,
+            Mode::SavePicker,
+            Mode::LoadPicker,
+        ] {
+            let labels = for_mode(mode);
+            for index in 0..SIDE_COUNT {
+                let named = labels.get(side_pad(index)).is_some();
+                let acts = screen::role(mode, Button::Side(index)) != screen::Role::Inert;
+                assert_eq!(named, acts, "{mode:?} side {index}");
+            }
+            for control in Control::all() {
+                let named = labels.get(control_pad(control.index())).is_some();
+                let acts = screen::role(mode, Button::Top(control)) != screen::Role::Inert;
+                assert_eq!(named, acts, "{mode:?} {control:?}");
+            }
         }
     }
 
