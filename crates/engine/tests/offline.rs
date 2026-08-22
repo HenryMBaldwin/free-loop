@@ -668,6 +668,16 @@ fn lent_clip(frames: u64, phase: u64) -> Arc<Clip> {
     Arc::new(clip)
 }
 
+/// The grid a load hands over, built the way the app builds it.
+fn grid_for(tempo: Tempo, signature: TimeSignature) -> free_loop_core::BarGrid {
+    free_loop_core::BarGrid::new(
+        free_loop_core::SampleRate::new(48_000).unwrap(),
+        tempo,
+        signature,
+    )
+    .unwrap()
+}
+
 #[test]
 fn a_loaded_session_lands_on_the_grid_frozen() {
     let mut harness = Harness::new(128);
@@ -678,8 +688,7 @@ fn a_loaded_session_lands_on_the_grid_frozen() {
         .housekeeping
         .loader
         .send(LoadMessage::Begin {
-            tempo: Tempo::new(90.0).unwrap(),
-            time_signature: TimeSignature::FOUR_FOUR,
+            grid: grid_for(Tempo::new(90.0).unwrap(), TimeSignature::FOUR_FOUR),
         })
         .unwrap();
     harness
@@ -844,8 +853,7 @@ fn a_session_in_another_time_signature_brings_it_along() {
         .housekeeping
         .loader
         .send(LoadMessage::Begin {
-            tempo: Tempo::new(120.0).unwrap(),
-            time_signature: three_four,
+            grid: grid_for(Tempo::new(120.0).unwrap(), three_four),
         })
         .unwrap();
     harness
@@ -881,8 +889,7 @@ fn a_signature_a_load_brought_outlives_a_later_tempo_change() {
         .housekeeping
         .loader
         .send(LoadMessage::Begin {
-            tempo: Tempo::new(100.0).unwrap(),
-            time_signature: seven_eight,
+            grid: grid_for(Tempo::new(100.0).unwrap(), seven_eight),
         })
         .unwrap();
     harness.housekeeping.loader.send(LoadMessage::End).unwrap();
@@ -910,8 +917,7 @@ fn loading_replaces_what_was_on_the_grid() {
         .housekeeping
         .loader
         .send(LoadMessage::Begin {
-            tempo: Tempo::new(120.0).unwrap(),
-            time_signature: TimeSignature::FOUR_FOUR,
+            grid: grid_for(Tempo::new(120.0).unwrap(), TimeSignature::FOUR_FOUR),
         })
         .unwrap();
     harness
@@ -944,8 +950,7 @@ fn lent_storage_comes_back_rather_than_joining_the_pool() {
         .housekeeping
         .loader
         .send(LoadMessage::Begin {
-            tempo: Tempo::new(120.0).unwrap(),
-            time_signature: TimeSignature::FOUR_FOUR,
+            grid: grid_for(Tempo::new(120.0).unwrap(), TimeSignature::FOUR_FOUR),
         })
         .unwrap();
     harness
@@ -990,8 +995,7 @@ fn a_load_leaves_less_room_to_record() {
         .housekeeping
         .loader
         .send(LoadMessage::Begin {
-            tempo: Tempo::new(120.0).unwrap(),
-            time_signature: TimeSignature::FOUR_FOUR,
+            grid: grid_for(Tempo::new(120.0).unwrap(), TimeSignature::FOUR_FOUR),
         })
         .unwrap();
     for pad in SlotAddr::all().take(available) {
@@ -1197,8 +1201,7 @@ fn load_one(harness: &mut Harness, pad: SlotAddr, segments: usize) {
         .housekeeping
         .loader
         .send(LoadMessage::Begin {
-            tempo: Tempo::new(120.0).unwrap(),
-            time_signature: TimeSignature::FOUR_FOUR,
+            grid: grid_for(Tempo::new(120.0).unwrap(), TimeSignature::FOUR_FOUR),
         })
         .unwrap();
     harness
@@ -1225,8 +1228,7 @@ fn a_loaded_loop_plays_what_was_saved() {
         .housekeeping
         .loader
         .send(LoadMessage::Begin {
-            tempo: Tempo::new(120.0).unwrap(),
-            time_signature: TimeSignature::FOUR_FOUR,
+            grid: grid_for(Tempo::new(120.0).unwrap(), TimeSignature::FOUR_FOUR),
         })
         .unwrap();
     harness
@@ -1424,8 +1426,7 @@ fn recording_onto_a_loaded_session_captures_audio() {
         .housekeeping
         .loader
         .send(LoadMessage::Begin {
-            tempo: Tempo::new(120.0).unwrap(),
-            time_signature: TimeSignature::FOUR_FOUR,
+            grid: grid_for(Tempo::new(120.0).unwrap(), TimeSignature::FOUR_FOUR),
         })
         .unwrap();
     harness
@@ -1496,8 +1497,7 @@ fn a_loaded_session_starts_at_the_beginning() {
         .housekeeping
         .loader
         .send(LoadMessage::Begin {
-            tempo: Tempo::new(120.0).unwrap(),
-            time_signature: TimeSignature::FOUR_FOUR,
+            grid: grid_for(Tempo::new(120.0).unwrap(), TimeSignature::FOUR_FOUR),
         })
         .unwrap();
     harness
@@ -1807,8 +1807,7 @@ mod staged_load {
             .housekeeping
             .loader
             .send(LoadMessage::Begin {
-                tempo: Tempo::new(90.0).unwrap(),
-                time_signature: TimeSignature::FOUR_FOUR,
+                grid: grid_for(Tempo::new(90.0).unwrap(), TimeSignature::FOUR_FOUR),
             })
             .unwrap();
         harness.run_frames(128);
@@ -1831,8 +1830,7 @@ mod staged_load {
             .housekeeping
             .loader
             .send(LoadMessage::Begin {
-                tempo: Tempo::new(90.0).unwrap(),
-                time_signature: TimeSignature::FOUR_FOUR,
+                grid: grid_for(Tempo::new(90.0).unwrap(), TimeSignature::FOUR_FOUR),
             })
             .unwrap();
         harness.run_frames(128);
@@ -1863,8 +1861,7 @@ mod load_protocol {
             .housekeeping
             .loader
             .send(LoadMessage::Begin {
-                tempo: Tempo::new(90.0).unwrap(),
-                time_signature: TimeSignature::FOUR_FOUR,
+                grid: grid_for(Tempo::new(90.0).unwrap(), TimeSignature::FOUR_FOUR),
             })
             .unwrap();
     }

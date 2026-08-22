@@ -158,8 +158,8 @@ pub struct Controller {
     time_signature: TimeSignature,
     /// What the config asked for, which a fresh session goes back to.
     default_time_signature: TimeSignature,
-    /// Signature to fall back to if the engine turns a change down.
-    signature_before_request: TimeSignature,
+    /// The last signature the engine confirmed, which a refusal falls back to.
+    confirmed_signature: TimeSignature,
     /// When the click button went down, and whether the hold has already been used.
     click_hold: Option<(Duration, bool)>,
     /// The input a fresh session puts every track on.
@@ -227,7 +227,7 @@ impl Controller {
             default_tempo: tempo,
             time_signature,
             default_time_signature: time_signature,
-            signature_before_request: time_signature,
+            confirmed_signature: time_signature,
             click_hold: None,
             default_input: TrackInput::default(),
             default_launch_mode: LaunchMode::Follow,
@@ -563,7 +563,7 @@ impl Controller {
     /// Takes a signature the engine is known to be running, and everything that follows.
     fn adopt_signature(&mut self, signature: TimeSignature) {
         self.show_signature_state(signature);
-        self.signature_before_request = signature;
+        self.confirmed_signature = signature;
 
         // A rate the bar cannot be cut into falls back to one click a beat.
         if !self.chrome.subdivision.fits(signature) {
@@ -618,9 +618,9 @@ impl Controller {
             return;
         }
         if next != current {
-            self.signature_before_request = current;
             // Shown at once so it can be heard, but nothing that depends on it moves
-            // until the engine says it took the change.
+            // until the engine says it took the change. The value to fall back to stays
+            // the last one the engine confirmed, however many presses go unanswered.
             self.show_signature_state(next);
             self.commands.push(Command::SetTimeSignature(next));
         }
@@ -1060,7 +1060,7 @@ impl Controller {
                 }
             }
             Event::TimeSignatureRejected => {
-                self.show_signature_state(self.signature_before_request);
+                self.show_signature_state(self.confirmed_signature);
             }
             Event::TempoRejected => {
                 self.tempo = self.tempo_before_request;
@@ -2663,6 +2663,31 @@ mod tests {
             controller.pickups(),
             [3; TRACK_COUNT],
             "and neither did they"
+        );
+    }
+
+    #[test]
+    fn two_presses_refused_both_land_back_on_the_engines_own_signature() {
+        let mut controller = controller();
+        open_signature(&mut controller);
+        let beats_row = u8::try_from(BEATS_ROW).unwrap();
+
+        // Two presses before either answer arrives.
+        press(&mut controller, addr(beats_row, 2), T0);
+        press(&mut controller, addr(beats_row, 6), T0);
+        assert_eq!(
+            controller.time_signature(),
+            TimeSignature::new(7, 4).unwrap()
+        );
+
+        // Both refused. The engine never left 4/4, so neither refusal may land on 3/4.
+        controller.on_engine(Event::TimeSignatureRejected, T0);
+        assert_eq!(controller.time_signature(), TimeSignature::FOUR_FOUR);
+        controller.on_engine(Event::TimeSignatureRejected, T0);
+        assert_eq!(
+            controller.time_signature(),
+            TimeSignature::FOUR_FOUR,
+            "the fallback is the last confirmed value, not the last requested one"
         );
     }
 

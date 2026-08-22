@@ -208,6 +208,8 @@ fn run(s: Session<'_>) {
     let mut missed_reports = DroppedEvents::default();
     // Clock ticks the device has had, against the running total the engine reports.
     let mut clock_sent = 0_u64;
+    // A command the engine never received, waiting for room to ask it to report again.
+    let mut owed_resync = false;
 
     while running.load(Ordering::Relaxed) {
         let now = started.elapsed();
@@ -257,10 +259,9 @@ fn run(s: Session<'_>) {
         if let Some(settings) = controller.take_settings() {
             io.publish_settings(settings);
         }
-        for command in controller.drain_commands() {
-            if io.send(command).is_err() {
-                eprintln!("audio thread is not keeping up; dropped {command:?}");
-            }
+        owed_resync |= send_commands(io, controller);
+        if owed_resync && io.send(Command::Resync).is_ok() {
+            owed_resync = false;
         }
 
         let drained = drain_engine(io, controller, now);
@@ -687,9 +688,9 @@ fn load(
     let time_signature =
         free_loop_core::TimeSignature::new(manifest.beats_per_bar, manifest.beat_unit)?;
     let tempo = free_loop_core::Tempo::new(manifest.tempo)?;
-    // The engine can only take a grid it can measure, and it has already committed the
-    // clips by the time it finds out.
-    free_loop_core::BarGrid::new(
+    // The engine takes the grid itself, so an unmeasurable one is refused before any
+    // clip is read.
+    let grid = free_loop_core::BarGrid::new(
         free_loop_core::SampleRate::new(negotiated.sample_rate)?,
         tempo,
         time_signature,
@@ -705,10 +706,7 @@ fn load(
     if !loader.ready() {
         return Err("the audio thread has not drained the load queue".into());
     }
-    loader.send(LoadMessage::Begin {
-        tempo,
-        time_signature,
-    })?;
+    loader.send(LoadMessage::Begin { grid })?;
     for loaded in session.clips {
         loader.send(LoadMessage::Clip {
             addr: loaded.addr,
@@ -830,6 +828,21 @@ fn resync_after_loss(io: &mut AudioIo, seen: DroppedEvents) -> DroppedEvents {
         return seen;
     }
     dropped
+}
+
+/// Hands the queued commands over. `true` if the engine missed one.
+///
+/// A command the engine never saw leaves the controller showing state the engine does not
+/// have, which only the engine can settle.
+fn send_commands(io: &mut AudioIo, controller: &mut Controller) -> bool {
+    let mut lost = false;
+    for command in controller.drain_commands() {
+        if io.send(command).is_err() {
+            eprintln!("audio thread is not keeping up; dropped {command:?}");
+            lost = true;
+        }
+    }
+    lost
 }
 
 /// Whether asking the engine again would put any of what was lost right.
@@ -989,6 +1002,27 @@ mod tests {
             describe_input(TrackInput::Pair(0, 1)),
             "input channels 0 and 1"
         );
+    }
+
+    #[test]
+    fn a_lost_signature_report_asks_the_engine_again() {
+        // Both directions: the value and the refusal that takes an optimistic copy back.
+        for kind in [
+            free_loop_core::EventKind::TimeSignature,
+            free_loop_core::EventKind::TimeSignatureRejected,
+        ] {
+            let lost = dropped(&[(kind, 1)]);
+            assert!(
+                needs_resync(&lost, &DroppedEvents::default()),
+                "{kind:?} should be asked for again"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lost_beat_is_not_worth_asking_about() {
+        let lost = dropped(&[(free_loop_core::EventKind::Beat, 4)]);
+        assert!(!needs_resync(&lost, &DroppedEvents::default()));
     }
 
     #[test]

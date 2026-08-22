@@ -183,7 +183,11 @@ impl EventKind {
     pub fn is_replayed(self) -> bool {
         matches!(
             self,
-            Self::SlotChanged | Self::Tempo | Self::TempoRejected | Self::TimeSignature
+            Self::SlotChanged
+                | Self::Tempo
+                | Self::TempoRejected
+                | Self::TimeSignature
+                | Self::TimeSignatureRejected
         )
     }
 
@@ -249,9 +253,17 @@ mod tests {
 
     #[test]
     fn a_resync_covers_the_state_the_controller_mirrors() {
-        assert!(EventKind::SlotChanged.is_replayed());
-        assert!(EventKind::Tempo.is_replayed());
-        assert!(EventKind::TempoRejected.is_replayed());
+        // Everything the controller keeps its own copy of, in both directions: the value
+        // and the refusal that takes an optimistic copy back.
+        for kind in [
+            EventKind::SlotChanged,
+            EventKind::Tempo,
+            EventKind::TempoRejected,
+            EventKind::TimeSignature,
+            EventKind::TimeSignatureRejected,
+        ] {
+            assert!(kind.is_replayed(), "{kind:?}");
+        }
         assert!(!EventKind::Beat.is_replayed(), "the next beat corrects it");
         assert!(!EventKind::Clock.is_replayed(), "the total corrects itself");
     }
