@@ -12,13 +12,11 @@ use free_loop_core::{
     Subdivision, TRACK_COUNT, Tempo, TimeSignature, TrackInput, UNITY_STEP, column_mask, pad_bit,
     row_mask,
 };
-use free_loop_surface::{Control, Led, LedColor, LedFrame, SHADES, SurfaceEvent};
+use free_loop_surface::{Control, Led, LedColor, LedFrame, SHADES, SIDE_COUNT, SurfaceEvent};
 
 use crate::paint;
-use crate::paint::{
-    Axis, Chrome, INPUT_SIDE, MUTE_SIDE, NEW_SIDE, NO_PAD, PAUSE_SIDE, PICKUP_COLUMN,
-    RESTART_COLUMN, SELECTED, SETTINGS_SIDE, SOLO_SIDE, VOLUME_SIDE, YES_PAD,
-};
+use crate::paint::{Axis, Chrome, NO_PAD, PICKUP_COLUMN, RESTART_COLUMN, SELECTED, YES_PAD};
+use crate::screen::{self, Button, Role};
 
 /// Beats per minute one press of the tempo buttons moves.
 pub const TEMPO_STEP: f64 = 1.0;
@@ -721,108 +719,92 @@ impl Controller {
     }
 
     /// Handles something the performer did, at time `now` since the app started.
+    ///
+    /// What a button does is [`screen::role`]'s answer for the screen showing, so a
+    /// button with no part to play on it does nothing.
     pub fn on_surface(&mut self, event: SurfaceEvent, now: Duration) {
         match event {
-            SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::SavePicker => {
-                self.press_save(addr);
+            SurfaceEvent::PadPressed { addr, .. } => self.press_pad(addr, now),
+            SurfaceEvent::PadReleased { addr } => self.release_pad(addr),
+            SurfaceEvent::ControlPressed(control) => {
+                self.press_button(Button::Top(control), now);
             }
-            SurfaceEvent::PadPressed { addr, .. }
-                if matches!(self.mode, Mode::ConfirmSave(_) | Mode::ConfirmLoad(_)) =>
-            {
-                self.answer(addr);
+            SurfaceEvent::ControlReleased(control) => {
+                self.release_button(Button::Top(control), now);
             }
-            SurfaceEvent::PadPressed { addr, .. }
-                if matches!(self.mode, Mode::Mute | Mode::Solo) =>
-            {
-                self.toggle_group(addr);
+            SurfaceEvent::SidePressed { index } => {
+                self.press_button(Button::Side(usize::from(index)), now);
             }
-            SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::Volume => {
-                self.set_level(addr);
-            }
-            SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::Input => {
-                self.press_input(addr);
-            }
-            SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::Settings => {
-                self.toggle_setting(addr);
-            }
-            SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::TimeSignature => {
-                self.press_time_signature(addr, now);
-            }
-            SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::Subdivision => {
-                if let Some(subdivision) = paint::subdivision_at(addr) {
-                    self.press_subdivision(subdivision, now);
-                }
-            }
-            SurfaceEvent::PadPressed { addr, .. } if self.mode == Mode::LoadPicker => {
-                self.press_load(addr);
-            }
-            SurfaceEvent::PadPressed { addr, .. } => {
+            SurfaceEvent::SideReleased { .. } => {}
+        }
+    }
+
+    /// Acts on a grid pad, according to what it means on this screen.
+    fn press_pad(&mut self, addr: SlotAddr, now: Duration) {
+        match screen::role(self.mode, Button::Grid(addr)) {
+            Role::Loop => {
                 // Nothing yet: which gesture this is depends on how long it lasts.
                 self.held[addr.track.index()][addr.slot.index()] = Some(now);
             }
-            SurfaceEvent::PadReleased { addr } if self.input_held == Some(addr) => {
-                self.input_held = None;
-            }
-            SurfaceEvent::PadReleased { addr } => {
-                // A hold that completed already emptied the pad and took its entry, so
-                // only a release that still has one is a tap.
-                if self.held[addr.track.index()][addr.slot.index()]
-                    .take()
-                    .is_some()
-                {
-                    self.commands.push(Command::Press(addr));
-                }
-            }
-            SurfaceEvent::ControlPressed(Control::ClickToggle) => self.press_click(now),
-            SurfaceEvent::ControlReleased(Control::ClickToggle) => self.release_click(),
-            SurfaceEvent::ControlPressed(Control::TempoDown) => self.press_tempo(-1.0, now),
-            SurfaceEvent::ControlPressed(Control::TempoUp) => self.press_tempo(1.0, now),
-            SurfaceEvent::ControlReleased(Control::TempoDown | Control::TempoUp) => {
-                self.release_tempo(now);
-            }
-            SurfaceEvent::ControlPressed(Control::StopAll) => self.commands.push(Command::StopAll),
-            SurfaceEvent::ControlPressed(Control::Rewind) => self.commands.push(Command::Rewind),
-            SurfaceEvent::ControlPressed(Control::Axis) => {
+            Role::Answer => self.answer(addr),
+            Role::SaveTo => self.press_save(addr),
+            Role::LoadFrom => self.press_load(addr),
+            Role::Group => self.toggle_group(addr),
+            Role::Level => self.set_level(addr),
+            Role::InputChannel => self.press_input(addr),
+            Role::Setting => self.toggle_setting(addr),
+            Role::Beats(_) | Role::Unit(_) => self.press_time_signature(addr, now),
+            Role::Rate(subdivision) => self.press_subdivision(subdivision, now),
+            _ => {}
+        }
+    }
+
+    fn release_pad(&mut self, addr: SlotAddr) {
+        if self.input_held == Some(addr) {
+            self.input_held = None;
+            return;
+        }
+        // A hold that completed already emptied the pad and took its entry, so only a
+        // release that still has one is a tap.
+        if self.held[addr.track.index()][addr.slot.index()]
+            .take()
+            .is_some()
+        {
+            self.commands.push(Command::Press(addr));
+        }
+    }
+
+    /// Acts on a top-row or side button, according to what it means on this screen.
+    fn press_button(&mut self, button: Button, now: Duration) {
+        match screen::role(self.mode, button) {
+            Role::Transport => self.toggle_paused(),
+            Role::Tempo(direction) => self.press_tempo(direction, now),
+            Role::Click => self.press_click(now),
+            Role::StopAll => self.commands.push(Command::StopAll),
+            Role::Rewind => self.commands.push(Command::Rewind),
+            Role::Axis => {
                 self.chrome.axis = self.chrome.axis.flipped();
                 self.dirty = true;
             }
-            SurfaceEvent::SidePressed { index }
-                if usize::from(index) == NEW_SIDE && self.mode == Mode::LoadPicker =>
-            {
-                self.start_fresh();
-            }
-            SurfaceEvent::SidePressed { index } if usize::from(index) == VOLUME_SIDE => {
-                self.set_mode(Mode::Volume);
-            }
-            SurfaceEvent::SidePressed { index } if usize::from(index) == INPUT_SIDE => {
-                self.set_mode(Mode::Input);
-            }
-            SurfaceEvent::SidePressed { index } if usize::from(index) == SETTINGS_SIDE => {
-                self.set_mode(Mode::Settings);
-            }
-            SurfaceEvent::SidePressed { index } if usize::from(index) == MUTE_SIDE => {
-                self.set_mode(Mode::Mute);
-            }
-            SurfaceEvent::SidePressed { index } if usize::from(index) == SOLO_SIDE => {
-                self.set_mode(Mode::Solo);
-            }
-            SurfaceEvent::ControlPressed(Control::SaveSession) => {
-                self.set_mode(Mode::SavePicker);
-            }
-            SurfaceEvent::ControlPressed(Control::LoadSession) => {
-                self.set_mode(Mode::LoadPicker);
-            }
-            SurfaceEvent::SidePressed { index } if usize::from(index) == PAUSE_SIDE => {
-                self.chrome.paused = !self.chrome.paused;
-                self.commands.push(Command::SetPaused(self.chrome.paused));
-                self.dirty = true;
-            }
-
-            // The other side buttons are unbound.
-            SurfaceEvent::ControlReleased(_)
-            | SurfaceEvent::SidePressed { .. }
-            | SurfaceEvent::SideReleased { .. } => {}
+            Role::NewSession => self.start_fresh(),
+            Role::Open(mode) => self.set_mode(mode),
+            _ => {}
         }
+    }
+
+    fn release_button(&mut self, button: Button, now: Duration) {
+        match screen::role(self.mode, button) {
+            Role::Tempo(_) => self.release_tempo(now),
+            Role::Click => self.release_click(),
+            _ => {}
+        }
+    }
+
+    /// Freezes or resumes the transport.
+    fn toggle_paused(&mut self) {
+        self.chrome.paused = !self.chrome.paused;
+        self.commands.push(Command::SetPaused(self.chrome.paused));
+        self.dirty = true;
     }
 
     /// Advances anything that depends on time passing rather than on an event.
@@ -1126,16 +1108,29 @@ impl Controller {
     ///
     /// Applied to every screen, so a held button looks the same on any of them.
     fn overlay(&mut self) {
-        match self.mode {
-            Mode::Volume => self.frame.set_side(VOLUME_SIDE, Led::flash(SELECTED)),
-            Mode::Input => self.frame.set_side(INPUT_SIDE, Led::flash(SELECTED)),
-            Mode::Settings => self.frame.set_side(SETTINGS_SIDE, Led::flash(SELECTED)),
-            Mode::Mute => self.frame.set_side(MUTE_SIDE, Led::flash(SELECTED)),
-            Mode::Solo => self.frame.set_side(SOLO_SIDE, Led::flash(SELECTED)),
-            Mode::Subdivision => self
-                .frame
-                .set_control(Control::ClickToggle.index(), Led::flash(SELECTED)),
-            _ => {}
+        // A button with no part to play on this screen shows nothing, so there is no way
+        // into another screen to reach for.
+        for control in Control::all() {
+            if screen::role(self.mode, Button::Top(control)) == Role::Inert {
+                self.frame.set_control(control.index(), Led::OFF);
+            }
+        }
+        for index in 0..SIDE_COUNT {
+            if screen::role(self.mode, Button::Side(index)) == Role::Inert {
+                self.frame.set_side(index, Led::OFF);
+            }
+        }
+        // Shares a top button with a control, and the beat is worth seeing from anywhere.
+        paint::beat_indicator(&mut self.frame, self.chrome);
+
+        // Whatever it takes to leave, on whatever screen this is.
+        for button in screen::exits(self.mode).into_iter().flatten() {
+            let led = Led::flash(SELECTED);
+            match button {
+                Button::Top(control) => self.frame.set_control(control.index(), led),
+                Button::Side(index) => self.frame.set_side(index, led),
+                Button::Grid(addr) => self.frame.set_pad(addr, led),
+            }
         }
 
         if let Some(hold) = self.tempo_hold {
@@ -1210,8 +1205,12 @@ mod tests {
     )]
 
     use super::*;
-    use crate::paint::{BEATS_ROW, SUBDIVISION_ROW, UNIT_ROW};
+    use crate::paint::{
+        BEATS_ROW, INPUT_SIDE, MUTE_SIDE, NEW_SIDE, PAUSE_SIDE, SETTINGS_SIDE, SOLO_SIDE,
+        SUBDIVISION_ROW, UNIT_ROW, VOLUME_SIDE,
+    };
     use free_loop_core::{ClipId, Frames, SlotId, SlotState, TrackId, column_mask, row_mask};
+    use free_loop_surface::FIRST_BEAT_LED;
 
     const T0: Duration = Duration::ZERO;
 
@@ -1336,12 +1335,93 @@ mod tests {
     }
 
     #[test]
+    fn a_screen_darkens_the_buttons_it_has_no_use_for() {
+        let mut controller = controller();
+        controller.on_surface(side(MUTE_SIDE), T0);
+        let frame = controller.take_frame().unwrap();
+
+        // Nothing on the top row belongs to the mute screen.
+        for control in Control::all() {
+            if control.index() == FIRST_BEAT_LED {
+                continue;
+            }
+            assert!(
+                !frame.control(control.index()).is_lit(),
+                "{control:?} is still offering itself"
+            );
+        }
+        for index in [VOLUME_SIDE, INPUT_SIDE, SETTINGS_SIDE, SOLO_SIDE, NEW_SIDE] {
+            assert!(!frame.side(index).is_lit(), "side {index} is still lit");
+        }
+        assert!(frame.side(PAUSE_SIDE).is_lit(), "the transport stays");
+    }
+
+    #[test]
+    fn a_screen_shows_the_way_out_of_it() {
+        let mut settings = controller();
+        settings.on_surface(side(SETTINGS_SIDE), T0);
+        let frame = settings.take_frame().unwrap();
+        assert_eq!(frame.side(SETTINGS_SIDE), Led::flash(SELECTED));
+
+        // The signature screen takes both tempo buttons to leave, so both say so.
+        let mut signature = controller();
+        signature.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
+        signature.on_surface(SurfaceEvent::ControlPressed(Control::TempoDown), T0);
+        let frame = signature.take_frame().unwrap();
+        assert_eq!(
+            frame.control(Control::TempoDown.index()),
+            Led::flash(SELECTED)
+        );
+    }
+
+    #[test]
+    fn the_beat_still_shows_from_another_screen() {
+        let mut controller = controller();
+        controller.on_surface(side(MUTE_SIDE), T0);
+        controller.on_engine(Event::Beat { bar: 0, beat: 0 }, T0);
+
+        let frame = controller.take_frame().unwrap();
+        assert_eq!(
+            frame.control(FIRST_BEAT_LED),
+            Led::solid(LedColor::Red),
+            "the downbeat, even on a screen that owns nothing else up there"
+        );
+    }
+
+    #[test]
+    fn a_screen_cannot_be_left_by_the_button_of_another() {
+        let mut controller = controller();
+        controller.on_surface(side(MUTE_SIDE), T0);
+
+        // Volume, settings and solo are all out of reach until mute is left.
+        for index in [VOLUME_SIDE, SETTINGS_SIDE, SOLO_SIDE] {
+            controller.on_surface(side(index), T0);
+            assert_eq!(controller.mode(), Mode::Mute, "side {index} let it out");
+        }
+        controller.on_surface(side(MUTE_SIDE), T0);
+        assert_eq!(controller.mode(), Mode::Perform);
+    }
+
+    #[test]
+    fn the_transport_answers_from_another_screen() {
+        let mut controller = controller();
+        controller.on_surface(side(VOLUME_SIDE), T0);
+        let _ = commands(&mut controller);
+
+        controller.on_surface(side(PAUSE_SIDE), T0);
+        assert_eq!(commands(&mut controller), vec![Command::SetPaused(true)]);
+        assert_eq!(controller.mode(), Mode::Volume, "and stays on the screen");
+    }
+
+    #[test]
     fn mute_and_solo_are_kept_apart() {
         let mut controller = controller();
         controller.on_surface(side(MUTE_SIDE), T0);
         press(&mut controller, addr(0, 0), T0);
         settings(&mut controller);
 
+        // Out of mute before solo opens: one screen cannot be reached from another.
+        controller.on_surface(side(MUTE_SIDE), T0);
         controller.on_surface(side(SOLO_SIDE), T0);
         press(&mut controller, addr(1, 0), T0);
 
@@ -1728,8 +1808,14 @@ mod tests {
     }
 
     #[test]
-    fn one_picker_replaces_the_other() {
+    fn one_picker_is_left_before_the_other_opens() {
         let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+
+        // The load button is not part of the save picker, so it does nothing there.
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        assert_eq!(controller.mode(), Mode::SavePicker);
+
         controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
         controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
         assert_eq!(controller.mode(), Mode::LoadPicker);
