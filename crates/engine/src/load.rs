@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use free_loop_core::{Frames, SlotAddr, Tempo, TimeSignature};
+use free_loop_core::{BarGrid, Frames, SlotAddr};
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 
 use free_loop_clip::Clip;
@@ -19,10 +19,8 @@ const SLOTS: usize = 80;
 pub enum LoadMessage {
     /// Empty the grid and take the session's musical time.
     Begin {
-        /// Tempo the session was recorded at.
-        tempo: Tempo,
-        /// Time signature the session was recorded in.
-        time_signature: TimeSignature,
+        /// The session's grid. Only exists if the engine can measure it.
+        grid: BarGrid,
     },
     /// Put a clip on a pad.
     Clip {
@@ -103,7 +101,7 @@ mod tests {
 
     use super::*;
     use free_loop_clip::AudioBuffer;
-    use free_loop_core::{Frames, SlotId, TrackId};
+    use free_loop_core::{Frames, SampleRate, SlotId, Tempo, TimeSignature, TrackId};
 
     fn clip() -> Arc<Clip> {
         Arc::new(Clip::new(AudioBuffer::new(1, 2), Frames(64), Frames(0), 2))
@@ -118,8 +116,12 @@ mod tests {
         let (mut loader, mut inbox) = channel();
         loader
             .send(LoadMessage::Begin {
-                tempo: Tempo::new(120.0).unwrap(),
-                time_signature: TimeSignature::FOUR_FOUR,
+                grid: BarGrid::new(
+                    SampleRate::new(48_000).unwrap(),
+                    Tempo::new(120.0).unwrap(),
+                    TimeSignature::FOUR_FOUR,
+                )
+                .unwrap(),
             })
             .unwrap();
         loader
