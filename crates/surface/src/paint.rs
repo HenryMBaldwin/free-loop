@@ -238,16 +238,13 @@ pub fn beat_indicator(frame: &mut LedFrame, chrome: Chrome) {
 pub const BEAT_UNITS: [u32; 4] = [2, 4, 8, 16];
 
 /// Grid row picking the beats in a bar, the signature's top number.
-pub const BEATS_ROW: usize = 2;
+pub const BEATS_ROW: usize = 0;
 
 /// Grid row picking the note that gets the beat, the signature's bottom number.
-pub const UNIT_ROW: usize = 5;
+pub const UNIT_ROW: usize = 2;
 
-/// Colour of the row picking the beats in a bar.
-pub const BEATS: LedColor = LedColor::Amber;
-
-/// Colour of the row picking the note that gets the beat.
-pub const UNIT: LedColor = LedColor::Blue;
+/// Colour the signature page is shown in.
+pub const SIGNATURE: LedColor = LedColor::Blue;
 
 /// Which number of a time signature a pad on the signature page changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,14 +272,14 @@ pub fn time_signature(current: TimeSignature, chrome: Chrome) -> LedFrame {
         let Some(part) = signature_part(addr) else {
             continue;
         };
-        let (color, chosen) = match part {
-            SignaturePart::Beats(beats) => (BEATS, beats == current.beats_per_bar()),
-            SignaturePart::Unit(unit) => (UNIT, unit == current.beat_unit()),
+        let chosen = match part {
+            SignaturePart::Beats(beats) => beats == current.beats_per_bar(),
+            SignaturePart::Unit(unit) => unit == current.beat_unit(),
         };
         let led = if chosen {
-            Led::solid(color)
+            Led::solid(SIGNATURE)
         } else {
-            Led::dim(color)
+            Led::dim(SIGNATURE)
         };
         frame.set_pad(addr, led);
     }
@@ -650,17 +647,16 @@ mod tests {
                 Some(SignaturePart::Beats(beats)) => {
                     assert_eq!(row, BEATS_ROW);
                     assert_eq!(beats, u32::try_from(column).unwrap() + 1);
-                    assert_eq!(frame.pad(addr).color, BEATS, "top number is one colour");
+                    assert_eq!(frame.pad(addr).color, SIGNATURE);
                 }
                 Some(SignaturePart::Unit(unit)) => {
                     assert_eq!(row, UNIT_ROW);
                     assert_eq!(unit, BEAT_UNITS[column]);
-                    assert_eq!(frame.pad(addr).color, UNIT, "bottom number another");
+                    assert_eq!(frame.pad(addr).color, SIGNATURE);
                 }
                 None => assert!(!frame.pad(addr).is_lit(), "{row},{column} means nothing"),
             }
         }
-        assert_ne!(BEATS, UNIT, "the two rows have to be told apart");
         const { assert!(BEATS_ROW < UNIT_ROW, "top number above the bottom one") }
     }
 
