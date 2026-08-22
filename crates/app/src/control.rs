@@ -875,6 +875,11 @@ impl Controller {
         }
         if self.session.has_any_clip() {
             self.show_tempo(now);
+            // The pair is the only way off the signature screen, so the first of them is
+            // remembered even though the tempo itself cannot move.
+            if self.mode == Mode::TimeSignature {
+                self.tempo_hold = Some(self.locked_hold(direction, now));
+            }
             return;
         }
 
@@ -989,6 +994,10 @@ impl Controller {
 
     /// Moves the tempo again while a button stays down.
     fn repeat_tempo(&mut self, now: Duration) {
+        // On the signature screen these buttons are the way out, not the tempo.
+        if self.mode == Mode::TimeSignature {
+            return;
+        }
         let Some(hold) = self.tempo_hold else {
             return;
         };
@@ -1001,6 +1010,21 @@ impl Controller {
         self.nudge_tempo(hold.delta);
         self.tempo_hold = Some(TempoHold { last: now, ..hold });
         self.dirty = true;
+    }
+
+    /// A held tempo button that moves nothing, waiting for the other to be pressed.
+    fn locked_hold(&self, direction: f64, now: Duration) -> TempoHold {
+        TempoHold {
+            button: if direction > 0.0 {
+                Control::TempoUp
+            } else {
+                Control::TempoDown
+            },
+            delta: 0.0,
+            since: now,
+            last: now,
+            started_at: self.tempo,
+        }
     }
 
     fn nudge_tempo(&mut self, delta: f64) {
@@ -1386,6 +1410,105 @@ mod tests {
             Led::solid(LedColor::Red),
             "the downbeat, even on a screen that owns nothing else up there"
         );
+    }
+
+    #[test]
+    fn the_signature_screen_can_be_left_after_a_take_seals() {
+        let mut controller = controller();
+        open_signature(&mut controller);
+        assert_eq!(controller.mode(), Mode::TimeSignature);
+
+        // A take seals while the screen is open, which locks the tempo and the signature.
+        controller.on_engine(
+            Event::SlotChanged {
+                addr: addr(0, 0),
+                state: SlotState::Stopped { clip: ClipId(0) },
+            },
+            T0,
+        );
+
+        // The way out must not be lockable: it is the only button that acts here.
+        open_signature(&mut controller);
+        assert_eq!(
+            controller.mode(),
+            Mode::Perform,
+            "stuck on the signature screen with no way back"
+        );
+    }
+
+    /// The gesture that opens a screen.
+    type Opening = fn(&mut Controller);
+
+    /// Does whatever leaves the screen showing: all of its buttons down, then up.
+    ///
+    /// Together rather than in turn, since a screen taking two of them wants them held.
+    fn press_the_way_out(controller: &mut Controller) {
+        let ways: Vec<Button> = crate::screen::exits(controller.mode())
+            .into_iter()
+            .flatten()
+            .collect();
+        for button in &ways {
+            match button {
+                Button::Top(control) => {
+                    controller.on_surface(SurfaceEvent::ControlPressed(*control), T0);
+                }
+                Button::Side(index) => controller.on_surface(side(*index), T0),
+                Button::Grid(addr) => press(controller, *addr, T0),
+            }
+        }
+        for button in &ways {
+            if let Button::Top(control) = button {
+                controller.on_surface(SurfaceEvent::ControlReleased(*control), T0);
+            }
+        }
+    }
+
+    #[test]
+    fn every_screen_can_be_left_even_with_a_take_on_the_grid() {
+        // A clip locks the tempo and the signature, which must not lock a way out.
+        let openings: Vec<(&str, Opening)> = vec![
+            ("mute", |c| c.on_surface(side(MUTE_SIDE), T0)),
+            ("solo", |c| c.on_surface(side(SOLO_SIDE), T0)),
+            ("volume", |c| c.on_surface(side(VOLUME_SIDE), T0)),
+            ("input", |c| c.on_surface(side(INPUT_SIDE), T0)),
+            ("settings", |c| c.on_surface(side(SETTINGS_SIDE), T0)),
+            ("save", |c| {
+                c.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+            }),
+            ("load", |c| {
+                c.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+            }),
+            ("signature", open_signature),
+            ("click rate", |c| {
+                c.on_surface(SurfaceEvent::ControlPressed(Control::ClickToggle), T0);
+                c.tick(T0 + CLICK_HOLD);
+                c.on_surface(
+                    SurfaceEvent::ControlReleased(Control::ClickToggle),
+                    T0 + CLICK_HOLD,
+                );
+            }),
+        ];
+
+        for (name, open) in openings {
+            let mut controller = controller();
+            open(&mut controller);
+            assert_ne!(controller.mode(), Mode::Perform, "{name} did not open");
+
+            // The take seals while the screen is open, which is the only way to be on one
+            // that the lock could otherwise strand.
+            controller.on_engine(
+                Event::SlotChanged {
+                    addr: addr(0, 0),
+                    state: SlotState::Stopped { clip: ClipId(0) },
+                },
+                T0,
+            );
+
+            // Twice over: a confirm screen steps back to its picker before the loops.
+            press_the_way_out(&mut controller);
+            press_the_way_out(&mut controller);
+            assert_eq!(controller.mode(), Mode::Perform, "{name} could not be left");
+        }
     }
 
     #[test]
