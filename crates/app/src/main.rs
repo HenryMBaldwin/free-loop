@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use free_loop::config::{self, Config};
 use free_loop::control::{Controller, Request, TextUpdate};
 use free_loop_audio::{AudioIo, DeviceChange, DroppedEvents, Negotiated, open};
-use free_loop_core::{Command, Event};
+use free_loop_core::{Command, Event, TrackInput};
 use free_loop_engine::{Engine, Housekeeping, LoadMessage, Loader, Snapshot};
 use free_loop_session::{SavedClip, SessionData, SessionStore, TrackSettings};
 use free_loop_surface::{ControlSurface, LaunchpadX, Reconnecting, SurfaceEvent};
@@ -69,6 +69,14 @@ fn parse_args() -> Result<Option<Args>, Box<dyn Error>> {
     Ok(Some(parsed))
 }
 
+/// How a track's input reads on the startup line.
+fn describe_input(input: TrackInput) -> String {
+    match input {
+        TrackInput::Mono(channel) => format!("input channel {channel}"),
+        TrackInput::Pair(left, right) => format!("input channels {left} and {right}"),
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let Some(Args { path, log_surface }) = parse_args()? else {
         return Ok(());
@@ -95,12 +103,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         negotiated.cushion_frames
     );
     let input = config.track_input(negotiated.capture_channels);
-    match input {
-        free_loop_core::TrackInput::Mono(channel) if config.audio.input_channel.is_some() => {
-            println!("tracks start on input channel {channel}");
-        }
-        _ => println!("tracks start on the first stereo pair"),
-    }
+    println!("tracks start on {}", describe_input(input));
 
     let (engine, mut housekeeping) = Engine::new(config.engine(
         negotiated.sample_rate,
@@ -964,6 +967,16 @@ mod tests {
     /// Drives `repaint` the way the control loop does: frame first, then text.
     fn shown(surface: &mut free_loop_surface::MockSurface, controller: &mut Controller) {
         repaint(surface, controller);
+    }
+
+    #[test]
+    fn the_startup_line_names_the_channels_the_route_ended_up_on() {
+        assert_eq!(describe_input(TrackInput::Mono(0)), "input channel 0");
+        assert_eq!(describe_input(TrackInput::Mono(5)), "input channel 5");
+        assert_eq!(
+            describe_input(TrackInput::Pair(0, 1)),
+            "input channels 0 and 1"
+        );
     }
 
     #[test]
