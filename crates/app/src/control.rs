@@ -12,10 +12,12 @@ use free_loop_core::{
     Subdivision, TRACK_COUNT, Tempo, TimeSignature, TrackInput, UNITY_STEP, column_mask, pad_bit,
     row_mask,
 };
-use free_loop_surface::{
-    Axis, Chrome, Control, INPUT_SIDE, Led, LedColor, LedFrame, MUTE_SIDE, NEW_SIDE, NO_PAD,
-    PAUSE_SIDE, PICKUP_COLUMN, RESTART_COLUMN, SELECTED, SETTINGS_SIDE, SHADES, SOLO_SIDE,
-    SurfaceEvent, VOLUME_SIDE, YES_PAD, paint,
+use free_loop_surface::{Control, Led, LedColor, LedFrame, SHADES, SurfaceEvent};
+
+use crate::paint;
+use crate::paint::{
+    Axis, Chrome, INPUT_SIDE, MUTE_SIDE, NEW_SIDE, NO_PAD, PAUSE_SIDE, PICKUP_COLUMN,
+    RESTART_COLUMN, SELECTED, SETTINGS_SIDE, SOLO_SIDE, VOLUME_SIDE, YES_PAD,
 };
 
 /// Beats per minute one press of the tempo buttons moves.
@@ -1208,8 +1210,8 @@ mod tests {
     )]
 
     use super::*;
+    use crate::paint::{BEATS_ROW, SUBDIVISION_ROW, UNIT_ROW};
     use free_loop_core::{ClipId, Frames, SlotId, SlotState, TrackId, column_mask, row_mask};
-    use free_loop_surface::{BEATS_ROW, SUBDIVISION_ROW, UNIT_ROW};
 
     const T0: Duration = Duration::ZERO;
 
@@ -1392,12 +1394,12 @@ mod tests {
         let frame = controller.take_frame().unwrap();
         assert_eq!(
             frame.pad(addr(0, 0)),
-            Led::pulse(free_loop_surface::MUTED),
+            Led::pulse(paint::MUTED),
             "still playing, still silenced, and both are visible"
         );
         assert_eq!(
             frame.pad(addr(0, 7)),
-            Led::dim(free_loop_surface::MUTED),
+            Led::dim(paint::MUTED),
             "and the rest of the row is lit so the group reads as one"
         );
     }
@@ -3206,7 +3208,7 @@ mod tests {
         let dark = controller.take_frame().unwrap();
         assert_eq!(
             dark.control(FIRST_BEAT_LED),
-            free_loop_surface::paint::control(Control::TempoUp, Chrome::default()),
+            paint::control(Control::TempoUp, Chrome::default()),
             "the button it shares gets its own colour back"
         );
 
