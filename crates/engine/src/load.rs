@@ -16,7 +16,8 @@ const SLOTS: usize = 80;
 
 /// A grid the engine can measure, at the engine's own sample rate.
 ///
-/// Only [`Loader::grid`] builds one, so neither invariant can be sidestepped by a caller.
+/// Only [`Loader::begin`] makes one, and it queues it in the same breath, so a grid cannot
+/// reach an engine running at another rate.
 #[derive(Debug, Clone, Copy)]
 pub struct LoadGrid(BarGrid);
 
@@ -55,6 +56,17 @@ pub enum LoadMessage {
 #[error("the engine has not drained the load queue")]
 pub struct LoadFull(pub LoadMessage);
 
+/// A load that could not be started.
+#[derive(Debug, thiserror::Error)]
+pub enum BeginError {
+    /// The engine could not measure a bar of this musical time.
+    #[error(transparent)]
+    Time(#[from] TimeError),
+    /// The engine has not drained the load queue.
+    #[error("the engine has not drained the load queue")]
+    Full,
+}
+
 /// The loader's side.
 #[derive(Debug)]
 pub struct Loader {
@@ -64,17 +76,18 @@ pub struct Loader {
 }
 
 impl Loader {
-    /// Builds a grid for the engine this loader feeds.
+    /// Starts a load, on a grid built for the engine this loader feeds.
     ///
     /// # Errors
     ///
-    /// [`TimeError`] if the engine could not measure a bar of this musical time.
-    pub fn grid(&self, tempo: Tempo, time_signature: TimeSignature) -> Result<LoadGrid, TimeError> {
-        Ok(LoadGrid(BarGrid::new(
-            self.sample_rate,
-            tempo,
-            time_signature,
-        )?))
+    /// [`BeginError::Time`] if the engine could not measure a bar of this musical time,
+    /// [`BeginError::Full`] if it has not drained the queue.
+    pub fn begin(&mut self, tempo: Tempo, time_signature: TimeSignature) -> Result<(), BeginError> {
+        let grid = LoadGrid(BarGrid::new(self.sample_rate, tempo, time_signature)?);
+        // The message is dropped: a grid handed back could be sent on to an engine
+        // running at another rate.
+        self.send(LoadMessage::Begin { grid })
+            .map_err(|_| BeginError::Full)
     }
 
     /// Queues one step.
@@ -140,22 +153,33 @@ mod tests {
     }
 
     #[test]
-    fn a_grid_carries_the_rate_the_engine_runs_at() {
-        let (loader, _inbox) = channel(rate());
-        let grid = loader
-            .grid(Tempo::new(120.0).unwrap(), TimeSignature::FOUR_FOUR)
+    fn a_begun_load_carries_the_rate_of_the_engine_it_went_to() {
+        let (mut loader, mut inbox) = channel(rate());
+        loader
+            .begin(Tempo::new(120.0).unwrap(), TimeSignature::FOUR_FOUR)
             .unwrap();
-        assert_eq!(grid.get().sample_rate(), rate(), "not the caller's choice");
 
-        // Unmeasurable musical time is refused here, before anything is queued.
-        assert!(
-            loader
-                .grid(
-                    Tempo::new(free_loop_core::MIN_BPM).unwrap(),
-                    TimeSignature::new(u32::MAX, 2).unwrap(),
-                )
-                .is_err()
+        let mut rates = Vec::new();
+        inbox.drain(|message| {
+            if let LoadMessage::Begin { grid } = message {
+                rates.push(grid.get().sample_rate());
+            }
+        });
+        assert_eq!(rates, vec![rate()], "not the caller's choice");
+    }
+
+    #[test]
+    fn unmeasurable_musical_time_is_refused_before_anything_is_queued() {
+        let (mut loader, mut inbox) = channel(rate());
+        let refused = loader.begin(
+            Tempo::new(free_loop_core::MIN_BPM).unwrap(),
+            TimeSignature::new(u32::MAX, 2).unwrap(),
         );
+
+        assert!(matches!(refused, Err(BeginError::Time(_))));
+        let mut seen = 0;
+        inbox.drain(|_| seen += 1);
+        assert_eq!(seen, 0, "nothing was sent");
     }
 
     fn addr(track: u8, slot: u8) -> SlotAddr {
@@ -165,10 +189,9 @@ mod tests {
     #[test]
     fn messages_arrive_in_the_order_they_were_sent() {
         let (mut loader, mut inbox) = channel(rate());
-        let grid = loader
-            .grid(Tempo::new(120.0).unwrap(), TimeSignature::FOUR_FOUR)
+        loader
+            .begin(Tempo::new(120.0).unwrap(), TimeSignature::FOUR_FOUR)
             .unwrap();
-        loader.send(LoadMessage::Begin { grid }).unwrap();
         loader
             .send(LoadMessage::Clip {
                 addr: addr(1, 2),

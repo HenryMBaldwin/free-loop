@@ -239,40 +239,40 @@ fn run(s: Session<'_>) {
                 Request::SaveSession(addr) => {
                     next_request = next_request.wrapping_add(1);
                     snapshots.clear();
-                    pending_save = ask_for_snapshot(io, next_request, addr, controller, now);
+                    let save = ask_for_snapshot(&mut queued, next_request, addr, controller, now);
+                    pending_save = Some(save);
                 }
-                Request::LoadSession(addr) => {
-                    load_session(
-                        store,
-                        addr,
-                        &mut housekeeping.loader,
-                        &negotiated,
-                        controller,
-                        config,
-                        now,
-                    );
-                }
+                Request::LoadSession(addr) => load_session(
+                    store,
+                    addr,
+                    &mut housekeeping.loader,
+                    &negotiated,
+                    controller,
+                    config,
+                    now,
+                ),
             }
         }
 
         // Storage the engine has finished with comes back here to be dropped.
         housekeeping.recycler.take_borrowed().for_each(drop);
 
-        // Ahead of the commands, and never refused.
-        if let Some(settings) = controller.take_settings() {
+        // Ahead of the commands, and never refused. Held back while any command is still
+        // waiting: the audio side reads this mailbox first, so publishing now would put a
+        // setting in front of a gesture made before it. Settings coalesce, so the wait
+        // costs nothing but the delay.
+        if let Some(settings) = controller.take_settings().filter(|_| queued.is_empty()) {
             io.publish_settings(settings);
         }
         queued.extend(controller.drain_commands());
-        send_commands(&mut queued, |command| io.send(command).is_ok());
-        drop_oldest(&mut queued);
+        hand_over(&mut queued, io);
 
-        let drained = drain_engine(io, controller, now);
         let Drained {
             answered,
             clock_total,
             clipped,
             short_frames,
-        } = drained;
+        } = drain_engine(io, controller, now);
         // After draining, so the replay it asks for has somewhere to go.
         missed_reports = resync_after_loss(io, missed_reports);
         clipping.note(clipped, now);
@@ -428,27 +428,6 @@ fn load_session(
             controller.load_failed(now, too_large(error.as_ref()));
         }
     }
-}
-
-/// Asks the engine to publish its clips for a save.
-fn ask_for_snapshot(
-    io: &mut AudioIo,
-    request: u32,
-    addr: free_loop_core::SlotAddr,
-    controller: &mut Controller,
-    now: Duration,
-) -> Option<PendingSave> {
-    if io.send(Command::Snapshot { request }).is_err() {
-        eprintln!("could not ask for a snapshot");
-        controller.save_failed(now);
-        return None;
-    }
-    Some(PendingSave {
-        deadline: now + SAVE_TIMEOUT,
-        request,
-        addr,
-        settings: save_settings(controller),
-    })
 }
 
 /// Takes the snapshots belonging to the save that is waiting, dropping stale ones.
@@ -690,9 +669,13 @@ fn load(
     let time_signature =
         free_loop_core::TimeSignature::new(manifest.beats_per_bar, manifest.beat_unit)?;
     let tempo = free_loop_core::Tempo::new(manifest.tempo)?;
-    // Built by the loader, so it carries the engine's own rate and an unmeasurable one is
-    // refused before any clip is read.
-    let grid = loader.grid(tempo, time_signature)?;
+    // Discarded: only the loader builds the grid that is sent. Checked here so a bar the
+    // engine cannot measure is refused before any audio is read.
+    free_loop_core::BarGrid::new(
+        free_loop_core::SampleRate::new(negotiated.sample_rate)?,
+        tempo,
+        time_signature,
+    )?;
 
     let session = checked.materialise()?;
     let restored = Restored {
@@ -704,7 +687,9 @@ fn load(
     if !loader.ready() {
         return Err("the audio thread has not drained the load queue".into());
     }
-    loader.send(LoadMessage::Begin { grid })?;
+    // The loader builds the grid, so an unmeasurable one is refused before any clip is
+    // read and it carries the rate of the engine it is going to.
+    loader.begin(tempo, time_signature)?;
     for loaded in session.clips {
         loader.send(LoadMessage::Clip {
             addr: loaded.addr,
@@ -828,14 +813,84 @@ fn resync_after_loss(io: &mut AudioIo, seen: DroppedEvents) -> DroppedEvents {
     dropped
 }
 
-/// Forgets the oldest commands once too many are waiting for an engine not taking them.
-fn drop_oldest(queued: &mut Vec<Command>) {
+/// Asks the engine to publish its clips, and starts the wait for them.
+fn ask_for_snapshot(
+    queued: &mut Vec<Command>,
+    request: u32,
+    addr: free_loop_core::SlotAddr,
+    controller: &Controller,
+    now: Duration,
+) -> PendingSave {
+    // Queued behind whatever is waiting, so the snapshot sees the pads as they were when
+    // the save was asked for. One that never gets out expires on its deadline.
+    queued.push(Command::Snapshot { request });
+    PendingSave {
+        deadline: now + SAVE_TIMEOUT,
+        request,
+        addr,
+        settings: save_settings(controller),
+    }
+}
+
+/// Sends what it can, then holds the rest to a bounded, still-complete backlog.
+fn hand_over(queued: &mut Vec<Command>, io: &mut AudioIo) {
+    send_commands(queued, |command| io.send(command).is_ok());
+    compact(queued);
+    drop_newest(queued);
+}
+
+/// Which setting a command carries, if the newer of two says everything the older did.
+///
+/// A held tempo button makes one of these every 120 ms, which is what fills a backlog.
+fn setting_of(command: Command) -> Option<u8> {
+    match command {
+        Command::SetTempo(_) => Some(0),
+        Command::SetTimeSignature(_) => Some(1),
+        Command::SetPaused(_) => Some(2),
+        Command::SetClickEnabled(_) => Some(3),
+        Command::SetClickLevel(_) => Some(4),
+        Command::SetClickSubdivision(_) => Some(5),
+        Command::Press(_)
+        | Command::Clear(_)
+        | Command::StopTrack(_)
+        | Command::StopAll
+        | Command::ClearAll
+        | Command::Resync
+        | Command::Snapshot { .. }
+        | Command::Rewind => None,
+    }
+}
+
+/// Forgets a setting a later one already replaced, keeping every action.
+///
+/// An action is not idempotent: dropping one of a pair of presses leaves a take running.
+fn compact(queued: &mut Vec<Command>) {
+    let mut latest = [false; 6];
+    let mut kept: Vec<Command> = Vec::with_capacity(queued.len());
+    for command in queued.iter().rev() {
+        if let Some(setting) = setting_of(*command) {
+            if latest[usize::from(setting)] {
+                continue;
+            }
+            latest[usize::from(setting)] = true;
+        }
+        kept.push(*command);
+    }
+    kept.reverse();
+    *queued = kept;
+}
+
+/// Forgets the newest commands once an engine that is not draining has this many waiting.
+///
+/// The newest go, not the oldest: what is left is a history with nothing missing from the
+/// middle, and a gesture that did nothing is plain to whoever made it.
+fn drop_newest(queued: &mut Vec<Command>) {
     if queued.len() <= QUEUED_COMMANDS {
         return;
     }
     let over = queued.len() - QUEUED_COMMANDS;
-    eprintln!("audio thread is not keeping up; dropped {over} commands");
-    queued.drain(..over);
+    eprintln!("audio thread is not taking commands; dropped the last {over}");
+    queued.truncate(QUEUED_COMMANDS);
 }
 
 /// Hands `queued` over in order, keeping whatever there was no room for.
@@ -1055,6 +1110,79 @@ mod tests {
         // presses are a record and a stop, one is a take left running.
         send_commands(&mut queued, |_| false);
         assert_eq!(queued.len(), 2, "both still waiting");
+    }
+
+    #[test]
+    fn a_backlog_of_settings_keeps_only_the_last_of_each() {
+        let pad = pad(1, 2);
+        let mut queued = vec![
+            Command::SetTempo(free_loop_core::Tempo::new(120.0).unwrap()),
+            Command::Press(pad),
+            Command::SetTempo(free_loop_core::Tempo::new(125.0).unwrap()),
+            Command::SetClickEnabled(false),
+            Command::SetTempo(free_loop_core::Tempo::new(130.0).unwrap()),
+            Command::Press(pad),
+        ];
+
+        compact(&mut queued);
+        assert_eq!(
+            queued,
+            vec![
+                Command::Press(pad),
+                Command::SetClickEnabled(false),
+                Command::SetTempo(free_loop_core::Tempo::new(130.0).unwrap()),
+                Command::Press(pad),
+            ],
+            "both presses, and the tempo it ended on"
+        );
+    }
+
+    #[test]
+    fn compacting_keeps_every_action_however_long_the_backlog() {
+        let pad = pad(0, 0);
+        let mut queued: Vec<Command> = (0..500)
+            .map(|i| {
+                if i % 2 == 0 {
+                    Command::SetClickLevel(0.5)
+                } else {
+                    Command::Press(pad)
+                }
+            })
+            .collect();
+
+        compact(&mut queued);
+        let presses = queued
+            .iter()
+            .filter(|command| matches!(command, Command::Press(_)))
+            .count();
+        assert_eq!(presses, 250, "no action was forgotten");
+        assert_eq!(
+            queued
+                .iter()
+                .filter(|command| matches!(command, Command::SetClickLevel(_)))
+                .count(),
+            1,
+            "one level survives the 250 that were sent"
+        );
+    }
+
+    #[test]
+    fn a_backlog_past_the_bound_loses_its_newest() {
+        let pad = pad(0, 0);
+        let mut queued: Vec<Command> = (0..QUEUED_COMMANDS + 3)
+            .map(|_| Command::Press(pad))
+            .collect();
+
+        drop_newest(&mut queued);
+        assert_eq!(queued.len(), QUEUED_COMMANDS, "held to the bound");
+    }
+
+    #[test]
+    fn a_backlog_inside_the_bound_is_left_alone() {
+        let pad = pad(0, 0);
+        let mut queued = vec![Command::Press(pad), Command::Rewind];
+        drop_newest(&mut queued);
+        assert_eq!(queued, vec![Command::Press(pad), Command::Rewind]);
     }
 
     #[test]
