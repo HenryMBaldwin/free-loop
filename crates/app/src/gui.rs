@@ -3,8 +3,8 @@
 //! The emulator publishes its own MIDI ports, so the looper reaches it the way it reaches
 //! a real pad. Attaching hardware as well mirrors both, leaving the window a view of it.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{CentralPanel, Frame, Key, Panel, Slider, Ui, ViewportBuilder, ViewportCommand};
@@ -12,6 +12,7 @@ use launchpad_emulator::devices::LaunchpadX;
 use launchpad_emulator::{Emulator, Interaction};
 use launchpad_emulator_ui::{Console, LaunchpadUi, Layout};
 
+use crate::control::Mode;
 use crate::labels;
 
 /// The port the window publishes, distinct from the hardware's so either can be chosen.
@@ -57,6 +58,7 @@ pub fn run(
     console: Console,
     running: Arc<AtomicBool>,
     stopped: Arc<AtomicBool>,
+    showing: Arc<Mutex<Mode>>,
 ) -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         persist_window: false,
@@ -76,9 +78,12 @@ pub fn run(
                 style.interaction.tooltip_delay = 0.0;
                 style.interaction.tooltip_grace_time = 0.0;
             });
+            let screen = Mode::Perform;
             Ok(Box::new(Window {
                 layout: Layout::for_device::<LaunchpadX>(),
-                widget: LaunchpadUi::new().with_labels(labels::fixed()),
+                widget: LaunchpadUi::new().with_labels(labels::for_mode(screen)),
+                showing,
+                screen,
                 emulator,
                 console,
                 running,
@@ -102,6 +107,26 @@ struct Window {
     hardware: bool,
     /// When the hardware was last looked for.
     checked: Instant,
+    /// The screen the looper is on, which it publishes as the performer moves about.
+    showing: Arc<Mutex<Mode>>,
+    /// The screen the labels are named for.
+    screen: Mode,
+}
+
+impl Window {
+    /// Renames the buttons when the looper moves to another screen.
+    fn follow_screen(&mut self) {
+        // Never blocks drawing on the looper: the next frame tries again.
+        let Ok(showing) = self.showing.try_lock() else {
+            return;
+        };
+        if *showing == self.screen {
+            return;
+        }
+        self.screen = *showing;
+        drop(showing);
+        self.widget.set_labels(labels::for_mode(self.screen));
+    }
 }
 
 impl Window {
@@ -173,6 +198,7 @@ impl eframe::App for Window {
         }
 
         self.pump();
+        self.follow_screen();
         let _ = self.emulator.advance();
         if self.checked.elapsed() >= HARDWARE_CHECK {
             self.checked = Instant::now();

@@ -9,8 +9,8 @@ use free_loop_surface::Control;
 
 use crate::control::Mode;
 use crate::paint::{
-    self, INPUT_SIDE, MUTE_SIDE, NEW_SIDE, PAUSE_SIDE, SETTINGS_SIDE, SOLO_SIDE, SignaturePart,
-    VOLUME_SIDE,
+    self, INPUT_SIDE, MUTE_SIDE, NEW_SIDE, NO_PAD, PAUSE_SIDE, PICKUP_COLUMN, RESTART_COLUMN,
+    SETTINGS_SIDE, SOLO_SIDE, SignaturePart, VOLUME_SIDE, YES_PAD,
 };
 
 /// One button on the surface.
@@ -103,6 +103,87 @@ pub fn exits(mode: Mode) -> [Option<Button>; 2] {
             Some(Button::Top(Control::TempoUp)),
         ],
     }
+}
+
+/// What this screen is called, for naming the way out of it.
+pub fn title(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Perform => "the loops",
+        Mode::SavePicker | Mode::ConfirmSave(_) => "save",
+        Mode::LoadPicker | Mode::ConfirmLoad(_) => "load",
+        Mode::Mute => "mute",
+        Mode::Solo => "solo",
+        Mode::Volume => "volume",
+        Mode::Input => "input",
+        Mode::Settings => "settings",
+        Mode::TimeSignature => "time signature",
+        Mode::Subdivision => "click rate",
+    }
+}
+
+/// What to call `button` on `mode`, or `None` where it does nothing.
+///
+/// Read from the same table a press is, so a name cannot promise what a press will not do.
+pub fn name(mode: Mode, button: Button) -> Option<String> {
+    if exits(mode).into_iter().flatten().any(|way| way == button) {
+        return Some(format!("leave {}", title(mode)));
+    }
+    let pad = |addr: SlotAddr| (addr.track.index(), addr.slot.index());
+    Some(match (role(mode, button), button) {
+        (Role::Transport, _) => "play / pause".to_owned(),
+        (Role::Loop, Button::Grid(addr)) => {
+            let (track, slot) = pad(addr);
+            format!("loop {track},{slot}")
+        }
+        (Role::Answer, Button::Grid(addr)) => match pad(addr) {
+            YES_PAD => "yes".to_owned(),
+            NO_PAD => "no".to_owned(),
+            _ => return None,
+        },
+        (Role::SaveTo, Button::Grid(addr)) => {
+            let (track, slot) = pad(addr);
+            format!("save over {track}{slot}")
+        }
+        (Role::LoadFrom, Button::Grid(addr)) => {
+            let (track, slot) = pad(addr);
+            format!("load {track}{slot}")
+        }
+        (Role::NewSession, _) => "new session".to_owned(),
+        (Role::Group, Button::Grid(addr)) => {
+            let (track, slot) = pad(addr);
+            format!("{} {track},{slot}", title(mode))
+        }
+        (Role::Level, Button::Grid(addr)) => {
+            let (track, slot) = pad(addr);
+            format!("track {track} level {}", slot + 1)
+        }
+        (Role::InputChannel, Button::Grid(addr)) => {
+            let (track, slot) = pad(addr);
+            format!("track {track} input {slot}")
+        }
+        (Role::Setting, Button::Grid(addr)) => match pad(addr) {
+            (track, RESTART_COLUMN) => format!("track {track} restart"),
+            (track, PICKUP_COLUMN) => format!("track {track} pickup"),
+            _ => return None,
+        },
+        (Role::Beats(beats), _) => format!("{beats} beats to the bar"),
+        (Role::Unit(unit), _) => format!("beat is a 1/{unit} note"),
+        (Role::Rate(rate), _) => format!("click {}", rate.name()),
+        (Role::Tempo(direction), _) => {
+            if direction > 0.0 {
+                "tempo up".to_owned()
+            } else {
+                "tempo down".to_owned()
+            }
+        }
+        (Role::Click, _) => "click on or off".to_owned(),
+        (Role::StopAll, _) => "stop all".to_owned(),
+        (Role::Rewind, _) => "rewind".to_owned(),
+        (Role::Axis, _) => "group by row or column".to_owned(),
+        (Role::Open(opens), _) => format!("open {}", title(opens)),
+        // Inert, and grid roles on something that is not a pad, which cannot arise.
+        _ => return None,
+    })
 }
 
 fn grid(mode: Mode, addr: SlotAddr) -> Role {
