@@ -15,9 +15,7 @@ use free_loop_core::{
     ClipId, Command, Event, Frames, Settings, SlotAddr, SlotId, SlotState, Subdivision, Tempo,
     TimeSignature, TrackId,
 };
-use free_loop_engine::{
-    ClickConfig, Engine, EngineConfig, Housekeeping, LoadGrid, LoadMessage, Snapshot,
-};
+use free_loop_engine::{ClickConfig, Engine, EngineConfig, Housekeeping, LoadMessage, Snapshot};
 use std::sync::Arc;
 
 const CHANNELS: usize = 2;
@@ -670,11 +668,6 @@ fn lent_clip(frames: u64, phase: u64) -> Arc<Clip> {
     Arc::new(clip)
 }
 
-/// The grid a load hands over, built the way the app builds it.
-fn grid_for(harness: &Harness, tempo: Tempo, signature: TimeSignature) -> LoadGrid {
-    harness.housekeeping.loader.grid(tempo, signature).unwrap()
-}
-
 #[test]
 fn a_loaded_session_lands_on_the_grid_frozen() {
     let mut harness = Harness::new(128);
@@ -684,13 +677,7 @@ fn a_loaded_session_lands_on_the_grid_frozen() {
     harness
         .housekeeping
         .loader
-        .send(LoadMessage::Begin {
-            grid: grid_for(
-                &harness,
-                Tempo::new(90.0).unwrap(),
-                TimeSignature::FOUR_FOUR,
-            ),
-        })
+        .begin(Tempo::new(90.0).unwrap(), TimeSignature::FOUR_FOUR)
         .unwrap();
     harness
         .housekeeping
@@ -853,9 +840,7 @@ fn a_session_in_another_time_signature_brings_it_along() {
     harness
         .housekeeping
         .loader
-        .send(LoadMessage::Begin {
-            grid: grid_for(&harness, Tempo::new(120.0).unwrap(), three_four),
-        })
+        .begin(Tempo::new(120.0).unwrap(), three_four)
         .unwrap();
     harness
         .housekeeping
@@ -889,9 +874,7 @@ fn a_signature_a_load_brought_outlives_a_later_tempo_change() {
     harness
         .housekeeping
         .loader
-        .send(LoadMessage::Begin {
-            grid: grid_for(&harness, Tempo::new(100.0).unwrap(), seven_eight),
-        })
+        .begin(Tempo::new(100.0).unwrap(), seven_eight)
         .unwrap();
     harness.housekeeping.loader.send(LoadMessage::End).unwrap();
     harness.run_frames(128);
@@ -917,13 +900,7 @@ fn loading_replaces_what_was_on_the_grid() {
     harness
         .housekeeping
         .loader
-        .send(LoadMessage::Begin {
-            grid: grid_for(
-                &harness,
-                Tempo::new(120.0).unwrap(),
-                TimeSignature::FOUR_FOUR,
-            ),
-        })
+        .begin(Tempo::new(120.0).unwrap(), TimeSignature::FOUR_FOUR)
         .unwrap();
     harness
         .housekeeping
@@ -954,13 +931,7 @@ fn lent_storage_comes_back_rather_than_joining_the_pool() {
     harness
         .housekeeping
         .loader
-        .send(LoadMessage::Begin {
-            grid: grid_for(
-                &harness,
-                Tempo::new(120.0).unwrap(),
-                TimeSignature::FOUR_FOUR,
-            ),
-        })
+        .begin(Tempo::new(120.0).unwrap(), TimeSignature::FOUR_FOUR)
         .unwrap();
     harness
         .housekeeping
@@ -1003,13 +974,7 @@ fn a_load_leaves_less_room_to_record() {
     harness
         .housekeeping
         .loader
-        .send(LoadMessage::Begin {
-            grid: grid_for(
-                &harness,
-                Tempo::new(120.0).unwrap(),
-                TimeSignature::FOUR_FOUR,
-            ),
-        })
+        .begin(Tempo::new(120.0).unwrap(), TimeSignature::FOUR_FOUR)
         .unwrap();
     for pad in SlotAddr::all().take(available) {
         harness
@@ -1213,13 +1178,7 @@ fn load_one(harness: &mut Harness, pad: SlotAddr, segments: usize) {
     harness
         .housekeeping
         .loader
-        .send(LoadMessage::Begin {
-            grid: grid_for(
-                harness,
-                Tempo::new(120.0).unwrap(),
-                TimeSignature::FOUR_FOUR,
-            ),
-        })
+        .begin(Tempo::new(120.0).unwrap(), TimeSignature::FOUR_FOUR)
         .unwrap();
     harness
         .housekeeping
@@ -1244,13 +1203,7 @@ fn a_loaded_loop_plays_what_was_saved() {
     harness
         .housekeeping
         .loader
-        .send(LoadMessage::Begin {
-            grid: grid_for(
-                &harness,
-                Tempo::new(120.0).unwrap(),
-                TimeSignature::FOUR_FOUR,
-            ),
-        })
+        .begin(Tempo::new(120.0).unwrap(), TimeSignature::FOUR_FOUR)
         .unwrap();
     harness
         .housekeeping
@@ -1446,13 +1399,7 @@ fn recording_onto_a_loaded_session_captures_audio() {
     harness
         .housekeeping
         .loader
-        .send(LoadMessage::Begin {
-            grid: grid_for(
-                &harness,
-                Tempo::new(120.0).unwrap(),
-                TimeSignature::FOUR_FOUR,
-            ),
-        })
+        .begin(Tempo::new(120.0).unwrap(), TimeSignature::FOUR_FOUR)
         .unwrap();
     harness
         .housekeeping
@@ -1521,13 +1468,7 @@ fn a_loaded_session_starts_at_the_beginning() {
     harness
         .housekeeping
         .loader
-        .send(LoadMessage::Begin {
-            grid: grid_for(
-                &harness,
-                Tempo::new(120.0).unwrap(),
-                TimeSignature::FOUR_FOUR,
-            ),
-        })
+        .begin(Tempo::new(120.0).unwrap(), TimeSignature::FOUR_FOUR)
         .unwrap();
     harness
         .housekeeping
@@ -1835,13 +1776,7 @@ mod staged_load {
         harness
             .housekeeping
             .loader
-            .send(LoadMessage::Begin {
-                grid: grid_for(
-                    &harness,
-                    Tempo::new(90.0).unwrap(),
-                    TimeSignature::FOUR_FOUR,
-                ),
-            })
+            .begin(Tempo::new(90.0).unwrap(), TimeSignature::FOUR_FOUR)
             .unwrap();
         harness.run_frames(128);
 
@@ -1862,13 +1797,7 @@ mod staged_load {
         harness
             .housekeeping
             .loader
-            .send(LoadMessage::Begin {
-                grid: grid_for(
-                    &harness,
-                    Tempo::new(90.0).unwrap(),
-                    TimeSignature::FOUR_FOUR,
-                ),
-            })
+            .begin(Tempo::new(90.0).unwrap(), TimeSignature::FOUR_FOUR)
             .unwrap();
         harness.run_frames(128);
         harness
@@ -1897,9 +1826,7 @@ mod load_protocol {
         harness
             .housekeeping
             .loader
-            .send(LoadMessage::Begin {
-                grid: grid_for(harness, Tempo::new(90.0).unwrap(), TimeSignature::FOUR_FOUR),
-            })
+            .begin(Tempo::new(90.0).unwrap(), TimeSignature::FOUR_FOUR)
             .unwrap();
     }
 
