@@ -715,6 +715,7 @@ impl Engine {
             Command::SetClickEnabled(enabled) => self.click.set_enabled(enabled),
             Command::SetClickLevel(level) => self.click.set_level(level),
             Command::SetTempo(tempo) => self.set_tempo(tempo, sink),
+            Command::SetTimeSignature(signature) => self.set_time_signature(signature, sink),
         }
 
         self.settle_refusals(sink);
@@ -1039,6 +1040,27 @@ impl Engine {
         // Reported on success as well as refusal, so a resync answer queued earlier cannot
         // end up as the last word on the tempo.
         sink.event(Event::Tempo { bpm: tempo.bpm() });
+    }
+
+    /// Takes a new time signature, keeping the tempo.
+    fn set_time_signature(&mut self, signature: TimeSignature, sink: &mut impl EventSink) {
+        // A clear already committed takes every clip with it, so it locks nothing.
+        let clearing = self.pending == Some(Deferred::ClearAll);
+        if !clearing && self.session.has_any_clip() {
+            sink.event(Event::TimeSignatureRejected);
+            return;
+        }
+        let Ok(grid) = BarGrid::new(self.sample_rate, self.grid.tempo(), signature) else {
+            sink.event(Event::TimeSignatureRejected);
+            return;
+        };
+
+        self.time_signature = signature;
+        // Move the transport with the grid, or the same frame count would land on a
+        // different beat.
+        self.position = self.grid.rebase_onto(self.position, grid);
+        self.set_grid(grid);
+        self.resync_clock();
     }
 
     /// Renders one block.

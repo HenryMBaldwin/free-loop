@@ -711,6 +711,50 @@ fn a_loaded_session_lands_on_the_grid_frozen() {
 }
 
 #[test]
+fn the_time_signature_moves_on_an_empty_grid() {
+    let mut harness = Harness::new(128);
+    let five_four = TimeSignature::new(5, 4).unwrap();
+    let four_four_bar = harness.engine.grid().bars(1);
+
+    harness.command(Command::SetTimeSignature(five_four));
+    harness.run_frames(128);
+
+    assert_eq!(harness.engine.grid().time_signature(), five_four);
+    assert_eq!(
+        harness.engine.grid().bars(1).0 * 4,
+        four_four_bar.0 * 5,
+        "five beats to the bar at the same tempo"
+    );
+    assert!(
+        (harness.engine.grid().tempo().bpm() - 120.0).abs() < 1e-9,
+        "the tempo is left alone"
+    );
+}
+
+#[test]
+fn the_time_signature_is_locked_once_a_clip_exists() {
+    let mut harness = Harness::new(128);
+    record(&mut harness, addr(0, 0), 0, 1);
+    harness.drain_events();
+
+    harness.command(Command::SetTimeSignature(TimeSignature::new(7, 8).unwrap()));
+    harness.run_frames(128);
+
+    assert_eq!(
+        harness.engine.grid().time_signature(),
+        TimeSignature::FOUR_FOUR,
+        "the bar a clip was recorded against does not move"
+    );
+    assert!(
+        harness
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::TimeSignatureRejected)),
+        "and it says so"
+    );
+}
+
+#[test]
 fn a_session_in_another_time_signature_brings_it_along() {
     let mut harness = Harness::new(128);
     let pad = addr(2, 3);
