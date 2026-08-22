@@ -9,7 +9,7 @@ use core::time::Duration;
 
 use free_loop_core::{
     Command, Event, LaunchMode, MAX_BPM, MIN_BPM, SLOT_COUNT, SessionModel, Settings, SlotAddr,
-    TRACK_COUNT, Tempo, TrackInput, UNITY_STEP, column_mask, pad_bit, row_mask,
+    TRACK_COUNT, Tempo, TimeSignature, TrackInput, UNITY_STEP, column_mask, pad_bit, row_mask,
 };
 use free_loop_surface::{
     Axis, Chrome, Control, INPUT_SIDE, Led, LedColor, LedFrame, MUTE_SIDE, NEW_SIDE, NO_PAD,
@@ -144,6 +144,8 @@ pub struct Controller {
     tempo: f64,
     /// What the config asked for, which a fresh session goes back to.
     default_tempo: f64,
+    /// The musical time the loaded material is in.
+    time_signature: TimeSignature,
     /// The input a fresh session puts every track on.
     default_input: TrackInput,
     /// The launch mode a fresh session puts every track on.
@@ -181,14 +183,14 @@ pub struct Controller {
 
 impl Controller {
     /// A controller for an empty session.
-    pub fn new(tempo: f64, beats_per_bar: u32, click_enabled: bool) -> Self {
+    pub fn new(tempo: f64, time_signature: TimeSignature, click_enabled: bool) -> Self {
         let chrome = Chrome {
             inputs: [TrackInput::default(); TRACK_COUNT],
             launch_modes: [LaunchMode::Follow; TRACK_COUNT],
             pickups: [0; TRACK_COUNT],
             input_count: 2,
             beat: 0,
-            beats_per_bar,
+            beats_per_bar: time_signature.beats_per_bar(),
             click_enabled,
             paused: false,
             axis: Axis::Row,
@@ -203,6 +205,7 @@ impl Controller {
             chrome,
             tempo,
             default_tempo: tempo,
+            time_signature,
             default_input: TrackInput::default(),
             default_launch_mode: LaunchMode::Follow,
             tempo_before_request: tempo,
@@ -504,6 +507,18 @@ impl Controller {
         self.tempo = bpm;
         self.tempo_before_request = bpm;
         self.dirty = true;
+    }
+
+    /// Takes the time signature a loaded session was recorded in.
+    pub fn set_loaded_time_signature(&mut self, signature: TimeSignature) {
+        self.time_signature = signature;
+        self.chrome.beats_per_bar = signature.beats_per_bar();
+        self.dirty = true;
+    }
+
+    /// The time signature the transport is in.
+    pub fn time_signature(&self) -> TimeSignature {
+        self.time_signature
     }
 
     /// Records that a session was loaded, and leaves the picker.
@@ -970,7 +985,7 @@ mod tests {
     }
 
     fn controller() -> Controller {
-        Controller::new(120.0, 4, true)
+        Controller::new(120.0, TimeSignature::FOUR_FOUR, true)
     }
 
     fn commands(controller: &mut Controller) -> Vec<Command> {
@@ -1907,7 +1922,7 @@ mod tests {
 
     #[test]
     fn a_tap_that_moves_nothing_says_nothing() {
-        let mut controller = Controller::new(MAX_BPM, 4, true);
+        let mut controller = Controller::new(MAX_BPM, TimeSignature::FOUR_FOUR, true);
         controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
         controller.on_surface(SurfaceEvent::ControlReleased(Control::TempoUp), millis(80));
         assert_eq!(controller.take_text(), None);
@@ -2020,6 +2035,38 @@ mod tests {
             commands(&mut controller).is_empty(),
             "the engine took it from the load itself"
         );
+    }
+
+    #[test]
+    fn a_loaded_signature_is_what_a_later_save_records() {
+        let mut controller = controller();
+        let three_four = TimeSignature::new(3, 4).unwrap();
+
+        controller.set_loaded_time_signature(three_four);
+        assert_eq!(controller.time_signature(), three_four);
+        assert!(
+            commands(&mut controller).is_empty(),
+            "the engine took it from the load itself"
+        );
+    }
+
+    #[test]
+    fn a_loaded_signature_sets_how_far_a_pickup_can_reach() {
+        let mut controller = controller();
+        controller.set_loaded_time_signature(TimeSignature::new(3, 4).unwrap());
+        controller.on_surface(side(SETTINGS_SIDE), T0);
+        let column = u8::try_from(PICKUP_COLUMN).unwrap();
+        let pad = SlotAddr::new(TrackId::new(2).unwrap(), SlotId::new(column).unwrap());
+        let press = SurfaceEvent::PadPressed {
+            addr: pad,
+            velocity: 127,
+        };
+
+        // Two beats of tail in 3/4, where 4/4 reaches three.
+        for beats in [1, 2, 0, 1] {
+            controller.on_surface(press, T0);
+            assert_eq!(controller.pickups()[2], beats);
+        }
     }
 
     #[test]
@@ -2310,7 +2357,7 @@ mod tests {
 
     #[test]
     fn a_repeat_stops_at_the_supported_range() {
-        let mut controller = Controller::new(MAX_BPM - 2.0, 4, true);
+        let mut controller = Controller::new(MAX_BPM - 2.0, TimeSignature::FOUR_FOUR, true);
         controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
         for at in (0..2_000).step_by(20) {
             controller.tick(millis(at));
@@ -2320,7 +2367,7 @@ mod tests {
 
     #[test]
     fn tempo_stops_at_the_supported_range() {
-        let mut controller = Controller::new(MAX_BPM, 4, true);
+        let mut controller = Controller::new(MAX_BPM, TimeSignature::FOUR_FOUR, true);
         controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
         assert_eq!(controller.tempo(), MAX_BPM);
         assert!(
@@ -2328,7 +2375,7 @@ mod tests {
             "a change that moves nothing should not be sent"
         );
 
-        let mut controller = Controller::new(MIN_BPM, 4, true);
+        let mut controller = Controller::new(MIN_BPM, TimeSignature::FOUR_FOUR, true);
         controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoDown), T0);
         assert_eq!(controller.tempo(), MIN_BPM);
     }

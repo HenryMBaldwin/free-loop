@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use free_loop::config::{self, Config};
 use free_loop::control::{Controller, Request, TextUpdate};
 use free_loop_audio::{AudioIo, DeviceChange, DroppedEvents, Negotiated, open};
-use free_loop_core::{Command, Event, TrackInput};
+use free_loop_core::{Command, Event, TimeSignature, TrackInput};
 use free_loop_engine::{Engine, Housekeeping, LoadMessage, Loader, Snapshot};
 use free_loop_session::{SavedClip, SessionData, SessionStore, TrackSettings};
 use free_loop_surface::{ControlSurface, LaunchpadX, Reconnecting, SurfaceEvent};
@@ -115,7 +115,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut surface = connect_surface();
     let mut controller = Controller::new(
         config.transport.tempo,
-        config.transport.beats_per_bar,
+        config.time_signature()?,
         config.click.enabled,
     );
 
@@ -397,6 +397,7 @@ fn load_session(
                 restored.tracks[track].gain_step
             }));
             controller.set_loaded_tempo(restored.tempo);
+            controller.set_loaded_time_signature(restored.time_signature);
             // A session recorded on a wider interface names channels this one may not
             // have.
             controller.set_inputs(core::array::from_fn(|track| {
@@ -580,6 +581,8 @@ struct PendingSave {
 struct SaveSettings {
     /// What the performer has the transport set to, not what the config file says.
     tempo: f64,
+    /// The signature the material is in, which a load can have changed.
+    time_signature: TimeSignature,
     tracks: [TrackSettings; free_loop_core::TRACK_COUNT],
 }
 
@@ -591,6 +594,7 @@ fn save_settings(controller: &Controller) -> SaveSettings {
     let gains = controller.gains();
     SaveSettings {
         tempo: controller.tempo(),
+        time_signature: controller.time_signature(),
         tracks: core::array::from_fn(|track| TrackSettings {
             input: inputs[track],
             restart: modes[track].restarts(),
@@ -628,8 +632,8 @@ fn save(
         addr,
         &SessionData {
             tempo: settings.tempo,
-            beats_per_bar: config.transport.beats_per_bar,
-            beat_unit: config.transport.beat_unit,
+            beats_per_bar: settings.time_signature.beats_per_bar(),
+            beat_unit: settings.time_signature.beat_unit(),
             sample_rate: negotiated.sample_rate,
             channels: u16::try_from(negotiated.channels).unwrap_or(2),
             clips,
@@ -678,31 +682,25 @@ fn load(
             .inspect(addr)?
             .accepts(negotiated.sample_rate, channels, config.load_budget())?;
 
-    let wanted = config.time_signature()?;
     let manifest = checked.manifest();
-    if manifest.beats_per_bar != wanted.beats_per_bar() || manifest.beat_unit != wanted.beat_unit()
-    {
-        return Err(format!(
-            "session is in {}/{} but the transport is {}/{}",
-            manifest.beats_per_bar,
-            manifest.beat_unit,
-            wanted.beats_per_bar(),
-            wanted.beat_unit()
-        )
-        .into());
-    }
+    let time_signature =
+        free_loop_core::TimeSignature::new(manifest.beats_per_bar, manifest.beat_unit)?;
     let tempo = free_loop_core::Tempo::new(manifest.tempo)?;
 
     let session = checked.materialise()?;
     let restored = Restored {
         tracks: session.tracks(),
         tempo: session.manifest.tempo,
+        time_signature,
     };
 
     if !loader.ready() {
         return Err("the audio thread has not drained the load queue".into());
     }
-    loader.send(LoadMessage::Begin { tempo })?;
+    loader.send(LoadMessage::Begin {
+        tempo,
+        time_signature,
+    })?;
     for loaded in session.clips {
         loader.send(LoadMessage::Clip {
             addr: loaded.addr,
@@ -720,6 +718,8 @@ struct Restored {
     tracks: [TrackSettings; free_loop_core::TRACK_COUNT],
     /// What the session was recorded at, which the engine has already taken.
     tempo: f64,
+    /// What the session was recorded in, which the engine has already taken.
+    time_signature: TimeSignature,
 }
 
 /// Writes a snapshot to a pad and tells the controller it landed.
@@ -982,7 +982,7 @@ mod tests {
     #[test]
     fn a_size_refusal_holds_the_red_before_it_scrolls() {
         let mut surface = free_loop_surface::MockSurface::new();
-        let mut controller = Controller::new(120.0, 4, true);
+        let mut controller = Controller::new(120.0, TimeSignature::FOUR_FOUR, true);
         controller.load_failed(Duration::ZERO, Some("2600".to_owned()));
 
         shown(&mut surface, &mut controller);
@@ -1001,7 +1001,7 @@ mod tests {
     #[test]
     fn a_result_cuts_a_scroll_before_taking_the_grid() {
         let mut surface = free_loop_surface::MockSurface::new();
-        let mut controller = Controller::new(120.0, 4, true);
+        let mut controller = Controller::new(120.0, TimeSignature::FOUR_FOUR, true);
 
         controller.on_surface(
             SurfaceEvent::ControlPressed(free_loop_surface::Control::TempoUp),
@@ -1120,6 +1120,7 @@ mod tests {
             addr: pad(1, 2),
             settings: SaveSettings {
                 tempo: 120.0,
+                time_signature: TimeSignature::FOUR_FOUR,
                 tracks: [TrackSettings::default(); free_loop_core::TRACK_COUNT],
             },
         }
