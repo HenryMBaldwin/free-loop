@@ -13,11 +13,11 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 use std::error::Error;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use free_loop::config::{self, Config};
-use free_loop::control::{Controller, Request, TextUpdate};
+use free_loop::control::{Controller, Mode, Request, TextUpdate};
 use free_loop::gui;
 use free_loop_audio::{AudioIo, DeviceChange, DroppedEvents, Negotiated, open};
 use free_loop_core::{Command, Event, TimeSignature, TrackInput};
@@ -128,13 +128,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let running = Arc::new(AtomicBool::new(true));
+    // The window runs on this thread and the looper on another, so the screen showing has
+    // to be published for the labels to follow it.
+    let showing = Arc::new(Mutex::new(Mode::Perform));
     ctrlc::set_handler({
         let running = Arc::clone(&running);
         move || running.store(false, Ordering::Relaxed)
     })?;
 
     let Some(console) = console else {
-        return play(&path, &config, None, &running);
+        return play(&path, &config, None, &running, None);
     };
 
     // The window has to hold the main thread, so the looper takes one of its own. Its
@@ -144,6 +147,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let worker = std::thread::spawn({
         let (path, config) = (path.clone(), config.clone());
         let (running, stopped) = (Arc::clone(&running), Arc::clone(&stopped));
+        let showing = Arc::clone(&showing);
         move || {
             // On drop rather than after the call, so a panic still closes the window.
             let _stopping = Stopping {
@@ -151,7 +155,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 stopped,
             };
             // Reduced to its text, which a `Box<dyn Error>` cannot cross a thread to give.
-            play(&path, &config, Some(gui::PORT_NAME), &running).map_err(|error| {
+            play(
+                &path,
+                &config,
+                Some(gui::PORT_NAME),
+                &running,
+                Some(showing),
+            )
+            .map_err(|error| {
                 // Reported here as well, or the window would close saying nothing.
                 tracing::error!("{error}");
                 error.to_string()
@@ -159,7 +170,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     });
 
-    let shown = gui::run(emulator, console, Arc::clone(&running), stopped);
+    let shown = gui::run(emulator, console, Arc::clone(&running), stopped, showing);
     running.store(false, Ordering::Relaxed);
     // The looper's own failure is why the window closed, so it is the one to report.
     match worker.join() {
@@ -190,6 +201,7 @@ fn play(
     config: &Config,
     port: Option<&str>,
     running: &AtomicBool,
+    showing: Option<Arc<Mutex<Mode>>>,
 ) -> Result<(), Box<dyn Error>> {
     let opened = open(&config.audio())?;
     let negotiated = opened.negotiated();
@@ -249,6 +261,7 @@ fn play(
         config,
         negotiated,
         running,
+        showing,
     });
 
     // Leaving the grid lit after the process is gone looks like it is still running.
@@ -269,6 +282,8 @@ struct Session<'a> {
     config: &'a Config,
     negotiated: Negotiated,
     running: &'a AtomicBool,
+    /// Where to publish the screen showing, for a window that names its buttons.
+    showing: Option<Arc<Mutex<Mode>>>,
 }
 
 /// Polls the surface, drives the engine and repaints until asked to stop.
@@ -282,6 +297,7 @@ fn run(s: Session<'_>) {
         config,
         negotiated,
         running,
+        showing,
     } = s;
 
     let mut events: Vec<SurfaceEvent> = Vec::new();
@@ -301,6 +317,8 @@ fn run(s: Session<'_>) {
     let mut clock_sent = 0_u64;
     // Commands the engine had no room for, sent again before anything newer.
     let mut queued: Vec<Command> = Vec::new();
+    // The screen last published, so the window is only told when it changes.
+    let mut published = None;
 
     while running.load(Ordering::Relaxed) {
         let now = started.elapsed();
@@ -315,6 +333,7 @@ fn run(s: Session<'_>) {
             controller.on_surface(event, now);
         }
         controller.tick(now);
+        published = publish_screen(showing.as_deref(), controller.mode(), published);
         // Returns clips the engine finished with while something else was reading them.
         housekeeping.recycler.run();
 
@@ -902,6 +921,26 @@ fn resync_after_loss(io: &mut AudioIo, seen: DroppedEvents) -> DroppedEvents {
     dropped
 }
 
+/// Tells a window which screen is showing, when it is not the one it was last told.
+///
+/// Returns what it now knows, which is unchanged if the slot was busy.
+fn publish_screen(slot: Option<&Mutex<Mode>>, mode: Mode, published: Option<Mode>) -> Option<Mode> {
+    if published == Some(mode) {
+        return published;
+    }
+    let Some(slot) = slot else {
+        return Some(mode);
+    };
+    // Never blocks the loop for a label: the next pass tries again.
+    match slot.try_lock() {
+        Ok(mut showing) => {
+            *showing = mode;
+            Some(mode)
+        }
+        Err(_) => published,
+    }
+}
+
 /// The settings to hand over this pass, if any.
 ///
 /// Ahead of the commands, and never refused. Held back while a command is still waiting:
@@ -1162,6 +1201,40 @@ mod tests {
         // presses are a record and a stop, one is a take left running.
         send_commands(&mut queued, |_| false);
         assert_eq!(queued.len(), 2, "both still waiting");
+    }
+
+    #[test]
+    fn a_window_is_told_the_screen_only_when_it_changes() {
+        let slot = Mutex::new(Mode::Perform);
+
+        let published = publish_screen(Some(&slot), Mode::Mute, None);
+        assert_eq!(published, Some(Mode::Mute));
+        assert_eq!(*slot.lock().unwrap(), Mode::Mute);
+
+        // Held by the window this pass, so nothing is known to have got through.
+        let held = slot.lock().unwrap();
+        assert_eq!(
+            publish_screen(Some(&slot), Mode::Solo, published),
+            published,
+            "the next pass tries again"
+        );
+        drop(held);
+
+        assert_eq!(
+            publish_screen(Some(&slot), Mode::Solo, published),
+            Some(Mode::Solo)
+        );
+        assert_eq!(*slot.lock().unwrap(), Mode::Solo);
+    }
+
+    #[test]
+    fn a_run_with_no_window_still_tracks_the_screen() {
+        // Nothing to publish to, so it only remembers, and never asks again for the same.
+        assert_eq!(publish_screen(None, Mode::Mute, None), Some(Mode::Mute));
+        assert_eq!(
+            publish_screen(None, Mode::Mute, Some(Mode::Mute)),
+            Some(Mode::Mute)
+        );
     }
 
     #[test]
