@@ -11,10 +11,36 @@ use core::f32::consts::TAU;
 const ACCENT_HZ: f32 = 1_600.0;
 /// Frequency of the other beats, in hertz.
 const BEAT_HZ: f32 = 900.0;
+/// Frequency of a blip between beats, in hertz.
+const SUB_HZ: f32 = 660.0;
 /// Duration of the downbeat blip, in milliseconds.
 const ACCENT_MS: f32 = 28.0;
 /// Duration of the other beats, in milliseconds.
 const BEAT_MS: f32 = 18.0;
+/// Duration of a blip between beats, in milliseconds.
+const SUB_MS: f32 = 12.0;
+
+/// Which blip to sound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    /// Beat one.
+    Accent,
+    /// Any other beat.
+    Beat,
+    /// Between beats.
+    Sub,
+}
+
+impl Tone {
+    /// Pitch in hertz and length in milliseconds.
+    fn voice(self) -> (f32, f32) {
+        match self {
+            Self::Accent => (ACCENT_HZ, ACCENT_MS),
+            Self::Beat => (BEAT_HZ, BEAT_MS),
+            Self::Sub => (SUB_HZ, SUB_MS),
+        }
+    }
+}
 
 /// How the click starts up.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -87,16 +113,12 @@ impl Click {
         self.level = level.clamp(0.0, 1.0);
     }
 
-    /// Starts a blip. `accent` marks beat one.
-    pub fn trigger(&mut self, accent: bool) {
+    /// Starts a blip in the voice `tone` calls for.
+    pub fn trigger(&mut self, tone: Tone) {
         if !self.enabled {
             return;
         }
-        let (hz, millis) = if accent {
-            (ACCENT_HZ, ACCENT_MS)
-        } else {
-            (BEAT_HZ, BEAT_MS)
-        };
+        let (hz, millis) = tone.voice();
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
@@ -176,7 +198,7 @@ mod tests {
     #[test]
     fn a_blip_sounds_then_stops() {
         let mut click = click();
-        click.trigger(false);
+        click.trigger(Tone::Beat);
         assert!(click.is_sounding());
 
         // 18 ms at 48 kHz is 864 frames.
@@ -193,7 +215,7 @@ mod tests {
     #[test]
     fn the_envelope_decays_to_zero() {
         let mut click = click();
-        click.trigger(true);
+        click.trigger(Tone::Accent);
         let mut out = vec![0.0; 4_000 * 2];
         click.add_into(&mut out, 2);
 
@@ -207,9 +229,9 @@ mod tests {
     #[test]
     fn the_accent_is_longer_than_the_other_beats() {
         let mut accented = click();
-        accented.trigger(true);
+        accented.trigger(Tone::Accent);
         let mut plain = click();
-        plain.trigger(false);
+        plain.trigger(Tone::Beat);
 
         let mut a = vec![0.0; 4_000 * 2];
         let mut b = vec![0.0; 4_000 * 2];
@@ -223,7 +245,7 @@ mod tests {
     #[test]
     fn the_click_is_written_to_every_channel() {
         let mut click = click();
-        click.trigger(true);
+        click.trigger(Tone::Accent);
         let mut out = vec![0.0; 64 * 2];
         click.add_into(&mut out, 2);
 
@@ -235,11 +257,11 @@ mod tests {
     #[test]
     fn disabling_cuts_a_sounding_blip() {
         let mut click = click();
-        click.trigger(true);
+        click.trigger(Tone::Accent);
         click.set_enabled(false);
         assert!(!click.is_sounding());
 
-        click.trigger(true);
+        click.trigger(Tone::Accent);
         assert!(!click.is_sounding(), "a disabled click cannot be triggered");
     }
 
@@ -247,14 +269,14 @@ mod tests {
     fn level_is_clamped_and_applied() {
         let mut click = click();
         click.set_level(10.0);
-        click.trigger(true);
+        click.trigger(Tone::Accent);
         let mut out = vec![0.0; 2_000 * 2];
         click.add_into(&mut out, 2);
         assert!(peak(&out) <= 1.0);
 
         let mut quiet = click;
         quiet.set_level(0.0);
-        quiet.trigger(true);
+        quiet.trigger(Tone::Accent);
         let mut out = vec![0.0; 2_000 * 2];
         quiet.add_into(&mut out, 2);
         assert_eq!(peak(&out), 0.0);

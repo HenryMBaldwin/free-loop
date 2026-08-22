@@ -16,7 +16,7 @@ use free_loop_core::{
 
 use std::sync::Arc;
 
-use crate::click::{Click, ClickConfig};
+use crate::click::{Click, ClickConfig, Tone};
 use crate::load::{LoadInbox, LoadMessage, Loader};
 use crate::recycle::{Recycler, Retirement, channel};
 use crate::snapshot::{Snapshot, SnapshotReader, SnapshotWriter};
@@ -1146,29 +1146,25 @@ impl Engine {
         self.last_clock = self.grid.clock_ticks_at(self.position);
     }
 
-    /// Clicks the bar is cut into, so every beat is one of them.
+    /// Clicks the bar is cut into.
     fn clicks_per_bar(&self) -> u32 {
-        self.grid
-            .time_signature()
-            .beats_per_bar()
-            .saturating_mul(self.subdivision.clicks_per_beat())
+        self.subdivision
+            .clicks_per_bar(self.grid.time_signature().beats_per_bar())
     }
 
     /// Sounds the click if the transport has reached one of its instants.
     fn reach_click(&mut self) {
-        let per_beat = self.subdivision.clicks_per_beat();
-        let (bar, beat) = self.grid.beat_of(self.position);
-        let beat_start = self.grid.bar_start(bar) + self.grid.beat_offset(beat);
-        let on_beat = beat_start == self.position;
-
-        if on_beat {
-            // Counted from the bar line, so the downbeat always sounds.
-            if beat % self.subdivision.beats_per_click() == 0 {
-                self.click.trigger(beat == 0);
-            }
-        } else if per_beat > 1 && self.grid.on_slice(self.position, self.clicks_per_bar()) {
-            self.click.trigger(false);
+        if !self.grid.on_slice(self.position, self.clicks_per_bar()) {
+            return;
         }
+        let (bar, beat) = self.grid.beat_of(self.position);
+        let on_beat = self.grid.bar_start(bar) + self.grid.beat_offset(beat) == self.position;
+        let tone = match (on_beat, beat) {
+            (true, 0) => Tone::Accent,
+            (true, _) => Tone::Beat,
+            (false, _) => Tone::Sub,
+        };
+        self.click.trigger(tone);
     }
 
     /// Fires anything scheduled for the exact frame the transport has reached.

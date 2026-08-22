@@ -733,9 +733,11 @@ fn the_click_sounds_once_per_subdivision() {
     for (subdivision, per_bar) in [
         (Subdivision::Whole, 1),
         (Subdivision::Half, 2),
+        (Subdivision::HalfTriplet, 3),
         (Subdivision::Quarter, 4),
+        (Subdivision::QuarterTriplet, 6),
         (Subdivision::Eighth, 8),
-        (Subdivision::Triplet, 12),
+        (Subdivision::EighthTriplet, 12),
         (Subdivision::Sixteenth, 16),
     ] {
         let mut harness = Harness::with_click(64);
@@ -748,6 +750,27 @@ fn the_click_sounds_once_per_subdivision() {
             "{subdivision:?} should click {per_bar} a bar"
         );
     }
+}
+
+#[test]
+fn a_click_between_beats_has_its_own_voice() {
+    // How many frames of blip land in `frames` of rendering.
+    let blip = |harness: &mut Harness, frames: u64| {
+        let out = harness.run_frames(usize::try_from(frames).unwrap());
+        out.chunks(CHANNELS).filter(|f| f[0].abs() > 1e-6).count()
+    };
+
+    // Sixteenths, so the second click of the bar falls between beats.
+    let mut harness = Harness::with_click(64);
+    harness.command(Command::SetClickSubdivision(Subdivision::Sixteenth));
+    let on_beat = blip(&mut harness, BEAT / 4);
+    let off_beat = blip(&mut harness, BEAT / 4);
+
+    assert!(on_beat > 0 && off_beat > 0, "both sounded");
+    assert_ne!(
+        on_beat, off_beat,
+        "a click off the beat is a different length from the downbeat"
+    );
 }
 
 #[test]
