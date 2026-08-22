@@ -229,6 +229,14 @@ impl Subdivision {
         (beats_per_bar.saturating_mul(num) / den).max(1)
     }
 
+    /// Whether this rate divides a bar of `beats_per_bar` exactly.
+    ///
+    /// [`Self::Quarter`] fits every bar, so there is always one to fall back to.
+    pub fn fits(self, beats_per_bar: u32) -> bool {
+        let (num, den) = self.clicks_per_beat();
+        beats_per_bar.saturating_mul(num) % den == 0
+    }
+
     /// How it reads on a display.
     pub fn name(self) -> &'static str {
         match self {
@@ -511,6 +519,42 @@ mod tests {
             (Subdivision::Sixteenth, 16),
         ] {
             assert_eq!(subdivision.clicks_per_bar(4), per_bar, "{subdivision:?}");
+        }
+    }
+
+    #[test]
+    fn a_quarter_fits_every_bar_there_is() {
+        for beats in 1..=32 {
+            assert!(Subdivision::Quarter.fits(beats), "{beats} beats");
+        }
+    }
+
+    #[test]
+    fn what_fits_is_what_divides_the_bar_exactly() {
+        // Three beats take neither a two nor a four beat grouping.
+        let fitting: Vec<Subdivision> =
+            Subdivision::ALL.into_iter().filter(|s| s.fits(3)).collect();
+        assert_eq!(
+            fitting,
+            vec![
+                Subdivision::Quarter,
+                Subdivision::Eighth,
+                Subdivision::EighthTriplet,
+                Subdivision::Sixteenth,
+            ]
+        );
+
+        // Common time takes all of them.
+        assert!(Subdivision::ALL.into_iter().all(|s| s.fits(4)));
+
+        for subdivision in Subdivision::ALL {
+            for beats in 1..=16 {
+                if subdivision.fits(beats) {
+                    let per_bar = subdivision.clicks_per_bar(beats);
+                    let (num, den) = subdivision.clicks_per_beat();
+                    assert_eq!(per_bar * den, beats * num, "{subdivision:?} in {beats}");
+                }
+            }
         }
     }
 
