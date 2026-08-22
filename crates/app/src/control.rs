@@ -210,7 +210,7 @@ impl Controller {
             beat: 0,
             beat_lit: true,
             subdivision: Subdivision::default(),
-            beats_per_bar: time_signature.beats_per_bar(),
+            signature: time_signature,
             click_enabled,
             paused: false,
             axis: Axis::Row,
@@ -354,7 +354,7 @@ impl Controller {
             }
             // Off, then a degree per beat the tail can stand in for.
             PICKUP_COLUMN => {
-                let degrees = self.chrome.beats_per_bar.saturating_sub(1);
+                let degrees = self.chrome.signature.beats_per_bar().saturating_sub(1);
                 let degrees = u8::try_from(degrees).unwrap_or(u8::MAX).min(SHADES - 1);
                 let next = self.chrome.pickups[track] + 1;
                 self.chrome.pickups[track] = if next > degrees { 0 } else { next };
@@ -472,7 +472,7 @@ impl Controller {
         if let Ok(tempo) = Tempo::new(self.default_tempo) {
             self.commands.push(Command::SetTempo(tempo));
         }
-        self.set_signature(self.default_time_signature);
+        self.adopt_signature(self.default_time_signature);
         self.commands
             .push(Command::SetTimeSignature(self.default_time_signature));
         self.dirty = true;
@@ -543,8 +543,7 @@ impl Controller {
 
     /// Takes the time signature a loaded session was recorded in.
     pub fn set_loaded_time_signature(&mut self, signature: TimeSignature) {
-        self.set_signature(signature);
-        self.signature_before_request = signature;
+        self.adopt_signature(signature);
     }
 
     /// The signature a fresh session goes back to.
@@ -552,28 +551,42 @@ impl Controller {
         self.default_time_signature = signature;
     }
 
-    fn set_signature(&mut self, signature: TimeSignature) {
+    /// Shows a signature without touching anything that depends on it.
+    ///
+    /// Used for a change the engine has not confirmed, so a refusal only has this to undo.
+    fn show_signature_state(&mut self, signature: TimeSignature) {
         self.time_signature = signature;
-        self.chrome.beats_per_bar = signature.beats_per_bar();
-        // A rate the new bar cannot be cut into falls back to the one every bar takes.
-        if !self.chrome.subdivision.fits(signature.beats_per_bar()) {
-            self.chrome.subdivision = Subdivision::Quarter;
-            self.commands
-                .push(Command::SetClickSubdivision(Subdivision::Quarter));
+        self.chrome.signature = signature;
+        self.dirty = true;
+    }
+
+    /// Takes a signature the engine is known to be running, and everything that follows.
+    fn adopt_signature(&mut self, signature: TimeSignature) {
+        self.show_signature_state(signature);
+        self.signature_before_request = signature;
+
+        // A rate the bar cannot be cut into falls back to one click a beat.
+        if !self.chrome.subdivision.fits(signature) {
+            let fitting = Subdivision::fitting(signature);
+            self.chrome.subdivision = fitting;
+            self.commands.push(Command::SetClickSubdivision(fitting));
         }
         // A pickup cannot reach past the bar it opens from.
         let degrees = signature.beats_per_bar().saturating_sub(1);
         let degrees = u8::try_from(degrees).unwrap_or(u8::MAX).min(SHADES - 1);
+        let pulled_in = self.chrome.pickups.iter().any(|pickup| *pickup > degrees);
         for pickup in &mut self.chrome.pickups {
             *pickup = (*pickup).min(degrees);
         }
-        self.dirty = true;
+        if pulled_in {
+            self.settings_changed = true;
+        }
     }
 
     /// Changes how often the click sounds. Never locked: no clip depends on it.
     fn press_subdivision(&mut self, subdivision: Subdivision, now: Duration) {
         // A rate the bar cannot be cut into is shown greyed, and does nothing.
-        if !subdivision.fits(self.chrome.beats_per_bar) {
+        if !subdivision.fits(self.chrome.signature) {
             return;
         }
         if subdivision != self.chrome.subdivision {
@@ -606,8 +619,9 @@ impl Controller {
         }
         if next != current {
             self.signature_before_request = current;
-            self.set_signature(next);
-            self.settings_changed = true;
+            // Shown at once so it can be heard, but nothing that depends on it moves
+            // until the engine says it took the change.
+            self.show_signature_state(next);
             self.commands.push(Command::SetTimeSignature(next));
         }
         self.show_signature(next, now);
@@ -866,7 +880,7 @@ impl Controller {
     fn press_tempo(&mut self, direction: f64, now: Duration) {
         // Both tempo buttons at once asks for the signature, so the first nudge is undone.
         if let Some(hold) = self.tempo_hold.take() {
-            self.tempo = hold.started_at;
+            self.undo_nudge(hold.started_at);
             if self.mode == Mode::TimeSignature {
                 self.close_time_signature();
             } else {
@@ -894,6 +908,21 @@ impl Controller {
             last: now,
             started_at: before,
         });
+    }
+
+    /// Puts the tempo back to `was`, in the engine as well as on the display.
+    ///
+    /// Drops any nudge still queued: one authoritative value goes out instead, since the
+    /// earlier one may already have been drained.
+    fn undo_nudge(&mut self, was: f64) {
+        self.commands
+            .retain(|command| !matches!(command, Command::SetTempo(_)));
+        self.tempo = was;
+        self.tempo_before_request = was;
+        if let Ok(tempo) = Tempo::new(was) {
+            self.commands.push(Command::SetTempo(tempo));
+        }
+        self.dirty = true;
     }
 
     /// Whether a held tempo button has started repeating.
@@ -966,8 +995,12 @@ impl Controller {
     }
 
     /// How long the beat indicator stays lit: half a beat.
+    ///
+    /// The tempo counts quarter notes, so a beat is `4 / beat_unit` of one.
     fn lit_for(&self) -> Duration {
-        Duration::from_secs_f64(30.0 / self.tempo.clamp(MIN_BPM, MAX_BPM))
+        let bpm = self.tempo.clamp(MIN_BPM, MAX_BPM);
+        let unit = f64::from(self.chrome.signature.beat_unit().max(1));
+        Duration::from_secs_f64(120.0 / (bpm * unit))
     }
 
     /// Moves the tempo again while a button stays down.
@@ -1017,8 +1050,17 @@ impl Controller {
                 }
                 self.beat_off = Some(now + self.lit_for());
             }
+            // The engine's own value wins, however the change was asked for.
+            Event::TimeSignature {
+                beats_per_bar,
+                beat_unit,
+            } => {
+                if let Ok(signature) = TimeSignature::new(beats_per_bar, beat_unit) {
+                    self.adopt_signature(signature);
+                }
+            }
             Event::TimeSignatureRejected => {
-                self.set_signature(self.signature_before_request);
+                self.show_signature_state(self.signature_before_request);
             }
             Event::TempoRejected => {
                 self.tempo = self.tempo_before_request;
@@ -2142,7 +2184,8 @@ mod tests {
         assert_eq!(controller.subdivision(), Subdivision::Quarter);
         assert_eq!(
             commands(&mut controller),
-            vec![Command::SetClickSubdivision(Subdivision::Quarter)]
+            vec![Command::SetClickSubdivision(Subdivision::Quarter)],
+            "one click a beat, which a quarter is in 3/4"
         );
     }
 
@@ -2376,11 +2419,41 @@ mod tests {
         controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoDown), T0);
         assert_eq!(controller.tempo(), 120.0, "the nudge is put back");
 
+        // What an engine ends up on, not just what the display says.
+        let asked = commands(&mut controller);
+        let tempo = asked.iter().rev().find_map(|command| match command {
+            Command::SetTempo(tempo) => Some(tempo.bpm()),
+            _ => None,
+        });
+        assert_eq!(
+            tempo,
+            Some(120.0),
+            "the last word is the tempo it started on"
+        );
+
         let frame = controller.take_frame().unwrap();
         let beats_row = u8::try_from(BEATS_ROW).unwrap();
         assert!(
             frame.pad(addr(beats_row, 0)).is_lit(),
             "the page is showing"
+        );
+    }
+
+    #[test]
+    fn a_nudge_already_sent_is_corrected_rather_than_left() {
+        let mut controller = controller();
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
+        // Drained, so the engine has the nudge and it cannot be taken back.
+        assert_eq!(
+            commands(&mut controller),
+            vec![Command::SetTempo(Tempo::new(121.0).unwrap())]
+        );
+
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoDown), T0);
+        assert_eq!(
+            commands(&mut controller),
+            vec![Command::SetTempo(Tempo::new(120.0).unwrap())],
+            "a correction follows it"
         );
     }
 
@@ -2428,6 +2501,20 @@ mod tests {
                 Command::SetTimeSignature(TimeSignature::new(3, 8).unwrap()),
             ],
             "each press is heard rather than held back"
+        );
+
+        // A quarter click cannot tile three eighths, but nothing moves until the engine
+        // confirms which grid it ended up on.
+        controller.on_engine(
+            Event::TimeSignature {
+                beats_per_bar: 3,
+                beat_unit: 8,
+            },
+            T0,
+        );
+        assert_eq!(
+            commands(&mut controller),
+            vec![Command::SetClickSubdivision(Subdivision::Eighth)]
         );
     }
 
@@ -2520,6 +2607,85 @@ mod tests {
     }
 
     #[test]
+    fn a_dropped_signature_command_is_put_right_by_a_resync() {
+        let mut controller = controller();
+        open_signature(&mut controller);
+        let beats_row = u8::try_from(BEATS_ROW).unwrap();
+        press(&mut controller, addr(beats_row, 6), T0);
+
+        // The command never reached the engine, so the two disagree.
+        let _ = commands(&mut controller);
+        assert_eq!(
+            controller.time_signature(),
+            TimeSignature::new(7, 4).unwrap()
+        );
+
+        // A resync answers with what the engine is actually running.
+        controller.on_engine(
+            Event::TimeSignature {
+                beats_per_bar: 4,
+                beat_unit: 4,
+            },
+            T0,
+        );
+        assert_eq!(
+            controller.time_signature(),
+            TimeSignature::FOUR_FOUR,
+            "the engine's own value wins"
+        );
+    }
+
+    #[test]
+    fn a_refusal_that_never_arrives_is_still_put_right() {
+        let mut controller = controller();
+        controller.set_pickups([3; TRACK_COUNT]);
+        open_signature(&mut controller);
+
+        // Asking for a two beat bar would pull every pickup in to one.
+        let beats_row = u8::try_from(BEATS_ROW).unwrap();
+        press(&mut controller, addr(beats_row, 1), T0);
+        assert_eq!(
+            controller.pickups(),
+            [3; TRACK_COUNT],
+            "nothing that depends on the signature moved yet"
+        );
+
+        // The refusal is lost, and the resync says the bar never changed.
+        controller.on_engine(
+            Event::TimeSignature {
+                beats_per_bar: 4,
+                beat_unit: 4,
+            },
+            T0,
+        );
+        assert_eq!(controller.time_signature(), TimeSignature::FOUR_FOUR);
+        assert_eq!(
+            controller.pickups(),
+            [3; TRACK_COUNT],
+            "and neither did they"
+        );
+    }
+
+    #[test]
+    fn a_refusal_after_a_narrower_bar_leaves_the_pickups_alone() {
+        let mut controller = controller();
+        controller.set_pickups([3; TRACK_COUNT]);
+        open_signature(&mut controller);
+
+        let beats_row = u8::try_from(BEATS_ROW).unwrap();
+        press(&mut controller, addr(beats_row, 1), T0);
+        controller.on_engine(Event::TimeSignatureRejected, T0);
+
+        assert_eq!(controller.time_signature(), TimeSignature::FOUR_FOUR);
+        assert_eq!(
+            controller.pickups(),
+            [3; TRACK_COUNT],
+            "a refusal has only the display to undo"
+        );
+        assert_eq!(controller.subdivision(), Subdivision::Quarter);
+    }
+
+    #[test]
     fn a_refused_signature_change_is_rolled_back() {
         let mut controller = controller();
         controller.set_loaded_time_signature(TimeSignature::new(7, 8).unwrap());
@@ -2563,6 +2729,29 @@ mod tests {
             commands(&mut controller).is_empty(),
             "the engine took it from the load itself"
         );
+    }
+
+    #[test]
+    fn the_beat_flash_is_half_a_beat_whatever_the_unit_is() {
+        // The tempo counts quarter notes, so at 120 bpm a quarter beat is 500 ms.
+        let dark_at = |signature: Option<TimeSignature>, at: u64| {
+            let mut c = controller();
+            if let Some(signature) = signature {
+                c.set_loaded_time_signature(signature);
+            }
+            c.on_engine(Event::Beat { bar: 0, beat: 1 }, T0);
+            c.take_frame();
+            c.tick(T0 + millis(at));
+            c.take_frame().is_some()
+        };
+
+        assert!(!dark_at(None, 249), "still lit in 4/4");
+        assert!(dark_at(None, 250), "dark by half a quarter beat");
+
+        // An eighth-note beat is half as long, so its flash is half as long too.
+        let six_eight = TimeSignature::new(6, 8).unwrap();
+        assert!(!dark_at(Some(six_eight), 124), "still lit in 6/8");
+        assert!(dark_at(Some(six_eight), 125), "dark by half an eighth beat");
     }
 
     #[test]

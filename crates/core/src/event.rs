@@ -83,6 +83,13 @@ pub enum Event {
     },
     /// A tempo change was refused because clips already exist.
     TempoRejected,
+    /// The time signature the transport is running at.
+    TimeSignature {
+        /// Beats in a bar.
+        beats_per_bar: u32,
+        /// Note that gets the beat.
+        beat_unit: u32,
+    },
     /// A time signature change was refused because a clip exists.
     TimeSignatureRejected,
     /// A load held more audio than the pool allows, and was refused whole.
@@ -130,6 +137,8 @@ pub enum EventKind {
     Xrun,
     /// [`Event::TempoRejected`].
     TempoRejected,
+    /// [`Event::TimeSignature`].
+    TimeSignature,
     /// [`Event::TimeSignatureRejected`].
     TimeSignatureRejected,
     /// [`Event::LoadRefused`].
@@ -140,7 +149,7 @@ pub enum EventKind {
 
 impl EventKind {
     /// Every kind, in the order they index a per-kind count.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::SlotChanged,
         Self::Bar,
         Self::Clock,
@@ -153,6 +162,7 @@ impl EventKind {
         Self::Clipped,
         Self::Xrun,
         Self::TempoRejected,
+        Self::TimeSignature,
         Self::TimeSignatureRejected,
         Self::LoadRefused,
         Self::SnapshotComplete,
@@ -171,7 +181,10 @@ impl EventKind {
     /// A resync republishes every pad's state and the tempo the transport is actually
     /// running at. The rest are transient or carry their own recovery.
     pub fn is_replayed(self) -> bool {
-        matches!(self, Self::SlotChanged | Self::Tempo | Self::TempoRejected)
+        matches!(
+            self,
+            Self::SlotChanged | Self::Tempo | Self::TempoRejected | Self::TimeSignature
+        )
     }
 
     /// What to call one of these when saying which reports were lost.
@@ -191,6 +204,7 @@ impl EventKind {
             Self::Clipped => "clipping report",
             Self::Xrun => "short capture report",
             Self::TempoRejected => "tempo refusal",
+            Self::TimeSignature => "time signature report",
             Self::TimeSignatureRejected => "time signature refusal",
             Self::LoadRefused => "load refusal",
             Self::SnapshotComplete => "snapshot completion",
@@ -214,6 +228,7 @@ impl Event {
             Self::Clipped { .. } => EventKind::Clipped,
             Self::Xrun { .. } => EventKind::Xrun,
             Self::TempoRejected => EventKind::TempoRejected,
+            Self::TimeSignature { .. } => EventKind::TimeSignature,
             Self::TimeSignatureRejected => EventKind::TimeSignatureRejected,
             Self::LoadRefused { .. } => EventKind::LoadRefused,
             Self::SnapshotComplete { .. } => EventKind::SnapshotComplete,

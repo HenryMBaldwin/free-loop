@@ -21,8 +21,8 @@ pub struct Chrome {
     pub subdivision: Subdivision,
     /// Whether the beat is lit now or in the gap after it.
     pub beat_lit: bool,
-    /// Beats in a bar.
-    pub beats_per_bar: u32,
+    /// The musical time the transport is in.
+    pub signature: TimeSignature,
     /// Whether the click is sounding.
     pub click_enabled: bool,
     /// Whether the transport is frozen.
@@ -96,7 +96,7 @@ impl Default for Chrome {
             beat: 0,
             beat_lit: true,
             subdivision: Subdivision::default(),
-            beats_per_bar: 4,
+            signature: TimeSignature::FOUR_FOUR,
             click_enabled: true,
             paused: false,
             axis: Axis::Row,
@@ -317,7 +317,7 @@ pub fn subdivisions(chrome: Chrome) -> LedFrame {
         let Some(subdivision) = subdivision_at(addr) else {
             continue;
         };
-        let led = if !subdivision.fits(chrome.beats_per_bar) {
+        let led = if !subdivision.fits(chrome.signature) {
             Led::dim(UNAVAILABLE)
         } else if subdivision == chrome.subdivision {
             Led::solid(CLICK)
@@ -645,7 +645,7 @@ mod tests {
                 &mut frame,
                 Chrome {
                     beat,
-                    beats_per_bar: 9,
+                    signature: TimeSignature::new(9, 4).unwrap(),
                     ..Chrome::default()
                 },
             );
@@ -666,7 +666,7 @@ mod tests {
                 &mut frame,
                 Chrome {
                     beat,
-                    beats_per_bar: 7,
+                    signature: TimeSignature::new(7, 4).unwrap(),
                     ..Chrome::default()
                 },
             );
@@ -722,7 +722,7 @@ mod tests {
     #[test]
     fn a_rate_the_bar_cannot_be_cut_into_is_greyed_out() {
         let chrome = Chrome {
-            beats_per_bar: 3,
+            signature: TimeSignature::new(3, 4).unwrap(),
             subdivision: Subdivision::Quarter,
             ..Chrome::default()
         };
@@ -733,7 +733,7 @@ mod tests {
                 continue;
             };
             let led = frame.pad(addr);
-            if subdivision.fits(3) {
+            if subdivision.fits(TimeSignature::new(3, 4).unwrap()) {
                 assert_eq!(led.color, CLICK, "{subdivision:?} is on offer");
             } else {
                 assert_eq!(led.color, UNAVAILABLE, "{subdivision:?} does not fit");
