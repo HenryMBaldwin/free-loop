@@ -115,6 +115,27 @@ mod tests {
     }
 
     #[test]
+    fn a_name_says_the_gesture_the_way_out_actually_takes() {
+        // Either tempo button alone still moves the tempo; the pair is what leaves.
+        let signature = for_mode(Mode::TimeSignature);
+        assert_eq!(
+            signature.get(control_pad(Control::TempoUp.index())),
+            Some("hold both to leave time signature")
+        );
+
+        // A confirmation steps back to the picker that asked it, not out of saving.
+        let confirm = for_mode(Mode::ConfirmSave(pad(1, 2)));
+        assert_eq!(
+            confirm.get(control_pad(Control::SaveSession.index())),
+            Some("back to save")
+        );
+
+        // One button, and it does leave.
+        let mute = for_mode(Mode::Mute);
+        assert_eq!(mute.get(side_pad(MUTE_SIDE)), Some("leave mute"));
+    }
+
+    #[test]
     fn a_name_is_only_given_where_a_press_does_something() {
         for mode in [
             Mode::Perform,
