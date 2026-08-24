@@ -113,6 +113,19 @@ struct TempoHold {
     last: Duration,
     /// The tempo before it was pressed.
     started_at: f64,
+    /// The screen it went down on. A hold does not reach across to another.
+    screen: Mode,
+}
+
+/// The click button being held down.
+#[derive(Debug, Clone, Copy)]
+struct ClickHold {
+    /// When it went down.
+    since: Duration,
+    /// Whether the hold has already done its work, so letting go does nothing more.
+    used: bool,
+    /// The screen it went down on.
+    screen: Mode,
 }
 
 /// The grid lit one colour to answer something the performer asked for.
@@ -161,7 +174,7 @@ pub struct Controller {
     /// The last signature the engine confirmed, which a refusal falls back to.
     confirmed_signature: TimeSignature,
     /// When the click button went down, and whether the hold has already been used.
-    click_hold: Option<(Duration, bool)>,
+    click_hold: Option<ClickHold>,
     /// The input a fresh session puts every track on.
     default_input: TrackInput,
     /// The launch mode a fresh session puts every track on.
@@ -188,6 +201,8 @@ pub struct Controller {
     text_until: Option<Duration>,
     /// Whether text is on the grid now, as opposed to merely queued.
     text_running: bool,
+    /// The screen the frame on the surface was painted for.
+    painted: Mode,
     /// A colour answering a save, over the whole grid until it expires.
     flash: Option<Flash>,
     mode: Mode,
@@ -243,6 +258,7 @@ impl Controller {
             text: None,
             text_until: None,
             text_running: false,
+            painted: Mode::Perform,
             flash: None,
             mode: Mode::Perform,
             sessions: 0,
@@ -792,10 +808,13 @@ impl Controller {
         }
     }
 
+    /// Ends a gesture, keyed on the button itself.
+    ///
+    /// A hold begun on one screen can be let go on another, and has to end either way.
     fn release_button(&mut self, button: Button, now: Duration) {
-        match screen::role(self.mode, button) {
-            Role::Tempo(_) => self.release_tempo(now),
-            Role::Click => self.release_click(),
+        match button {
+            Button::Top(Control::TempoDown | Control::TempoUp) => self.release_tempo(now),
+            Button::Top(Control::ClickToggle) => self.release_click(),
             _ => {}
         }
     }
@@ -896,6 +915,7 @@ impl Controller {
             since: now,
             last: now,
             started_at: before,
+            screen: self.mode,
         });
     }
 
@@ -927,6 +947,11 @@ impl Controller {
         let Some(hold) = self.tempo_hold.take() else {
             return;
         };
+        if self.mode != hold.screen {
+            // Let go on another screen: the gesture ends, and says nothing here.
+            self.dirty = true;
+            return;
+        }
         // The gauge had the grid; whatever comes next has to redraw it.
         self.dirty = true;
         if (self.tempo - hold.started_at).abs() >= f64::EPSILON {
@@ -949,28 +974,42 @@ impl Controller {
             self.mode = Mode::Perform;
             self.dirty = true;
             // Used, so letting go does not turn the click off as well.
-            self.click_hold = Some((now, true));
+            self.click_hold = Some(self.holding_click(now, true));
         } else {
-            self.click_hold = Some((now, false));
+            self.click_hold = Some(self.holding_click(now, false));
         }
     }
 
     /// A tap turns the click on or off. A hold has opened the page already.
     fn release_click(&mut self) {
-        if let Some((_, false)) = self.click_hold.take() {
+        let Some(hold) = self.click_hold.take() else {
+            return;
+        };
+        // A tap that went down on another screen has already been answered there, or is
+        // no longer this screen's to answer.
+        if !hold.used && self.mode == hold.screen {
             self.toggle_click();
+        }
+    }
+
+    /// The click button going down on the screen showing.
+    fn holding_click(&self, now: Duration, used: bool) -> ClickHold {
+        ClickHold {
+            since: now,
+            used,
+            screen: self.mode,
         }
     }
 
     /// Opens the click's page once its button has been held long enough.
     fn open_click_page(&mut self, now: Duration) {
-        let Some((since, used)) = self.click_hold else {
+        let Some(hold) = self.click_hold else {
             return;
         };
-        if used || now.saturating_sub(since) < CLICK_HOLD {
+        if hold.used || self.mode != hold.screen || now.saturating_sub(hold.since) < CLICK_HOLD {
             return;
         }
-        self.click_hold = Some((since, true));
+        self.click_hold = Some(ClickHold { used: true, ..hold });
         self.mode = Mode::Subdivision;
         self.dirty = true;
     }
@@ -1001,6 +1040,10 @@ impl Controller {
         let Some(hold) = self.tempo_hold else {
             return;
         };
+        // A hold from another screen keeps its place there, and moves nothing here.
+        if self.mode != hold.screen {
+            return;
+        }
         if now.saturating_sub(hold.since) < TEMPO_HOLD_DELAY
             || now.saturating_sub(hold.last) < TEMPO_HOLD_INTERVAL
         {
@@ -1024,6 +1067,7 @@ impl Controller {
             since: now,
             last: now,
             started_at: self.tempo,
+            screen: self.mode,
         }
     }
 
@@ -1178,11 +1222,19 @@ impl Controller {
 
     /// The frame to show, if anything changed since it was last taken.
     pub fn take_frame(&mut self) -> Option<&LedFrame> {
+        // Text on the grid holds a frame back, but not across a change of screen: the
+        // buttons around the text keep offering what the screen behind it did, and they
+        // would answer for a screen that is no longer showing.
+        if self.text_running && self.painted != self.mode {
+            self.text = Some(TextUpdate::Stop);
+            self.text_until = None;
+        }
         // A frame cuts off text that is on the grid. Queued text is not on it yet, so the
         // frame that goes with it still gets out.
         if !self.dirty || self.text_running {
             return None;
         }
+        self.painted = self.mode;
 
         self.frame = if self.mode == Mode::Volume {
             paint::volumes(self.chrome)
@@ -1527,6 +1579,66 @@ mod tests {
             press_the_way_out(&mut controller);
             assert_eq!(controller.mode(), Mode::Perform, "{name} could not be left");
         }
+    }
+
+    #[test]
+    fn a_change_of_screen_cuts_text_short_rather_than_waiting_it_out() {
+        let mut controller = controller();
+
+        // A tempo tap puts its number on the grid.
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
+        controller.on_surface(SurfaceEvent::ControlReleased(Control::TempoUp), T0);
+        let _ = controller.take_frame();
+        assert!(matches!(controller.take_text(), Some(TextUpdate::Show(_))));
+        assert!(controller.take_frame().is_none(), "the text has the grid");
+
+        // Moving to another screen must not leave the last one's buttons lit and inert.
+        controller.on_surface(side(MUTE_SIDE), T0);
+        assert!(
+            controller.take_frame().is_none(),
+            "still the text this pass"
+        );
+        assert_eq!(controller.take_text(), Some(TextUpdate::Stop));
+
+        let frame = controller.take_frame().expect("the mute screen goes out");
+        assert_eq!(frame.side(MUTE_SIDE), Led::flash(SELECTED));
+        assert!(
+            !frame.control(Control::StopAll.index()).is_lit(),
+            "and the loops' buttons are dark on it"
+        );
+    }
+
+    #[test]
+    fn a_hold_does_not_outlive_the_screen_it_started_on() {
+        let mut controller = controller();
+
+        // Held down, then another finger opens a screen where this button means nothing.
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        controller.on_surface(SurfaceEvent::ControlReleased(Control::TempoUp), T0);
+
+        let settled = controller.tempo();
+        controller.tick(T0 + TEMPO_HOLD_DELAY + TEMPO_HOLD_INTERVAL * 4);
+        assert_eq!(
+            controller.tempo(),
+            settled,
+            "the tempo ran away after the button was let go"
+        );
+    }
+
+    #[test]
+    fn a_click_hold_does_not_open_its_screen_from_another() {
+        let mut controller = controller();
+
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::ClickToggle), T0);
+        controller.on_surface(side(MUTE_SIDE), T0);
+        controller.tick(T0 + CLICK_HOLD);
+
+        assert_eq!(
+            controller.mode(),
+            Mode::Mute,
+            "a hold from the loops reached across into the click screen"
+        );
     }
 
     #[test]
