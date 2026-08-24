@@ -125,8 +125,9 @@ pub fn title(mode: Mode) -> &'static str {
 ///
 /// Read from the same table a press is, so a name cannot promise what a press will not do.
 pub fn name(mode: Mode, button: Button) -> Option<String> {
-    if exits(mode).into_iter().flatten().any(|way| way == button) {
-        return Some(format!("leave {}", title(mode)));
+    let ways = exits(mode);
+    if ways.into_iter().flatten().any(|way| way == button) {
+        return Some(leaving(mode, ways));
     }
     let pad = |addr: SlotAddr| (addr.track.index(), addr.slot.index());
     Some(match (role(mode, button), button) {
@@ -187,6 +188,20 @@ pub fn name(mode: Mode, button: Button) -> Option<String> {
         // Inert, and grid roles on something that is not a pad, which cannot arise.
         _ => return None,
     })
+}
+
+/// What a way out of `mode` does, which is not always leaving outright.
+///
+/// A screen taking two buttons needs them held together, and a confirmation steps back to
+/// the picker that asked it.
+fn leaving(mode: Mode, ways: [Option<Button>; 2]) -> String {
+    match mode {
+        Mode::ConfirmSave(_) | Mode::ConfirmLoad(_) => format!("back to {}", title(mode)),
+        _ if ways.into_iter().flatten().count() > 1 => {
+            format!("hold both to leave {}", title(mode))
+        }
+        _ => format!("leave {}", title(mode)),
+    }
 }
 
 fn grid(mode: Mode, addr: SlotAddr) -> Role {
