@@ -934,9 +934,12 @@ impl Controller {
         self.dirty = true;
     }
 
-    /// Whether a held tempo button has started repeating.
+    /// Whether a held tempo button is climbing on the screen showing.
+    ///
+    /// A hold from another screen keeps its gauge there: this one paints its own grid.
     fn tempo_repeating(&self) -> bool {
-        self.tempo_hold.is_some_and(|hold| hold.last > hold.since)
+        self.tempo_hold
+            .is_some_and(|hold| hold.last > hold.since && self.mode == hold.screen)
     }
 
     /// Stops the repeat and reports where the tempo landed.
@@ -1201,7 +1204,7 @@ impl Controller {
             }
         }
 
-        if let Some(hold) = self.tempo_hold {
+        if let Some(hold) = self.tempo_hold.filter(|hold| self.mode == hold.screen) {
             // Steady while pressed, blinking once it starts repeating, so the button
             // says which of the two is happening.
             let led = if self.tempo_repeating() {
@@ -1605,6 +1608,28 @@ mod tests {
         assert!(
             !frame.control(Control::StopAll.index()).is_lit(),
             "and the loops' buttons are dark on it"
+        );
+    }
+
+    #[test]
+    fn a_repeating_gauge_does_not_paint_over_the_next_screen() {
+        let mut controller = controller();
+
+        // Held long enough to start climbing, and only then does another screen open.
+        // Tempo down, since tempo up shares its button with the beat.
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoDown), T0);
+        controller.tick(T0 + TEMPO_HOLD_DELAY + TEMPO_HOLD_INTERVAL);
+        assert!(controller.take_frame().is_some(), "the gauge is up");
+
+        controller.on_surface(side(MUTE_SIDE), T0);
+        let frame = controller.take_frame().expect("the mute screen goes out");
+        assert!(
+            !frame.pad(addr(0, 0)).is_lit(),
+            "the gauge is still filling a grid whose pads now mute instead"
+        );
+        assert!(
+            !frame.control(Control::TempoDown.index()).is_lit(),
+            "and the held button is offering itself on a screen it does nothing on"
         );
     }
 
