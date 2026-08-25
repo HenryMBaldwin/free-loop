@@ -57,6 +57,11 @@ pub(crate) enum LoadMessage {
 #[error("the engine has not drained the load queue")]
 pub struct LoadFull;
 
+/// A clip that could not be handed over, given back so the step can be tried again.
+#[derive(Debug, thiserror::Error)]
+#[error("the engine has not drained the load queue")]
+pub struct ClipFull(pub Arc<Clip>);
+
 /// A load that could not be started.
 #[derive(Debug, thiserror::Error)]
 pub enum BeginError {
@@ -102,13 +107,20 @@ impl Loader {
         clip: Arc<Clip>,
         playing: bool,
         launch_anchor: Option<Frames>,
-    ) -> Result<(), LoadFull> {
-        self.send(LoadMessage::Clip {
+    ) -> Result<(), ClipFull> {
+        // Asked before the clip is moved into a message, so a refusal can hand it back.
+        // Only the engine takes from this queue, so the room seen here cannot go away.
+        if self.out.slots() == 0 {
+            return Err(ClipFull(clip));
+        }
+        let queued = self.send(LoadMessage::Clip {
             addr,
             clip,
             playing,
             launch_anchor,
-        })
+        });
+        debug_assert!(queued.is_ok(), "a slot was free a moment ago");
+        Ok(())
     }
 
     /// Says nothing more is coming, which puts the load in place.
@@ -258,13 +270,19 @@ mod tests {
     }
 
     #[test]
-    fn a_full_queue_hands_the_message_back() {
+    fn a_full_queue_hands_the_clip_back() {
         let (mut loader, _inbox) = channel(rate());
         for _ in 0..SLOTS {
-            loader.send(LoadMessage::End).unwrap();
+            loader.end().unwrap();
         }
         assert!(!loader.ready());
-        assert!(loader.send(LoadMessage::End).is_err());
+
+        let audio = clip();
+        let refused = loader.clip(addr(1, 2), Arc::clone(&audio), true, None);
+        assert!(
+            matches!(&refused, Err(ClipFull(back)) if Arc::ptr_eq(back, &audio)),
+            "a full queue kept the only handle the caller had"
+        );
     }
 
     #[test]
