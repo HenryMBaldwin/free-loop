@@ -9,9 +9,10 @@
 //! exact frame it was scheduled for rather than at the next block edge.
 
 use free_loop_core::{
-    BarGrid, ClipId, Command, Ctx, Effect, Event, Frames, LaunchMode, PadMask, Polyphony,
-    SLOT_COUNT, SampleRate, SessionModel, Settings, SlotAddr, SlotState, Subdivision, TRACK_COUNT,
-    Tempo, TimeError, TimeSignature, TrackId, TrackInput, UNITY_STEP, gain_for_step, pad_bit,
+    BarGrid, CENTRE_STEP, ClipId, Command, Ctx, Effect, Event, Frames, LaunchMode, PadMask, Pan,
+    Polyphony, SLOT_COUNT, SampleRate, SessionModel, Settings, SlotAddr, SlotState, Subdivision,
+    TRACK_COUNT, Tempo, TimeError, TimeSignature, TrackId, TrackInput, UNITY_STEP, gain_for_step,
+    pad_bit, pan_for_step,
 };
 
 use std::sync::Arc;
@@ -20,7 +21,7 @@ use crate::click::{Click, ClickConfig, Tone};
 use crate::load::{LoadInbox, LoadMessage, Loader};
 use crate::recycle::{Recycler, Retirement, channel};
 use crate::snapshot::{Snapshot, SnapshotReader, SnapshotWriter};
-use free_loop_clip::{Clip, Ramp, SegmentPool, segments_for};
+use free_loop_clip::{Clip, PanRamp, Ramp, SegmentPool, segments_for};
 
 /// Frames a level travels the full gain range in by default. 5 ms at 48 kHz.
 pub const DEFAULT_DECLICK: Frames = Frames(240);
@@ -474,6 +475,10 @@ pub struct Engine {
     gains: [u8; TRACK_COUNT],
     /// How many of each track's loops may sound at once.
     polyphony: [Polyphony; TRACK_COUNT],
+    /// Where each track sits across the stereo field, as a step on the pan row.
+    pans: [u8; TRACK_COUNT],
+    /// The pan each track is mixing at, which slides toward where it should be.
+    pan_now: [Pan; TRACK_COUNT],
     /// The gain each pad is mixing at, which slides toward what it should be.
     levels: [[f32; SLOT_COUNT]; TRACK_COUNT],
     /// Frames a level takes to travel the full gain range.
@@ -554,6 +559,8 @@ impl Engine {
             soloed: 0,
             gains: [UNITY_STEP; TRACK_COUNT],
             polyphony: [Polyphony::default(); TRACK_COUNT],
+            pans: [CENTRE_STEP; TRACK_COUNT],
+            pan_now: [Pan::CENTRE; TRACK_COUNT],
             levels: [[0.0; SLOT_COUNT]; TRACK_COUNT],
             declick: as_usize(config.declick.0),
             pending: None,
@@ -654,6 +661,25 @@ impl Engine {
         (Ramp::new(level, reached, run), reached)
     }
 
+    /// How each track's pan moves over `run` frames, advancing where they have reached.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "block lengths are far below f32's exact range"
+    )]
+    fn pan_ramps(&mut self, run: usize) -> [PanRamp; TRACK_COUNT] {
+        core::array::from_fn(|track| {
+            let from = self.pan_now[track];
+            let target = pan_for_step(self.pans[track]);
+            if self.declick == 0 {
+                self.pan_now[track] = target;
+                return PanRamp::constant(target);
+            }
+            let reached = from.toward(target, run as f32 / self.declick as f32);
+            self.pan_now[track] = reached;
+            PanRamp::new(from, reached, run)
+        })
+    }
+
     /// Whether the mix has reached silence.
     fn is_faded(&self) -> bool {
         self.levels.iter().flatten().all(|level| *level == 0.0)
@@ -746,6 +772,7 @@ impl Engine {
         self.audio.launch_modes = settings.launch_modes;
         self.audio.pickups = settings.pickups;
         self.polyphony = settings.polyphony;
+        self.pans = settings.pans;
 
         // Every exclusive track, not only one that has just become exclusive: a loaded
         // session can arrive with several loops sounding on one.
@@ -1233,6 +1260,9 @@ impl Engine {
     ) {
         let out = &mut output[offset * self.channels..(offset + run) * self.channels];
 
+        // Hoisted out of the pad loop: a track's pads share its pan.
+        let pans = self.pan_ramps(run);
+
         for addr in SlotAddr::all() {
             let (track, slot) = (addr.track.index(), addr.slot.index());
             let level = self.levels[track][slot];
@@ -1246,7 +1276,7 @@ impl Engine {
             if let Some(clip) = self.audio.clip(addr) {
                 let anchor = self.audio.anchor(addr, clip);
                 let pickup = self.grid.beat_offset(u32::from(self.audio.pickups[track]));
-                clip.mix_pickup(anchor, self.position, out, ramp, pickup);
+                clip.mix_pickup(anchor, self.position, out, ramp, pickup, pans[track]);
             }
         }
 

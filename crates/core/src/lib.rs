@@ -14,6 +14,7 @@ pub mod command;
 pub mod event;
 pub mod gain;
 pub mod ids;
+pub mod pan;
 pub mod session;
 pub mod settings;
 pub mod slot;
@@ -26,6 +27,7 @@ pub use ids::{
     ClipId, INPUT_CHANNELS, IndexOutOfRange, LaunchMode, PadMask, Picks, Polyphony, SLOT_COUNT,
     SlotAddr, SlotId, TRACK_COUNT, TrackId, TrackInput, column_mask, pad_bit, row_mask,
 };
+pub use pan::{CENTRE_STEP, PAN_STEPS, Pan, pan_for_step};
 pub use session::SessionModel;
 pub use settings::Settings;
 pub use slot::{Ctx, Effect, Effects, SlotInput, SlotState, step};

@@ -7,7 +7,9 @@
 use std::path::{Path, PathBuf};
 
 use free_loop_clip::{AudioBuffer, Clip, SEGMENT_FRAMES, SegmentPool, segments_for};
-use free_loop_core::{Frames, SLOT_COUNT, SlotAddr, TRACK_COUNT, TrackInput, UNITY_STEP};
+use free_loop_core::{
+    CENTRE_STEP, Frames, SLOT_COUNT, SlotAddr, TRACK_COUNT, TrackInput, UNITY_STEP,
+};
 
 use crate::manifest::{ClipEntry, MANIFEST, Manifest, TrackEntry};
 
@@ -114,6 +116,8 @@ pub struct TrackSettings {
     pub gain_step: u8,
     /// Whether the track's loops sound together.
     pub multiple: bool,
+    /// Where the track sits across the stereo field, as a step on the pan row.
+    pub pan: u8,
 }
 
 impl Default for TrackSettings {
@@ -125,6 +129,7 @@ impl Default for TrackSettings {
             pickup: 0,
             gain_step: UNITY_STEP,
             multiple: false,
+            pan: CENTRE_STEP,
         }
     }
 }
@@ -289,6 +294,7 @@ impl LoadedSession {
                 slot.restart = entry.restart;
                 slot.pickup = entry.pickup;
                 slot.multiple = entry.multiple;
+                slot.pan = entry.pan;
                 if let Some(step) = entry.gain_step {
                     slot.gain_step = step;
                 }
@@ -473,6 +479,7 @@ impl SessionStore {
                     pickup: track.pickup,
                     gain_step: Some(track.gain_step),
                     multiple: track.multiple,
+                    pan: track.pan,
                 })
                 .collect(),
         };
@@ -1415,6 +1422,7 @@ mod tests {
                     pickup: 0,
                     gain_step: Some(3),
                     multiple: true,
+                    pan: 5,
                 }],
             },
             clips: Vec::new(),
@@ -1425,6 +1433,7 @@ mod tests {
         assert!(tracks[7].restart);
         assert_eq!(tracks[7].gain_step, 3);
         assert!(tracks[7].multiple);
+        assert_eq!(tracks[7].pan, 5);
         assert_eq!(tracks[0], TrackSettings::default(), "and only that track");
     }
 
@@ -1452,6 +1461,11 @@ mod tests {
         };
 
         assert!(!loaded.tracks()[3].multiple);
+        assert_eq!(
+            loaded.tracks()[3].pan,
+            CENTRE_STEP,
+            "a session saved before pans loads centred"
+        );
     }
 
     /// A manifest holding nothing but track settings.
@@ -1488,6 +1502,7 @@ mod tests {
                 pickup: 0,
                 gain_step: Some(1),
                 multiple: false,
+                pan: CENTRE_STEP,
             }]),
             clips: Vec::new(),
         };
@@ -1506,6 +1521,7 @@ mod tests {
                 pickup: 0,
                 gain_step: Some(1),
                 multiple: false,
+                pan: CENTRE_STEP,
             }]),
             clips: vec![loaded_clip(addr(2, 0), 5), loaded_clip(addr(2, 1), 7)],
         };
@@ -1528,6 +1544,7 @@ mod tests {
                 pickup: 0,
                 gain_step: None,
                 multiple: false,
+                pan: CENTRE_STEP,
             }]),
             clips: vec![loaded_clip(addr(2, 0), 5)],
         };

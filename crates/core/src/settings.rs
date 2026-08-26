@@ -2,6 +2,7 @@
 
 use crate::gain::UNITY_STEP;
 use crate::ids::{LaunchMode, PadMask, Polyphony, TRACK_COUNT, TrackInput};
+use crate::pan::CENTRE_STEP;
 
 /// Everything the controller sets as a whole value.
 ///
@@ -22,6 +23,8 @@ pub struct Settings {
     pub pickups: [u8; TRACK_COUNT],
     /// How many of each track's loops may sound at once.
     pub polyphony: [Polyphony; TRACK_COUNT],
+    /// Where each track sits across the stereo field, as a step on the pan row.
+    pub pans: [u8; TRACK_COUNT],
 }
 
 impl Settings {
@@ -35,6 +38,7 @@ impl Settings {
             launch_modes: [LaunchMode::default(); TRACK_COUNT],
             pickups: [0; TRACK_COUNT],
             polyphony: [Polyphony::default(); TRACK_COUNT],
+            pans: [CENTRE_STEP; TRACK_COUNT],
         }
     }
 }

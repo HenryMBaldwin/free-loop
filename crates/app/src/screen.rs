@@ -9,9 +9,11 @@ use free_loop_surface::Control;
 
 use crate::control::Mode;
 use crate::paint::{
-    self, INPUT_SIDE, MUTE_SIDE, NEW_SIDE, NO_PAD, PAUSE_SIDE, PICKUP_COLUMN, POLYPHONY_COLUMN,
-    RESTART_COLUMN, SETTINGS_SIDE, SOLO_SIDE, SignaturePart, VOLUME_SIDE, YES_PAD,
+    self, INPUT_SIDE, MUTE_SIDE, NEW_SIDE, NO_PAD, PAN_SIDE, PAUSE_SIDE, PICKUP_COLUMN,
+    POLYPHONY_COLUMN, RESTART_COLUMN, SETTINGS_SIDE, SOLO_SIDE, SignaturePart, VOLUME_SIDE,
+    YES_PAD,
 };
+use free_loop_core::{CENTRE_STEP, PAN_STEPS};
 
 /// One button on the surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +47,8 @@ pub enum Role {
     Group,
     /// How loud a track plays.
     Level,
+    /// Where a track sits across the stereo field.
+    Pan,
     /// The input a track records.
     InputChannel,
     /// One of a track's settings.
@@ -90,6 +94,7 @@ pub fn exits(mode: Mode) -> [Option<Button>; 2] {
     match mode {
         Mode::Perform => [None, None],
         Mode::Volume => one(Button::Side(VOLUME_SIDE)),
+        Mode::Pan => one(Button::Side(PAN_SIDE)),
         Mode::Input => one(Button::Side(INPUT_SIDE)),
         Mode::Settings => one(Button::Side(SETTINGS_SIDE)),
         Mode::Mute => one(Button::Side(MUTE_SIDE)),
@@ -114,6 +119,7 @@ pub fn title(mode: Mode) -> &'static str {
         Mode::Mute => "mute",
         Mode::Solo => "solo",
         Mode::Volume => "volume",
+        Mode::Pan => "pan",
         Mode::Input => "input",
         Mode::Settings => "settings",
         Mode::TimeSignature => "time signature",
@@ -157,6 +163,22 @@ pub fn name(mode: Mode, button: Button) -> Option<String> {
         (Role::Level, Button::Grid(addr)) => {
             let (track, slot) = pad(addr);
             format!("track {track} level {}", slot + 1)
+        }
+        (Role::Pan, Button::Grid(addr)) => {
+            let (track, slot) = pad(addr);
+            if slot >= PAN_STEPS {
+                return None;
+            }
+            let place = match slot {
+                0 => "hard left".to_owned(),
+                slot if slot == usize::from(CENTRE_STEP) => "centre".to_owned(),
+                slot if slot == PAN_STEPS - 1 => "hard right".to_owned(),
+                slot if slot < usize::from(CENTRE_STEP) => {
+                    format!("left {}", usize::from(CENTRE_STEP) - slot)
+                }
+                slot => format!("right {}", slot - usize::from(CENTRE_STEP)),
+            };
+            format!("track {track} pan {place}")
         }
         (Role::InputChannel, Button::Grid(addr)) => {
             let (track, slot) = pad(addr);
@@ -213,6 +235,7 @@ fn grid(mode: Mode, addr: SlotAddr) -> Role {
         Mode::ConfirmSave(_) | Mode::ConfirmLoad(_) => Role::Answer,
         Mode::Mute | Mode::Solo => Role::Group,
         Mode::Volume => Role::Level,
+        Mode::Pan => Role::Pan,
         Mode::Input => Role::InputChannel,
         Mode::Settings => Role::Setting,
         Mode::TimeSignature => match paint::signature_part(addr) {
@@ -249,6 +272,7 @@ fn side(mode: Mode, index: usize) -> Role {
     match (mode, index) {
         (Mode::LoadPicker, NEW_SIDE) => Role::NewSession,
         (Mode::Perform | Mode::Volume, VOLUME_SIDE) => Role::Open(Mode::Volume),
+        (Mode::Perform | Mode::Pan, PAN_SIDE) => Role::Open(Mode::Pan),
         (Mode::Perform | Mode::Input, INPUT_SIDE) => Role::Open(Mode::Input),
         (Mode::Perform | Mode::Settings, SETTINGS_SIDE) => Role::Open(Mode::Settings),
         (Mode::Perform | Mode::Mute, MUTE_SIDE) => Role::Open(Mode::Mute),
@@ -275,6 +299,7 @@ mod tests {
             Mode::Mute,
             Mode::Solo,
             Mode::Volume,
+            Mode::Pan,
             Mode::Input,
             Mode::Settings,
             Mode::TimeSignature,

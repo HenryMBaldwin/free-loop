@@ -1,8 +1,8 @@
 //! What a session records besides its audio.
 
 use free_loop_core::{
-    GAIN_STEPS, INPUT_CHANNELS, IndexOutOfRange, SLOT_COUNT, SlotAddr, SlotId, TRACK_COUNT,
-    TrackId, UNITY_STEP, pad_bit,
+    CENTRE_STEP, GAIN_STEPS, INPUT_CHANNELS, IndexOutOfRange, SLOT_COUNT, SlotAddr, SlotId,
+    TRACK_COUNT, TrackId, UNITY_STEP, pad_bit,
 };
 use serde::{Deserialize, Serialize};
 
@@ -93,6 +93,14 @@ pub struct TrackEntry {
     /// Whether the track's loops sound together.
     #[serde(default)]
     pub multiple: bool,
+    /// Where the track sits across the stereo field, as a step on the pan row.
+    #[serde(default = "centre")]
+    pub pan: u8,
+}
+
+/// Dead centre, for a session saved before tracks carried a pan.
+fn centre() -> u8 {
+    CENTRE_STEP
 }
 
 /// Everything a session holds apart from the audio itself.
@@ -297,6 +305,7 @@ mod tests {
             pickup: 0,
             gain_step: None,
             multiple: false,
+            pan: CENTRE_STEP,
             input_channels: None,
         };
         broken.tracks = vec![entry.clone(), entry];
@@ -313,6 +322,7 @@ mod tests {
             pickup: 0,
             gain_step: Some(200),
             multiple: false,
+            pan: CENTRE_STEP,
             input_channels: None,
         }];
         assert_eq!(broken.validate(), Err("a track's level is off the ladder"));
@@ -328,6 +338,7 @@ mod tests {
             pickup: 0,
             gain_step: None,
             multiple: false,
+            pan: CENTRE_STEP,
             input_channels: None,
         }];
         assert!(broken.validate().is_err());
@@ -351,6 +362,7 @@ mod tests {
             pickup: 0,
             gain_step: Some(3),
             multiple: false,
+            pan: CENTRE_STEP,
             input_channels: None,
         }];
         let written = toml::to_string(&manifest).unwrap();

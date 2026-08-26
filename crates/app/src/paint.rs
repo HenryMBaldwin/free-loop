@@ -5,8 +5,9 @@
 use core::cmp::Ordering;
 
 use free_loop_core::{
-    LaunchMode, MAX_BPM, MIN_BPM, PadMask, Polyphony, SLOT_COUNT, SessionModel, SlotAddr,
-    SlotState, Subdivision, TRACK_COUNT, TimeSignature, TrackInput, UNITY_STEP, pad_bit,
+    CENTRE_STEP, LaunchMode, MAX_BPM, MIN_BPM, PAN_STEPS, PadMask, Polyphony, SLOT_COUNT,
+    SessionModel, SlotAddr, SlotState, Subdivision, TRACK_COUNT, TimeSignature, TrackInput,
+    UNITY_STEP, pad_bit,
 };
 
 use free_loop_surface::{Control, FIRST_BEAT_LED, Led, LedColor, LedFrame, LedStyle, SHADES};
@@ -42,6 +43,8 @@ pub struct Chrome {
     pub pickups: [u8; TRACK_COUNT],
     /// How many of each track's loops may sound at once.
     pub polyphony: [Polyphony; TRACK_COUNT],
+    /// Where each track sits across the stereo field, as a step on the pan row.
+    pub pans: [u8; TRACK_COUNT],
     /// Input channels the device offers.
     pub input_count: usize,
 }
@@ -108,6 +111,7 @@ impl Default for Chrome {
             launch_modes: [LaunchMode::Follow; TRACK_COUNT],
             pickups: [0; TRACK_COUNT],
             polyphony: [Polyphony::Single; TRACK_COUNT],
+            pans: [CENTRE_STEP; TRACK_COUNT],
             input_count: 2,
         }
     }
@@ -182,8 +186,17 @@ pub const MUTED: LedColor = LedColor::Red;
 /// Colour a soloed group takes, matching its side button.
 pub const SOLOED: LedColor = LedColor::Blue;
 
+/// Colour the pan row takes.
+pub const PAN: LedColor = LedColor::Green;
+
+/// Colour marking the pan step that sits dead centre.
+pub const PAN_CENTRE: LedColor = LedColor::Amber;
+
 /// The right-hand column button that opens the track levels.
 pub const VOLUME_SIDE: usize = 0;
+
+/// The right-hand column button that opens the track pans.
+pub const PAN_SIDE: usize = 1;
 
 /// The right-hand column button that opens the track inputs.
 pub const INPUT_SIDE: usize = 2;
@@ -382,6 +395,31 @@ pub fn volumes(chrome: Chrome) -> LedFrame {
             (Ordering::Less, _) => Led::dim(LedColor::White),
             (Ordering::Greater, true) => Led::dim(LedColor::Amber),
             (Ordering::Greater, false) => Led::OFF,
+        };
+        frame.set_pad(addr, led);
+    }
+
+    finish(&mut frame, chrome);
+    frame
+}
+
+/// Paints each row as where its track sits across the stereo field.
+///
+/// The row is one pad short of the grid so that centre lands on a pad. The pad the track
+/// sits on is solid, centre is marked, and the column past the end is dark.
+pub fn pans(chrome: Chrome) -> LedFrame {
+    let mut frame = LedFrame::new();
+
+    for addr in SlotAddr::all() {
+        let step = addr.slot.index();
+        let led = if step >= PAN_STEPS {
+            Led::OFF
+        } else if step == usize::from(chrome.pans[addr.track.index()]) {
+            Led::solid(PAN)
+        } else if step == usize::from(CENTRE_STEP) {
+            Led::dim(PAN_CENTRE)
+        } else {
+            Led::dim(PAN)
         };
         frame.set_pad(addr, led);
     }
@@ -1224,6 +1262,57 @@ mod tests {
             painted.pad(off),
             Led::shade(SETTING, 1),
             "offered, not taken"
+        );
+    }
+
+    #[test]
+    fn the_pan_row_stops_one_short_of_the_grid() {
+        let painted = pans(Chrome::default());
+        let last = u8::try_from(SLOT_COUNT - 1).unwrap();
+        for track in 0..u8::try_from(TRACK_COUNT).unwrap() {
+            let row = TrackId::new(track).unwrap();
+            let past = SlotAddr::new(row, SlotId::new(last).unwrap());
+            assert!(
+                !painted.pad(past).is_lit(),
+                "track {track} runs one too far"
+            );
+            for column in 0..last {
+                let addr = SlotAddr::new(row, SlotId::new(column).unwrap());
+                assert!(painted.pad(addr).is_lit(), "track {track} column {column}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_pan_row_marks_centre_and_where_the_track_sits() {
+        let mut chrome = Chrome::default();
+        chrome.pans[0] = 0;
+        let painted = pans(chrome);
+        let at = |column: u8| {
+            painted.pad(SlotAddr::new(
+                TrackId::new(0).unwrap(),
+                SlotId::new(column).unwrap(),
+            ))
+        };
+
+        assert_eq!(at(0), Led::solid(PAN), "the track is hard left");
+        assert_eq!(at(CENTRE_STEP), Led::dim(PAN_CENTRE), "centre is marked");
+        assert_eq!(at(1), Led::dim(PAN), "the rest are available");
+    }
+
+    #[test]
+    fn a_centred_track_shows_one_pad_rather_than_two() {
+        let painted = pans(Chrome::default());
+        let at = |column: u8| {
+            painted.pad(SlotAddr::new(
+                TrackId::new(0).unwrap(),
+                SlotId::new(column).unwrap(),
+            ))
+        };
+        assert_eq!(
+            at(CENTRE_STEP),
+            Led::solid(PAN),
+            "sitting on centre wins over marking it"
         );
     }
 
