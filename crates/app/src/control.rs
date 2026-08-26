@@ -155,6 +155,8 @@ pub enum TextUpdate {
 pub enum Work {
     /// For the engine.
     Command(Command),
+    /// The whole of the track settings, as they stood at this point.
+    Settings(Settings),
     /// For the caller, which has the disk and the loader.
     Request(Request),
 }
@@ -201,8 +203,6 @@ pub struct Controller {
     input_held: Option<SlotAddr>,
     /// Commands and requests in the order the performer made them.
     work: Vec<Work>,
-    /// Whether the settings have moved since the engine was last told.
-    settings_changed: bool,
     /// A tempo button being held down.
     tempo_hold: Option<TempoHold>,
     /// When the beat indicator goes dark again.
@@ -246,7 +246,7 @@ impl Controller {
             gains: [UNITY_STEP; TRACK_COUNT],
         };
         let session = SessionModel::new();
-        Self {
+        let mut controller = Self {
             frame: paint::frame(&session, chrome),
             session,
             chrome,
@@ -263,7 +263,6 @@ impl Controller {
             warning: 0,
             input_held: None,
             work: Vec::new(),
-            settings_changed: true,
             tempo_hold: None,
             beat_off: None,
             text: None,
@@ -275,7 +274,10 @@ impl Controller {
             sessions: 0,
             current: None,
             dirty: true,
-        }
+        };
+        // The engine is told what it starts on, before anything else is asked for.
+        controller.mark_settings();
+        controller
     }
 
     /// The tempo the engine is believed to be running at.
@@ -343,7 +345,7 @@ impl Controller {
     fn set_level(&mut self, addr: SlotAddr) {
         let step = u8::try_from(addr.slot.index()).unwrap_or(UNITY_STEP);
         self.chrome.gains[addr.track.index()] = step;
-        self.settings_changed = true;
+        self.mark_settings();
         self.dirty = true;
     }
 
@@ -368,7 +370,7 @@ impl Controller {
                 TrackInput::Mono(channel)
             }
         };
-        self.settings_changed = true;
+        self.mark_settings();
         self.dirty = true;
     }
 
@@ -388,7 +390,7 @@ impl Controller {
             }
             _ => return,
         }
-        self.settings_changed = true;
+        self.mark_settings();
         self.dirty = true;
     }
 
@@ -400,7 +402,7 @@ impl Controller {
     /// Takes the pickup settings a loaded session came with.
     pub fn set_pickups(&mut self, pickups: [u8; TRACK_COUNT]) {
         self.chrome.pickups = pickups;
-        self.settings_changed = true;
+        self.mark_settings();
         self.dirty = true;
     }
 
@@ -412,7 +414,7 @@ impl Controller {
     /// Takes the modes a loaded session came with.
     pub fn set_launch_modes(&mut self, modes: [LaunchMode; TRACK_COUNT]) {
         self.chrome.launch_modes = modes;
-        self.settings_changed = true;
+        self.mark_settings();
         self.dirty = true;
     }
 
@@ -440,14 +442,14 @@ impl Controller {
     /// Takes the inputs a loaded session came with.
     pub fn set_inputs(&mut self, inputs: [TrackInput; TRACK_COUNT]) {
         self.chrome.inputs = inputs;
-        self.settings_changed = true;
+        self.mark_settings();
         self.dirty = true;
     }
 
     /// Takes the levels a loaded session came with.
     pub fn set_gains(&mut self, gains: [u8; TRACK_COUNT]) {
         self.chrome.gains = gains;
-        self.settings_changed = true;
+        self.mark_settings();
         self.dirty = true;
     }
 
@@ -471,7 +473,7 @@ impl Controller {
             *marks &= !group;
         }
 
-        self.settings_changed = true;
+        self.mark_settings();
         self.dirty = true;
     }
 
@@ -488,7 +490,7 @@ impl Controller {
         self.chrome.inputs = [self.default_input; TRACK_COUNT];
         self.chrome.launch_modes = [self.default_launch_mode; TRACK_COUNT];
         self.chrome.pickups = [0; TRACK_COUNT];
-        self.settings_changed = true;
+        self.mark_settings();
         self.command(Command::ClearAll);
         self.command(Command::SetPaused(false));
 
@@ -605,7 +607,7 @@ impl Controller {
             *pickup = (*pickup).min(degrees);
         }
         if pulled_in {
-            self.settings_changed = true;
+            self.mark_settings();
         }
     }
 
@@ -749,6 +751,19 @@ impl Controller {
 
     fn request(&mut self, request: Request) {
         self.work.push(Work::Request(request));
+    }
+
+    /// Notes that the settings moved, in its place among everything else asked for.
+    ///
+    /// Adjacent changes coalesce into the later one, which cannot cross a command or a
+    /// request: those are what the position is for.
+    fn mark_settings(&mut self) {
+        let settings = self.settings();
+        if let Some(Work::Settings(last)) = self.work.last_mut() {
+            *last = settings;
+        } else {
+            self.work.push(Work::Settings(settings));
+        }
     }
 
     /// Handles something the performer did, at time `now` since the app started.
@@ -1181,11 +1196,6 @@ impl Controller {
         }
     }
 
-    /// The settings to publish, if they have moved since they were last taken.
-    pub fn take_settings(&mut self) -> Option<Settings> {
-        core::mem::take(&mut self.settings_changed).then(|| self.settings())
-    }
-
     /// Marks whatever is waiting on the next press.
     ///
     /// Applied to every screen, so a held button looks the same on any of them.
@@ -1318,14 +1328,26 @@ mod tests {
             .drain_work()
             .filter_map(|work| match work {
                 Work::Command(command) => Some(command),
-                Work::Request(_) => None,
+                Work::Request(_) | Work::Settings(_) => None,
             })
             .collect()
     }
 
     /// The settings the controller has ready for the engine, which must have moved.
+    /// The settings the controller has asked for, which must have moved.
     fn settings(controller: &mut Controller) -> Settings {
-        controller.take_settings().unwrap()
+        offered(controller).expect("the settings moved")
+    }
+
+    /// The latest settings in everything asked for, if any moved.
+    fn offered(controller: &mut Controller) -> Option<Settings> {
+        controller
+            .drain_work()
+            .filter_map(|work| match work {
+                Work::Settings(settings) => Some(settings),
+                _ => None,
+            })
+            .next_back()
     }
 
     fn millis(value: u64) -> Duration {
@@ -1378,15 +1400,15 @@ mod tests {
     fn settings_are_offered_once_until_they_move_again() {
         let mut controller = controller();
         assert!(
-            controller.take_settings().is_some(),
+            offered(&mut controller).is_some(),
             "the engine is told what it starts on"
         );
-        assert_eq!(controller.take_settings(), None);
+        assert_eq!(offered(&mut controller), None);
 
         controller.on_surface(side(MUTE_SIDE), T0);
         press(&mut controller, addr(0, 0), T0);
-        assert!(controller.take_settings().is_some());
-        assert_eq!(controller.take_settings(), None);
+        assert!(offered(&mut controller).is_some());
+        assert_eq!(offered(&mut controller), None);
     }
 
     #[test]
@@ -1401,7 +1423,7 @@ mod tests {
             6,
             "not the level in between"
         );
-        assert_eq!(controller.take_settings(), None);
+        assert_eq!(offered(&mut controller), None);
     }
 
     #[test]
@@ -1891,9 +1913,9 @@ mod tests {
         assert_eq!(controller.current_session(), None, "nothing to save over");
         assert!(!controller.paused(), "ready to record straight away");
 
-        let sent = commands(&mut controller);
+        let (sent, settings, _) = work(&mut controller);
         assert!(sent.contains(&Command::ClearAll));
-        assert_eq!(settings(&mut controller), Settings::new());
+        assert_eq!(settings, Some(Settings::new()));
 
         let frame = controller.take_frame().unwrap();
         assert!(
@@ -2047,17 +2069,19 @@ mod tests {
         assert_ne!(frozen.side(PAUSE_SIDE), running);
     }
 
-    /// Everything asked for, split by kind, for a test that wants both.
-    fn work(controller: &mut Controller) -> (Vec<Command>, Vec<Request>) {
+    /// Everything asked for, split by kind, for a test that wants more than one of them.
+    fn work(controller: &mut Controller) -> (Vec<Command>, Option<Settings>, Vec<Request>) {
         let mut commands = Vec::new();
+        let mut settings = None;
         let mut requests = Vec::new();
         for item in controller.drain_work() {
             match item {
                 Work::Command(command) => commands.push(command),
+                Work::Settings(latest) => settings = Some(latest),
                 Work::Request(request) => requests.push(request),
             }
         }
-        (commands, requests)
+        (commands, settings, requests)
     }
 
     /// The requests the controller has made, in order, ignoring any command.
@@ -2066,7 +2090,7 @@ mod tests {
             .drain_work()
             .filter_map(|work| match work {
                 Work::Request(request) => Some(request),
-                Work::Command(_) => None,
+                Work::Command(_) | Work::Settings(_) => None,
             })
             .collect()
     }
@@ -2089,7 +2113,7 @@ mod tests {
         controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
         press(&mut controller, addr(2, 3), T0);
 
-        let (commands, requests) = work(&mut controller);
+        let (commands, _, requests) = work(&mut controller);
         assert!(
             commands.is_empty(),
             "a pad in the picker must not touch the loops"
