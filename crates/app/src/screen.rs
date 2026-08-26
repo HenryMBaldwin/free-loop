@@ -53,8 +53,6 @@ pub enum Role {
     PickLoop,
     /// One step of a loop's level or pan.
     LoopStep(Knob, usize),
-    /// Swaps a screen between its track-wide and loop-wide halves.
-    Halves,
     /// Steps back one screen without leaving for the loops.
     Back,
     /// The input a track records.
@@ -193,12 +191,6 @@ pub fn name(mode: Mode, button: Button) -> Option<String> {
         }
         (Role::LoopStep(Knob::Level, step), _) => format!("level {}", step + 1),
         (Role::LoopStep(Knob::Pan, step), _) => format!("pan {}", place(step)),
-        (Role::Halves, _) => match mode {
-            Mode::LoopPick(knob) | Mode::LoopSet(knob, _) => {
-                format!("back to {}", title(knob.trackwise()))
-            }
-            _ => "one loop at a time".to_owned(),
-        },
         (Role::InputChannel, Button::Grid(addr)) => {
             let (track, slot) = pad(addr);
             format!("track {track} input {slot}")
@@ -296,12 +288,18 @@ fn top(mode: Mode, control: Control) -> Role {
         (Mode::Perform | Mode::Subdivision, Control::ClickToggle) => Role::Click,
         (Mode::Perform, Control::StopAll) => Role::StopAll,
         (Mode::Perform, Control::Rewind) => Role::Rewind,
-        // Grouping is what mute and solo do, so it is reachable from both of them.
-        (Mode::Perform | Mode::Mute | Mode::Solo, Control::Axis) => Role::Axis,
-        // The same button, meaning the other way of working on this screen.
-        (Mode::Volume | Mode::Pan | Mode::LoopPick(_) | Mode::LoopSet(..), Control::Axis) => {
-            Role::Halves
-        }
+        // One button, meaning the other way of working: rows or columns for mute and
+        // solo, tracks or loops for the levels and pans.
+        (
+            Mode::Perform
+            | Mode::Mute
+            | Mode::Solo
+            | Mode::Volume
+            | Mode::Pan
+            | Mode::LoopPick(_)
+            | Mode::LoopSet(..),
+            Control::Axis,
+        ) => Role::Axis,
         (Mode::Perform | Mode::SavePicker | Mode::ConfirmSave(_), Control::SaveSession) => {
             Role::Open(Mode::SavePicker)
         }

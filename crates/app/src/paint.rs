@@ -453,22 +453,43 @@ pub fn loop_picker(session: &SessionModel, chrome: Chrome) -> LedFrame {
     frame
 }
 
-/// Paints one loop's level or pan across the whole grid, as a full-height slider.
+/// Paints one loop's level across the whole grid, filling up to where it sits.
 ///
-/// Every row shows the same value. Columns past the end of the row are dark.
-pub fn loop_slider(step: usize, steps: usize, colour: LedColor, chrome: Chrome) -> LedFrame {
+/// Every row shows the same value, as the track levels do one row each.
+pub fn loop_level(step: usize, chrome: Chrome) -> LedFrame {
     let mut frame = LedFrame::new();
 
     for addr in SlotAddr::all() {
         let column = addr.slot.index();
-        let led = if column >= steps {
+        let led = match column.cmp(&step) {
+            Ordering::Equal => Led::solid(LEVEL),
+            Ordering::Less => Led::dim(LEVEL),
+            Ordering::Greater => Led::OFF,
+        };
+        frame.set_pad(addr, led);
+    }
+
+    finish(&mut frame, chrome);
+    frame
+}
+
+/// Paints one loop's pan across the whole grid, marking centre and where it sits.
+///
+/// A position, not an amount: centre is marked and the whole row stays offered. Every
+/// row shows the same value.
+pub fn loop_pan(step: usize, chrome: Chrome) -> LedFrame {
+    let mut frame = LedFrame::new();
+
+    for addr in SlotAddr::all() {
+        let column = addr.slot.index();
+        let led = if column >= PAN_STEPS {
             Led::OFF
+        } else if column == step {
+            Led::solid(PAN)
+        } else if column == usize::from(CENTRE_STEP) {
+            Led::dim(PAN_CENTRE)
         } else {
-            match column.cmp(&step) {
-                Ordering::Equal => Led::solid(colour),
-                Ordering::Less => Led::dim(colour),
-                Ordering::Greater => Led::OFF,
-            }
+            Led::dim(PAN)
         };
         frame.set_pad(addr, led);
     }
@@ -608,13 +629,33 @@ fn finish(frame: &mut LedFrame, chrome: Chrome) {
 
 /// Paints the right-hand column.
 fn side_buttons(frame: &mut LedFrame, chrome: Chrome) {
-    let levelled = chrome.gains.iter().any(|step| *step != UNITY_STEP);
+    let levelled = chrome.gains.iter().any(|step| *step != UNITY_STEP)
+        || chrome
+            .loop_gains
+            .iter()
+            .flatten()
+            .any(|step| *step != UNITY_STEP);
     frame.set_side(
         VOLUME_SIDE,
         if levelled {
             Led::solid(LedColor::Amber)
         } else {
             Led::dim(LedColor::Amber)
+        },
+    );
+    // Off centre anywhere, whether a track was moved or one of its loops was.
+    let placed = chrome.pans.iter().any(|step| *step != CENTRE_STEP)
+        || chrome
+            .loop_pans
+            .iter()
+            .flatten()
+            .any(|step| *step != CENTRE_STEP);
+    frame.set_side(
+        PAN_SIDE,
+        if placed {
+            Led::solid(PAN)
+        } else {
+            Led::dim(PAN)
         },
     );
     let picked = chrome
@@ -1397,12 +1438,69 @@ mod tests {
     }
 
     #[test]
+    fn the_pan_button_says_whether_anything_has_been_placed() {
+        let flat = frame(&SessionModel::new(), Chrome::default());
+        assert_eq!(flat.side(PAN_SIDE), Led::dim(PAN), "nothing moved yet");
+
+        let mut moved = Chrome::default();
+        moved.pans[3] = 0;
+        let painted = frame(&SessionModel::new(), moved);
+        assert_eq!(painted.side(PAN_SIDE), Led::solid(PAN), "a track moved");
+
+        // A loop moved on its own lights it too, since that is where it now lives.
+        let mut trimmed = Chrome::default();
+        trimmed.loop_pans[2][5] = 6;
+        let painted = frame(&SessionModel::new(), trimmed);
+        assert_eq!(painted.side(PAN_SIDE), Led::solid(PAN), "a loop moved");
+    }
+
+    #[test]
+    fn the_volume_button_notices_a_loop_trim_as_well_as_a_track_level() {
+        let mut trimmed = Chrome::default();
+        trimmed.loop_gains[1][1] = 0;
+        let painted = frame(&SessionModel::new(), trimmed);
+        assert!(painted.side(VOLUME_SIDE).style == LedStyle::Solid);
+    }
+
+    #[test]
+    fn a_loop_pan_slider_marks_centre_rather_than_filling_from_the_left() {
+        let painted = loop_pan(0, Chrome::default());
+        let at = |column: u8| {
+            painted.pad(SlotAddr::new(
+                TrackId::new(4).unwrap(),
+                SlotId::new(column).unwrap(),
+            ))
+        };
+
+        assert_eq!(at(0), Led::solid(PAN), "hard left is where it sits");
+        assert_eq!(at(CENTRE_STEP), Led::dim(PAN_CENTRE), "centre is marked");
+        assert_eq!(at(5), Led::dim(PAN), "the far side is still offered");
+        let last = u8::try_from(SLOT_COUNT - 1).unwrap();
+        assert!(!at(last).is_lit(), "and the row stops one short");
+    }
+
+    #[test]
+    fn a_loop_level_slider_fills_up_to_where_it_sits() {
+        let painted = loop_level(4, Chrome::default());
+        let at = |column: u8| {
+            painted.pad(SlotAddr::new(
+                TrackId::new(4).unwrap(),
+                SlotId::new(column).unwrap(),
+            ))
+        };
+        assert_eq!(at(4), Led::solid(LEVEL));
+        assert_eq!(at(2), Led::dim(LEVEL), "below it is filled");
+        assert!(!at(6).is_lit(), "above it is not");
+    }
+
+    #[test]
     fn the_unbound_side_buttons_stay_dark() {
         use free_loop_surface::SIDE_COUNT;
 
         let painted = frame(&SessionModel::new(), Chrome::default());
         let bound = [
             VOLUME_SIDE,
+            PAN_SIDE,
             INPUT_SIDE,
             SETTINGS_SIDE,
             PAUSE_SIDE,
