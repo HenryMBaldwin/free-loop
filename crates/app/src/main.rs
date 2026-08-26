@@ -393,7 +393,7 @@ fn run(s: Session<'_>) {
             short_frames,
         } = drain_engine(io, controller, now);
         // After draining, so the replay it asks for has somewhere to go.
-        missed_reports = resync_after_loss(io, missed_reports);
+        missed_reports = resync_after_loss(io, &mut queued, missed_reports);
         clipping.note(clipped, now);
         xruns.note(short_frames, now);
 
@@ -916,7 +916,11 @@ fn drain_engine(io: &mut AudioIo, controller: &mut Controller, now: Duration) ->
 ///
 /// The controller paints from a mirror kept in step by those reports. Kinds a resync
 /// cannot repair are reported and otherwise left.
-fn resync_after_loss(io: &mut AudioIo, seen: DroppedEvents) -> DroppedEvents {
+fn resync_after_loss(
+    io: &AudioIo,
+    queued: &mut Vec<Command>,
+    seen: DroppedEvents,
+) -> DroppedEvents {
     let dropped = io.dropped_events();
     if dropped == seen {
         return seen;
@@ -926,10 +930,9 @@ fn resync_after_loss(io: &mut AudioIo, seen: DroppedEvents) -> DroppedEvents {
     if !needs_resync(&dropped, &seen) {
         return dropped;
     }
-    if io.send(Command::Resync).is_err() {
-        // The queue is full as well, so leave the count alone and try again next pass.
-        return seen;
-    }
+    // Queued rather than sent: a resync answers with the engine's own state, and sending
+    // one in front of a load would answer with the session the load is replacing.
+    queued.push(Command::Resync);
     dropped
 }
 
@@ -1369,6 +1372,28 @@ mod tests {
             settings_to_publish(&mut controller, &[], false).is_none(),
             "and only offered once"
         );
+    }
+
+    #[test]
+    fn a_resync_waits_behind_a_load_like_anything_else() {
+        // A resync answers with the engine's own state, so one taken before a load commits
+        // would answer with the session being replaced.
+        let mut queued: Vec<Command> = Vec::new();
+        queued.push(Command::Resync);
+
+        let mut taken = Vec::new();
+        send_commands(&mut queued, true, |command| {
+            taken.push(command);
+            true
+        });
+        assert!(taken.is_empty(), "answered from in front of the load");
+        assert_eq!(queued, vec![Command::Resync], "and still waiting");
+
+        send_commands(&mut queued, false, |command| {
+            taken.push(command);
+            true
+        });
+        assert_eq!(taken, vec![Command::Resync]);
     }
 
     #[test]

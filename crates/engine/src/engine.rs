@@ -959,6 +959,11 @@ impl Engine {
         self.position = self.grid.rebase_onto(self.position, grid);
         self.set_grid(grid);
         self.resync_clock();
+        // Both halves of the musical time, so a report lost or answered late cannot leave
+        // a reader on the session this one replaced.
+        sink.event(Event::Tempo {
+            bpm: grid.tempo().bpm(),
+        });
         self.report_time_signature(sink);
     }
 
