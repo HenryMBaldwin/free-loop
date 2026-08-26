@@ -1304,6 +1304,30 @@ mod tests {
         }
     }
 
+    /// A directory that removes itself, so a failed test leaves nothing behind.
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "free-loop-{}-{}-{name}",
+                std::process::id(),
+                std::time::SystemTime::UNIX_EPOCH
+                    .elapsed()
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// Everything a pass needs, held together so a test can drive one.
     struct Harness {
         io: FakeAudio,
@@ -1315,6 +1339,7 @@ mod tests {
         running: AtomicBool,
         state: Looping,
         at: Duration,
+        _dir: TempDir,
     }
 
     impl Harness {
@@ -1324,18 +1349,18 @@ mod tests {
             let mut engine = free_loop_engine::EngineConfig::stereo_48k().unwrap();
             engine.segment_pool = 16;
             let (engine, housekeeping) = Engine::new(engine).unwrap();
-            let dir = std::env::temp_dir().join(format!("free-loop-{named}"));
-            let _ = std::fs::remove_dir_all(&dir);
+            let dir = TempDir::new(named);
             Self {
                 io: FakeAudio::new(engine),
                 surface: free_loop_surface::MockSurface::new(),
                 controller: Controller::new(120.0, TimeSignature::FOUR_FOUR, true),
                 housekeeping,
-                store: SessionStore::new(dir),
+                store: SessionStore::new(dir.0.clone()),
                 config,
                 running: AtomicBool::new(true),
                 state: Looping::new(false),
                 at: Duration::ZERO,
+                _dir: dir,
             }
         }
 
