@@ -272,9 +272,52 @@ fn play(
     Ok(())
 }
 
+/// What the control loop needs from the audio side.
+///
+/// The loop is written against this rather than against a device, so a pass can be driven
+/// without one.
+trait Audio {
+    /// Queues a command for the engine. `Err` if the ring is full.
+    fn send(&mut self, command: Command) -> Result<(), Command>;
+
+    /// Hands every report the engine has made to `handler`.
+    fn drain_events(&mut self, handler: impl FnMut(Event));
+
+    /// How many reports of each kind the engine had to throw away.
+    fn dropped_events(&self) -> DroppedEvents;
+
+    /// Lets the device be looked for, reporting when one comes or goes.
+    fn tick(&mut self, now: Duration) -> Option<DeviceChange>;
+
+    /// The round trip the engine is compensating for, or zero before it is known.
+    fn capture_offset_frames(&self) -> u32;
+}
+
+impl Audio for AudioIo {
+    fn send(&mut self, command: Command) -> Result<(), Command> {
+        AudioIo::send(self, command)
+    }
+
+    fn drain_events(&mut self, handler: impl FnMut(Event)) {
+        AudioIo::drain_events(self, handler);
+    }
+
+    fn dropped_events(&self) -> DroppedEvents {
+        AudioIo::dropped_events(self)
+    }
+
+    fn tick(&mut self, now: Duration) -> Option<DeviceChange> {
+        AudioIo::tick(self, now)
+    }
+
+    fn capture_offset_frames(&self) -> u32 {
+        AudioIo::capture_offset_frames(self)
+    }
+}
+
 /// Everything the control loop touches.
-struct Session<'a> {
-    io: &'a mut AudioIo,
+struct Session<'a, A: Audio> {
+    io: &'a mut A,
     surface: &'a mut dyn ControlSurface,
     controller: &'a mut Controller,
     housekeeping: &'a mut Housekeeping,
@@ -286,48 +329,76 @@ struct Session<'a> {
     showing: Option<Arc<Mutex<Mode>>>,
 }
 
+/// What one pass of the control loop leaves for the next.
+struct Looping {
+    /// Everything the performer has asked for that the engine has not taken, in order.
+    queued: Vec<Work>,
+    /// Whether a load is still sitting in the loader's channel.
+    loading: bool,
+    /// A save waiting on the answer to one request.
+    pending_save: Option<PendingSave>,
+    /// Clips the engine has published towards the save that is waiting.
+    snapshots: Vec<Snapshot>,
+    /// Tags one snapshot request apart from another.
+    next_request: u32,
+    clipping: ClipReport,
+    xruns: XrunReport,
+    /// Reports that never arrived, against the engine's running count.
+    missed_reports: DroppedEvents,
+    /// Clock ticks the surface has had, against the total the engine reports.
+    clock_sent: u64,
+    /// Whether the round trip has been reported, which is only known once it runs.
+    reported_latency: bool,
+    /// Whether a surface was attached last pass.
+    connected: bool,
+    /// The screen last published to a window.
+    published: Option<Mode>,
+}
+
+impl Looping {
+    fn new(connected: bool) -> Self {
+        Self {
+            queued: Vec::new(),
+            loading: false,
+            pending_save: None,
+            snapshots: Vec::new(),
+            next_request: 0,
+            clipping: ClipReport::default(),
+            xruns: XrunReport::default(),
+            missed_reports: DroppedEvents::default(),
+            clock_sent: 0,
+            reported_latency: false,
+            connected,
+            published: None,
+        }
+    }
+}
+
 /// Polls the surface, drives the engine and repaints until asked to stop.
-fn run(s: Session<'_>) {
-    let Session {
-        io,
-        surface,
-        controller,
-        housekeeping,
-        store,
-        config,
-        negotiated,
-        running,
-        showing,
-    } = s;
-
-    let mut events: Vec<SurfaceEvent> = Vec::new();
-    let mut snapshots: Vec<Snapshot> = Vec::new();
-    // A save waits on the answer to one request; anything tagged otherwise is stale.
-    let mut pending_save: Option<PendingSave> = None;
-    let mut next_request = 0_u32;
-    let mut clipping = ClipReport::default();
-    let mut xruns = XrunReport::default();
+fn run<A: Audio>(mut s: Session<'_, A>) {
+    let mut state = Looping::new(s.surface.is_connected());
     let started = Instant::now();
-    // Only known once the driver has run a callback and said how much it buffers.
-    let mut reported_latency = false;
-    let mut connected = surface.is_connected();
-    // Reports that never arrived leave the grid showing what a pad used to be doing.
-    let mut missed_reports = DroppedEvents::default();
-    // Clock ticks the device has had, against the running total the engine reports.
-    let mut clock_sent = 0_u64;
-    // Everything the performer has asked for that the engine has not taken, in order.
-    let mut queued: Vec<Work> = Vec::new();
-    // The screen last published, so the window is only told when it changes.
-    let mut published = None;
-    // Whether a load is still sitting in the loader's channel. The audio side takes
-    // settings and commands before it applies one, so anything sent while a load is in
-    // flight would reach the engine in front of it.
-    let mut loading = false;
 
-    while running.load(Ordering::Relaxed) {
-        let now = started.elapsed();
+    while s.running.load(Ordering::Relaxed) {
+        s.pass(&mut state, started.elapsed());
+        std::thread::sleep(TICK);
+    }
+}
 
-        connected = watch_surface(surface, now, connected);
+impl<A: Audio> Session<'_, A> {
+    /// One turn of the control loop: poll, hand over, drain, repaint.
+    ///
+    /// Split out from [`run`] so a pass can be driven with a clock of the caller's
+    /// choosing, and without a device.
+    fn pass(&mut self, state: &mut Looping, now: Duration) {
+        let io = &mut *self.io;
+        let surface = &mut *self.surface;
+        let controller = &mut *self.controller;
+        let housekeeping = &mut *self.housekeeping;
+        let (store, config, negotiated) = (self.store, self.config, self.negotiated);
+        let mut events: Vec<SurfaceEvent> = Vec::new();
+
+        state.connected = watch_surface(surface, now, state.connected);
         watch_devices(io, now, controller, config.audio.pause_on_disconnect);
 
         events.clear();
@@ -337,7 +408,8 @@ fn run(s: Session<'_>) {
             controller.on_surface(event, now);
         }
         controller.tick(now);
-        published = publish_screen(showing.as_deref(), controller.mode(), published);
+        state.published =
+            publish_screen(self.showing.as_deref(), controller.mode(), state.published);
         // Returns clips the engine finished with while something else was reading them.
         housekeeping.recycler.run();
 
@@ -346,21 +418,27 @@ fn run(s: Session<'_>) {
 
         // Cleared once the engine has taken every step of the load, which it commits in
         // the same callback that empties the channel.
-        loading &= !housekeeping.loader.ready();
+        state.loading &= !housekeeping.loader.ready();
 
-        queued.extend(controller.drain_work());
+        state.queued.extend(controller.drain_work());
 
         // Handed over in order, stopping at whatever cannot go yet. A request surfaces
         // only once everything asked for before it has reached the engine.
-        while let Some(request) =
-            hand_over(&mut queued, loading, |command| io.send(command).is_ok())
-        {
+        while let Some(request) = hand_over(&mut state.queued, state.loading, |command| {
+            io.send(command).is_ok()
+        }) {
             match request {
                 Request::SaveSession(addr) => {
-                    next_request = next_request.wrapping_add(1);
-                    snapshots.clear();
-                    let save = ask_for_snapshot(&mut queued, next_request, addr, controller, now);
-                    pending_save = Some(save);
+                    state.next_request = state.next_request.wrapping_add(1);
+                    state.snapshots.clear();
+                    let save = ask_for_snapshot(
+                        &mut state.queued,
+                        state.next_request,
+                        addr,
+                        controller,
+                        now,
+                    );
+                    state.pending_save = Some(save);
                 }
                 Request::LoadSession(addr) => {
                     load_session(
@@ -374,13 +452,13 @@ fn run(s: Session<'_>) {
                     );
                     // Nothing more goes out until the engine has taken it. A load that
                     // never reached the channel clears this on the next pass.
-                    loading = true;
+                    state.loading = true;
                 }
             }
             // Whatever acting on it asked for belongs where the request stood, in front of
             // anything the performer asked for after it.
             let produced: Vec<Work> = controller.drain_work().collect();
-            queued.splice(0..0, produced);
+            state.queued.splice(0..0, produced);
         }
 
         let Drained {
@@ -390,34 +468,32 @@ fn run(s: Session<'_>) {
             short_frames,
         } = drain_engine(io, controller, now);
         // After draining, so the replay it asks for has somewhere to go.
-        missed_reports = resync_after_loss(io, &mut queued, missed_reports);
-        clipping.note(clipped, now);
-        xruns.note(short_frames, now);
+        state.missed_reports = resync_after_loss(io, &mut state.queued, state.missed_reports);
+        state.clipping.note(clipped, now);
+        state.xruns.note(short_frames, now);
 
-        clock_sent = forward_clock(surface, clock_total, clock_sent);
+        state.clock_sent = forward_clock(surface, clock_total, state.clock_sent);
         collect_snapshots(
             &mut housekeeping.snapshots,
-            pending_save.as_ref(),
-            &mut snapshots,
+            state.pending_save.as_ref(),
+            &mut state.snapshots,
         );
-        let outcome = resolve_save(&mut pending_save, answered, now);
+        let outcome = resolve_save(&mut state.pending_save, answered, now);
         if carry_out_save(
             outcome,
             store,
             config,
             &negotiated,
-            &snapshots,
+            &state.snapshots,
             controller,
             now,
         ) {
-            snapshots.clear();
+            state.snapshots.clear();
         }
 
         repaint(surface, controller);
 
-        reported_latency |= report_latency(io, &negotiated, reported_latency);
-
-        std::thread::sleep(TICK);
+        state.reported_latency |= report_latency(io, &negotiated, state.reported_latency);
     }
 }
 
@@ -479,7 +555,7 @@ impl ClipReport {
 /// Prints the measured round trip once the driver has reported it.
 ///
 /// Returns whether it has now been printed.
-fn report_latency(io: &AudioIo, negotiated: &Negotiated, already: bool) -> bool {
+fn report_latency<A: Audio>(io: &A, negotiated: &Negotiated, already: bool) -> bool {
     if already {
         return true;
     }
@@ -884,7 +960,7 @@ struct Drained {
 }
 
 /// Takes everything the engine has reported, printing and mirroring as it goes.
-fn drain_engine(io: &mut AudioIo, controller: &mut Controller, now: Duration) -> Drained {
+fn drain_engine<A: Audio>(io: &mut A, controller: &mut Controller, now: Duration) -> Drained {
     let mut drained = Drained {
         answered: None,
         clock_total: None,
@@ -913,7 +989,11 @@ fn drain_engine(io: &mut AudioIo, controller: &mut Controller, now: Duration) ->
 ///
 /// The controller paints from a mirror kept in step by those reports. Kinds a resync
 /// cannot repair are reported and otherwise left.
-fn resync_after_loss(io: &AudioIo, queued: &mut Vec<Work>, seen: DroppedEvents) -> DroppedEvents {
+fn resync_after_loss<A: Audio>(
+    io: &A,
+    queued: &mut Vec<Work>,
+    seen: DroppedEvents,
+) -> DroppedEvents {
     let dropped = io.dropped_events();
     if dropped == seen {
         return seen;
@@ -1017,8 +1097,8 @@ fn lost_report(dropped: &DroppedEvents, seen: &DroppedEvents) -> String {
 }
 
 /// Lets the audio devices come back after being unplugged, reporting what changed.
-fn watch_devices(
-    io: &mut AudioIo,
+fn watch_devices<A: Audio>(
+    io: &mut A,
     now: Duration,
     controller: &mut Controller,
     pause_on_disconnect: bool,
