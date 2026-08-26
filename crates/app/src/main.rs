@@ -1227,26 +1227,50 @@ mod tests {
 
     const DEADLINE: Duration = Duration::from_secs(2);
 
-    /// An engine that never runs, so a pass can be driven without a device.
-    #[derive(Default)]
+    /// The audio side, with the engine the loop is really talking to.
+    ///
+    /// Commands wait in a ring the way they do on the device, and only reach the engine
+    /// when [`FakeAudio::callback`] runs, which drains them before it processes a block.
+    /// That is the order the audio thread uses, and it is what a load has to survive.
     struct FakeAudio {
+        engine: Engine,
+        /// Waiting for the next callback, as they would in the ring.
+        ring: std::collections::VecDeque<Command>,
         /// Commands it took, in the order it took them.
         taken: Vec<Command>,
         /// How many more it will take before the ring is full.
         room: usize,
-        /// Reports to hand over on the next drain.
+        /// Reports the engine has made and the loop has not drained.
         reports: Vec<Event>,
         dropped: DroppedEvents,
         offset: u32,
     }
 
     impl FakeAudio {
-        /// One with room for everything it is given.
-        fn new() -> Self {
+        fn new(engine: Engine) -> Self {
             Self {
+                engine,
+                ring: std::collections::VecDeque::new(),
+                taken: Vec::new(),
                 room: usize::MAX,
-                ..Self::default()
+                reports: Vec::new(),
+                dropped: DroppedEvents::default(),
+                offset: 0,
             }
+        }
+
+        /// One block of audio: the commands first, then the engine, which is where a load
+        /// is applied.
+        fn callback(&mut self) {
+            let mut sink: Vec<Event> = Vec::new();
+            while let Some(command) = self.ring.pop_front() {
+                self.engine.handle(command, &mut sink);
+                self.room = self.room.saturating_add(1);
+            }
+            let input = [0.0_f32; 128 * 2];
+            let mut output = [0.0_f32; 128 * 2];
+            self.engine.process(&input, &mut output, &mut sink);
+            self.reports.extend(sink);
         }
     }
 
@@ -1257,6 +1281,7 @@ mod tests {
             }
             self.room -= 1;
             self.taken.push(command);
+            self.ring.push_back(command);
             Ok(())
         }
 
@@ -1293,16 +1318,20 @@ mod tests {
     }
 
     impl Harness {
-        fn new(io: FakeAudio) -> Self {
+        /// A harness with its own session directory, named for the test using it.
+        fn new(named: &str) -> Self {
             let config = Config::parse("").unwrap();
-            let engine = free_loop_engine::EngineConfig::stereo_48k().unwrap();
-            let (_engine, housekeeping) = Engine::new(engine).unwrap();
+            let mut engine = free_loop_engine::EngineConfig::stereo_48k().unwrap();
+            engine.segment_pool = 16;
+            let (engine, housekeeping) = Engine::new(engine).unwrap();
+            let dir = std::env::temp_dir().join(format!("free-loop-{named}"));
+            let _ = std::fs::remove_dir_all(&dir);
             Self {
-                io,
+                io: FakeAudio::new(engine),
                 surface: free_loop_surface::MockSurface::new(),
                 controller: Controller::new(120.0, TimeSignature::FOUR_FOUR, true),
                 housekeeping,
-                store: SessionStore::new(std::env::temp_dir().join("free-loop-harness")),
+                store: SessionStore::new(dir),
                 config,
                 running: AtomicBool::new(true),
                 state: Looping::new(false),
@@ -1322,6 +1351,39 @@ mod tests {
                 cushion_frames: 0,
                 capture_offset: None,
             }
+        }
+
+        /// Writes a one-bar session to `addr` and tells the controller it is there.
+        fn put_session(&mut self, addr: free_loop_core::SlotAddr) {
+            let frames = free_loop_core::Frames(4_800);
+            let mut pool = free_loop_clip::SegmentPool::new(4, 2);
+            let mut buffer = free_loop_clip::AudioBuffer::new(4, 2);
+            let audio = vec![0.25_f32; 4_800 * 2];
+            buffer.write(0, &audio, &mut pool);
+            let clip = free_loop_clip::Clip::new(buffer, frames, free_loop_core::Frames::ZERO, 2);
+
+            self.store
+                .save(
+                    addr,
+                    &SessionData {
+                        tempo: 120.0,
+                        beats_per_bar: 4,
+                        beat_unit: 4,
+                        sample_rate: 48_000,
+                        channels: 2,
+                        clips: vec![SavedClip {
+                            addr: pad(0, 0),
+                            playing: true,
+                            gain_step: free_loop_core::UNITY_STEP,
+                            launch_anchor: None,
+                            clip: &clip,
+                        }],
+                        tracks: [TrackSettings::default(); free_loop_core::TRACK_COUNT],
+                    },
+                    self.config.load_budget(),
+                )
+                .unwrap();
+            self.controller.set_sessions(self.store.index());
         }
 
         /// What the performer did, before the next pass picks it up.
@@ -1405,7 +1467,7 @@ mod tests {
 
     #[test]
     fn a_gesture_reaches_the_engine_as_a_command() {
-        let mut harness = Harness::new(FakeAudio::new());
+        let mut harness = Harness::new("gesture");
         let pad = pad(2, 3);
 
         harness.press(SurfaceEvent::PadPressed {
@@ -1420,7 +1482,7 @@ mod tests {
 
     #[test]
     fn a_full_engine_takes_the_rest_on_a_later_pass_in_order() {
-        let mut harness = Harness::new(FakeAudio::new());
+        let mut harness = Harness::new("backpressure");
         let pad = pad(0, 0);
         // The settings the controller starts on go out first, and would take the room.
         harness.pass();
@@ -1453,7 +1515,7 @@ mod tests {
 
     #[test]
     fn a_setting_reaches_the_engine_between_the_gestures_it_sits_between() {
-        let mut harness = Harness::new(FakeAudio::new());
+        let mut harness = Harness::new("interleave");
         let loop_pad = pad(0, 0);
         let level = pad(1, 5);
         let volume = u8::try_from(free_loop::paint::VOLUME_SIDE).unwrap();
@@ -1494,8 +1556,132 @@ mod tests {
     }
 
     #[test]
+    fn a_load_reaches_the_engine_before_the_gesture_made_after_it() {
+        let mut harness = Harness::new("load-barrier");
+        let session = pad(3, 3);
+        harness.put_session(session);
+        harness.pass();
+        harness.io.callback();
+        harness.io.taken.clear();
+
+        // One poll: the load is chosen, then the transport is pressed.
+        harness.press(SurfaceEvent::ControlPressed(
+            free_loop_surface::Control::LoadSession,
+        ));
+        harness.press(SurfaceEvent::PadPressed {
+            addr: session,
+            velocity: 100,
+        });
+        harness.press(SurfaceEvent::PadReleased { addr: session });
+        harness.press(SurfaceEvent::SidePressed {
+            index: u8::try_from(free_loop::paint::PAUSE_SIDE).unwrap(),
+        });
+        harness.pass();
+
+        assert!(harness.state.loading, "the load is in its own channel");
+        assert!(
+            harness.taken().is_empty(),
+            "the transport went in front of a load the engine has not applied"
+        );
+
+        // The callback applies the load, which is what frees the channel.
+        harness.io.callback();
+        harness.pass();
+        assert!(!harness.state.loading, "the engine has taken it");
+        assert_eq!(
+            harness.taken(),
+            vec![Command::SetPaused(true)],
+            "and the transport follows it"
+        );
+    }
+
+    #[test]
+    fn a_loaded_session_puts_its_clip_on_the_grid() {
+        let mut harness = Harness::new("load-lands");
+        let session = pad(1, 1);
+        harness.put_session(session);
+        harness.pass();
+        harness.io.callback();
+
+        harness.press(SurfaceEvent::ControlPressed(
+            free_loop_surface::Control::LoadSession,
+        ));
+        harness.press(SurfaceEvent::PadPressed {
+            addr: session,
+            velocity: 100,
+        });
+        harness.press(SurfaceEvent::PadReleased { addr: session });
+        harness.pass();
+        harness.io.callback();
+
+        // The engine says what it now holds, and the controller paints from that.
+        harness.pass();
+        assert!(
+            matches!(
+                harness.controller.session().state(pad(0, 0)),
+                free_loop_core::SlotState::Playing { .. }
+            ),
+            "the clip the session held is on its pad"
+        );
+        assert_eq!(harness.controller.current_session(), Some(session));
+    }
+
+    #[test]
+    fn a_save_asks_the_engine_for_its_clips_and_writes_what_comes_back() {
+        let mut harness = Harness::new("save-round-trip");
+        let source = pad(2, 2);
+        let target = pad(4, 4);
+        harness.put_session(source);
+        harness.pass();
+        harness.io.callback();
+
+        // Load one, so there is something on the grid worth saving.
+        harness.press(SurfaceEvent::ControlPressed(
+            free_loop_surface::Control::LoadSession,
+        ));
+        harness.press(SurfaceEvent::PadPressed {
+            addr: source,
+            velocity: 100,
+        });
+        harness.press(SurfaceEvent::PadReleased { addr: source });
+        harness.pass();
+        harness.io.callback();
+        harness.pass();
+
+        // Save it somewhere else. An empty pad asks for no confirmation.
+        harness.press(SurfaceEvent::ControlPressed(
+            free_loop_surface::Control::SaveSession,
+        ));
+        harness.press(SurfaceEvent::PadPressed {
+            addr: target,
+            velocity: 100,
+        });
+        harness.press(SurfaceEvent::PadReleased { addr: target });
+        harness.pass();
+        assert!(
+            harness
+                .taken()
+                .iter()
+                .any(|command| matches!(command, Command::Snapshot { .. })),
+            "the engine was asked for its clips"
+        );
+
+        // The engine publishes them, and the next passes write them out.
+        harness.io.callback();
+        for _ in 0..4 {
+            harness.pass();
+        }
+
+        assert!(
+            harness.store.index().contains(&target),
+            "the session was written to the pad that was chosen"
+        );
+        assert_eq!(harness.controller.current_session(), Some(target));
+    }
+
+    #[test]
     fn a_report_from_the_engine_reaches_the_controller() {
-        let mut harness = Harness::new(FakeAudio::new());
+        let mut harness = Harness::new("report");
         harness.io.reports.push(Event::Tempo { bpm: 90.0 });
 
         harness.pass();

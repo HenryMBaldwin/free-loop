@@ -1276,6 +1276,7 @@ dependencies = [
  "ctrlc",
  "eframe",
  "free-loop-audio",
+ "free-loop-clip",
  "free-loop-core",
  "free-loop-engine",
  "free-loop-session",
