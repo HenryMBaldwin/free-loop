@@ -851,8 +851,7 @@ fn save(
         .iter()
         .map(|snapshot| SavedClip {
             addr: snapshot.addr,
-            gain_step: settings.tracks[snapshot.addr.track.index()].gain_step,
-            trim: settings.loop_gains[snapshot.addr.track.index()][snapshot.addr.slot.index()],
+            gain_step: settings.loop_gains[snapshot.addr.track.index()][snapshot.addr.slot.index()],
             pan: settings.loop_pans[snapshot.addr.track.index()][snapshot.addr.slot.index()],
             playing: matches!(
                 snapshot.state,
@@ -1463,7 +1462,6 @@ mod tests {
                             addr: pad(0, 0),
                             playing: true,
                             gain_step: free_loop_core::UNITY_STEP,
-                            trim: free_loop_core::UNITY_STEP,
                             pan: free_loop_core::CENTRE_STEP,
                             launch_anchor: None,
                             clip: &clip,
