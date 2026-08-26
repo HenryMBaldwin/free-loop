@@ -1680,6 +1680,141 @@ mod tests {
     }
 
     #[test]
+    fn what_a_load_sets_reaches_the_engine_before_a_gesture_made_after_it() {
+        let mut harness = Harness::new("load-settings-order");
+        let session = pad(3, 1);
+        harness.put_session(session);
+        harness.pass();
+        harness.io.callback();
+        harness.io.taken.clear();
+
+        // One poll: the load is chosen, then a pad is pressed.
+        harness.press(SurfaceEvent::ControlPressed(
+            free_loop_surface::Control::LoadSession,
+        ));
+        harness.press(SurfaceEvent::PadPressed {
+            addr: session,
+            velocity: 100,
+        });
+        harness.press(SurfaceEvent::PadReleased { addr: session });
+        // The transport, which is the one gesture that acts from the picker as well.
+        harness.press(SurfaceEvent::SidePressed {
+            index: u8::try_from(free_loop::paint::PAUSE_SIDE).unwrap(),
+        });
+        harness.pass();
+        harness.io.callback();
+        harness.pass();
+
+        // The settings the session came with go in front of the gesture that followed it.
+        let order: Vec<&str> = harness
+            .io
+            .taken
+            .iter()
+            .filter_map(|command| match command {
+                Command::SetSettings(_) => Some("settings"),
+                Command::SetPaused(_) => Some("paused"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            order,
+            vec!["settings", "paused"],
+            "the later gesture was applied before the session's own settings"
+        );
+    }
+
+    #[test]
+    fn a_replay_asked_for_during_a_load_waits_for_it() {
+        let mut harness = Harness::new("resync-behind-load");
+        let session = pad(2, 6);
+        harness.put_session(session);
+        harness.pass();
+        harness.io.callback();
+        harness.io.taken.clear();
+
+        harness.press(SurfaceEvent::ControlPressed(
+            free_loop_surface::Control::LoadSession,
+        ));
+        harness.press(SurfaceEvent::PadPressed {
+            addr: session,
+            velocity: 100,
+        });
+        harness.press(SurfaceEvent::PadReleased { addr: session });
+        harness.pass();
+        assert!(harness.state.loading);
+
+        // A report went missing, which asks the engine to say everything again.
+        harness.io.dropped = dropped(&[(free_loop_core::EventKind::SlotChanged, 1)]);
+        harness.pass();
+        assert!(
+            !harness.taken().contains(&Command::Resync),
+            "the replay was answered from in front of the load"
+        );
+
+        harness.io.callback();
+        harness.pass();
+        assert!(
+            harness.taken().contains(&Command::Resync),
+            "and follows once the engine has taken the load"
+        );
+    }
+
+    #[test]
+    fn a_save_the_engine_never_answers_gives_up_rather_than_waiting() {
+        let mut harness = Harness::new("save-timeout");
+        let source = pad(2, 2);
+        let target = pad(4, 4);
+        harness.put_session(source);
+        harness.pass();
+        harness.io.callback();
+
+        harness.press(SurfaceEvent::ControlPressed(
+            free_loop_surface::Control::LoadSession,
+        ));
+        harness.press(SurfaceEvent::PadPressed {
+            addr: source,
+            velocity: 100,
+        });
+        harness.press(SurfaceEvent::PadReleased { addr: source });
+        harness.pass();
+        harness.io.callback();
+        harness.pass();
+
+        harness.press(SurfaceEvent::ControlPressed(
+            free_loop_surface::Control::SaveSession,
+        ));
+        harness.press(SurfaceEvent::PadPressed {
+            addr: target,
+            velocity: 100,
+        });
+        harness.press(SurfaceEvent::PadReleased { addr: target });
+        harness.pass();
+        assert!(harness.state.pending_save.is_some(), "the save is waiting");
+
+        // No callback: the engine takes the snapshot request and never publishes.
+        harness.pass();
+        assert!(
+            harness.state.pending_save.is_some(),
+            "still inside its wait"
+        );
+
+        harness.at += SAVE_TIMEOUT;
+        harness.pass();
+        assert!(harness.state.pending_save.is_none(), "the wait ended");
+        assert!(
+            !harness.store.index().contains(&target),
+            "and wrote nothing"
+        );
+
+        let frame = harness.surface.frames().last().unwrap();
+        assert!(
+            free_loop_core::SlotAddr::all()
+                .all(|addr| frame.pad(addr).color == free_loop_surface::LedColor::Red),
+            "the grid says so"
+        );
+    }
+
+    #[test]
     fn a_report_from_the_engine_reaches_the_controller() {
         let mut harness = Harness::new("report");
         harness.io.reports.push(Event::Tempo { bpm: 90.0 });
