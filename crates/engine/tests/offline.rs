@@ -36,6 +36,8 @@ struct Harness {
     housekeeping: Housekeeping,
     events: Vec<Event>,
     block: usize,
+    /// Width of the output buffer, which the device decides.
+    channels: usize,
     /// What the engine has been told.
     settings: Settings,
 }
@@ -61,6 +63,7 @@ impl Harness {
             housekeeping,
             events: Vec::new(),
             block,
+            channels: CHANNELS,
             settings: Settings::new(),
         }
     }
@@ -75,6 +78,26 @@ impl Harness {
                 level: 0.0,
             };
             config.declick = declick;
+            let (engine, housekeeping) = Engine::new(config).unwrap();
+            harness.housekeeping = housekeeping;
+            engine
+        };
+        harness
+    }
+
+    /// An engine whose output is wider than a stereo pair, as a multi-out device gives.
+    fn with_channels(block: usize, channels: usize) -> Self {
+        let mut harness = Self::new(block);
+        harness.channels = channels;
+        harness.engine = {
+            let mut config = EngineConfig::stereo_48k().unwrap();
+            config.segment_pool = 12;
+            config.channels = channels;
+            config.click = ClickConfig {
+                enabled: false,
+                level: 0.0,
+            };
+            config.declick = Frames::ZERO;
             let (engine, housekeeping) = Engine::new(config).unwrap();
             harness.housekeeping = housekeeping;
             engine
@@ -113,7 +136,7 @@ impl Harness {
             let input: Vec<f32> = (0..frames * CHANNELS)
                 .map(|i| signal(start + (i / CHANNELS) as u64, i % CHANNELS))
                 .collect();
-            let mut block = vec![0.0; frames * CHANNELS];
+            let mut block = vec![0.0; frames * self.channels];
 
             self.engine.process(&input, &mut block, &mut self.events);
             out.extend_from_slice(&block);
@@ -127,7 +150,7 @@ impl Harness {
         let input: Vec<f32> = (0..frames * CHANNELS)
             .map(|i| signal(start + (i / CHANNELS) as u64, i % CHANNELS))
             .collect();
-        let mut out = vec![0.0; frames * CHANNELS];
+        let mut out = vec![0.0; frames * self.channels];
         self.engine.process(&input, &mut out, &mut self.events);
         out
     }
@@ -3120,4 +3143,24 @@ fn a_track_starts_centred() {
         harness.settings.pans,
         [CENTRE_STEP; free_loop_core::TRACK_COUNT]
     );
+}
+
+#[test]
+fn a_pan_reaches_a_wider_output_than_a_stereo_pair() {
+    const WIDE: usize = 4;
+    let mut harness = Harness::with_channels(128, WIDE);
+    record(&mut harness, addr(0, 0), 0, 1);
+
+    harness.setting(|settings| settings.pans[0] = 6);
+    let out = harness.run_frames(4_096);
+
+    let peak = |channel: usize| {
+        out.chunks_exact(WIDE)
+            .map(|frame| frame[channel].abs())
+            .fold(0.0_f32, f32::max)
+    };
+    assert!(peak(0) < 1e-4, "the first pair moved over, got {}", peak(0));
+    assert!(peak(1) > 0.0);
+    assert!(peak(2) < 1e-4, "and the second, got {}", peak(2));
+    assert!(peak(3) > 0.0);
 }
