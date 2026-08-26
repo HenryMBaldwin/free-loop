@@ -17,9 +17,13 @@ path = "src/lib.rs"
 name = "free-loop"
 path = "src/main.rs"
 
+[features]
+default = []
+gui = ["dep:eframe"]
+
 [dependencies]
 ctrlc.workspace = true
-eframe.workspace = true
+eframe = { workspace = true, optional = true }
 free-loop-audio.workspace = true
 free-loop-core.workspace = true
 free-loop-engine.workspace = true

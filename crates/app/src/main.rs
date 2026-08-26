@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use free_loop::config::{self, Config};
 use free_loop::control::{Controller, Mode, Request, TextUpdate, Work};
+#[cfg(feature = "gui")]
 use free_loop::gui;
 use free_loop_audio::{AudioIo, DeviceChange, DroppedEvents, Negotiated, open};
 use free_loop_core::{Command, Event, TimeSignature, TrackInput};
@@ -140,13 +141,24 @@ fn main() -> Result<(), Box<dyn Error>> {
         return play(&path, &config, None, &running, None);
     };
 
+    with_window(console, path, config, &running, showing)
+}
+
+/// Runs the looper beside an on-screen surface, which holds this thread until it closes.
+#[cfg(feature = "gui")]
+fn with_window(
+    console: Console,
+    path: PathBuf,
+    config: Config,
+    running: &Arc<AtomicBool>,
+    showing: Arc<Mutex<Mode>>,
+) -> Result<(), Box<dyn Error>> {
     // The window has to hold the main thread, so the looper takes one of its own. Its
     // ports go up first, or the surface would spend a retry looking for them.
     let emulator = gui::open()?;
     let stopped = Arc::new(AtomicBool::new(false));
     let worker = std::thread::spawn({
-        let (path, config) = (path.clone(), config.clone());
-        let (running, stopped) = (Arc::clone(&running), Arc::clone(&stopped));
+        let (running, stopped) = (Arc::clone(running), Arc::clone(&stopped));
         let showing = Arc::clone(&showing);
         move || {
             // On drop rather than after the call, so a panic still closes the window.
@@ -170,7 +182,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     });
 
-    let shown = gui::run(emulator, console, Arc::clone(&running), stopped, showing);
+    let shown = gui::run(emulator, console, Arc::clone(running), stopped, showing);
     running.store(false, Ordering::Relaxed);
     // The looper's own failure is why the window closed, so it is the one to report.
     match worker.join() {
@@ -181,12 +193,31 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Runs the looper against a real device, and says why no window opened.
+#[cfg(not(feature = "gui"))]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "the signature matches the windowed build"
+)]
+fn with_window(
+    _console: Console,
+    path: PathBuf,
+    config: Config,
+    running: &Arc<AtomicBool>,
+    _showing: Arc<Mutex<Mode>>,
+) -> Result<(), Box<dyn Error>> {
+    tracing::warn!("no window in this build; rebuild with --features gui for one");
+    play(&path, &config, None, running, None)
+}
+
 /// Tells the window the looper has finished, however its thread ended.
+#[cfg(feature = "gui")]
 struct Stopping {
     running: Arc<AtomicBool>,
     stopped: Arc<AtomicBool>,
 }
 
+#[cfg(feature = "gui")]
 impl Drop for Stopping {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Relaxed);

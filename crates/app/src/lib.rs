@@ -11,6 +11,7 @@
 
 pub mod config;
 pub mod control;
+#[cfg(feature = "gui")]
 pub mod gui;
 pub mod labels;
 pub mod paint;
