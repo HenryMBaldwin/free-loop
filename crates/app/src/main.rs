@@ -352,35 +352,35 @@ fn run(s: Session<'_>) {
 
         // Handed over in order, stopping at whatever cannot go yet. A request surfaces
         // only once everything asked for before it has reached the engine.
-        while let Some(step) = hand_over(&mut queued, loading, |command| io.send(command).is_ok()) {
-            let request = match step {
-                // Never refused, and read before the commands, which is why its place in
-                // the sequence has to be kept.
-                Step::Settings(settings) => {
-                    io.publish_settings(settings);
-                    continue;
-                }
-                Step::Request(Request::SaveSession(addr)) => {
+        while let Some(request) =
+            hand_over(&mut queued, loading, |command| io.send(command).is_ok())
+        {
+            match request {
+                Request::SaveSession(addr) => {
                     next_request = next_request.wrapping_add(1);
                     snapshots.clear();
                     let save = ask_for_snapshot(&mut queued, next_request, addr, controller, now);
                     pending_save = Some(save);
-                    continue;
                 }
-                Step::Request(Request::LoadSession(addr)) => addr,
-            };
-            load_session(
-                store,
-                request,
-                &mut housekeeping.loader,
-                &negotiated,
-                controller,
-                config,
-                now,
-            );
-            // Nothing more goes out until the engine has taken it. A load that never
-            // reached the channel clears this on the next pass.
-            loading = true;
+                Request::LoadSession(addr) => {
+                    load_session(
+                        store,
+                        addr,
+                        &mut housekeeping.loader,
+                        &negotiated,
+                        controller,
+                        config,
+                        now,
+                    );
+                    // Nothing more goes out until the engine has taken it. A load that
+                    // never reached the channel clears this on the next pass.
+                    loading = true;
+                }
+            }
+            // Whatever acting on it asked for belongs where the request stood, in front of
+            // anything the performer asked for after it.
+            let produced: Vec<Work> = controller.drain_work().collect();
+            queued.splice(0..0, produced);
         }
 
         let Drained {
@@ -958,7 +958,7 @@ fn hand_over(
     queued: &mut Vec<Work>,
     loading: bool,
     mut send: impl FnMut(Command) -> bool,
-) -> Option<Step> {
+) -> Option<Request> {
     while let Some(work) = queued.first().copied() {
         if loading {
             return None;
@@ -971,26 +971,13 @@ fn hand_over(
                 }
                 queued.remove(0);
             }
-            Work::Settings(settings) => {
-                queued.remove(0);
-                return Some(Step::Settings(settings));
-            }
             Work::Request(request) => {
                 queued.remove(0);
-                return Some(Step::Request(request));
+                return Some(request);
             }
         }
     }
     None
-}
-
-/// Something the run loop does itself, once everything before it has gone out.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Step {
-    /// The track settings as they stood here, for the mailbox the audio side reads first.
-    Settings(free_loop_core::Settings),
-    /// Something needing the disk or the loader.
-    Request(Request),
 }
 
 /// Asks the engine to publish its clips, and starts the wait for them.
@@ -1181,7 +1168,7 @@ mod tests {
 
     /// One turn of the run loop's handover: sends what fits, and returns the request that
     /// surfaced for the caller to act on.
-    fn step(queued: &mut Vec<Work>, loading: bool, room: usize) -> (Vec<Command>, Option<Step>) {
+    fn step(queued: &mut Vec<Work>, loading: bool, room: usize) -> (Vec<Command>, Option<Request>) {
         let mut taken = Vec::new();
         let mut left = room;
         let surfaced = hand_over(queued, loading, |command| {
@@ -1195,50 +1182,59 @@ mod tests {
         (taken, surfaced)
     }
 
+    fn gains(step: u8) -> free_loop_core::Settings {
+        free_loop_core::Settings {
+            gains: [step; free_loop_core::TRACK_COUNT],
+            ..free_loop_core::Settings::new()
+        }
+    }
+
     #[test]
-    fn a_setting_made_after_a_load_is_published_after_it() {
+    fn a_setting_made_after_a_load_reaches_the_engine_after_it() {
         let pad = pad(0, 0);
         // One poll: the confirmation that loads, then a gain change.
         let mut queued = vec![
             Work::Request(Request::LoadSession(pad)),
-            Work::Settings(free_loop_core::Settings::default()),
+            Work::Command(Command::SetSettings(gains(3))),
         ];
 
-        let (_, surfaced) = step(&mut queued, false, 8);
-        assert_eq!(
-            surfaced,
-            Some(Step::Request(Request::LoadSession(pad))),
-            "the load goes first"
-        );
+        let (taken, surfaced) = step(&mut queued, false, 8);
+        assert!(taken.is_empty(), "the change went in front of the load");
+        assert_eq!(surfaced, Some(Request::LoadSession(pad)));
 
-        // The audio side reads the settings mailbox before the commands, so publishing now
-        // would put the change in front of the load, which then overwrites it.
-        let (_, surfaced) = step(&mut queued, true, 8);
-        assert_eq!(surfaced, None, "held while the load is in flight");
+        let (taken, _) = step(&mut queued, true, 8);
+        assert!(taken.is_empty(), "held while the load is in flight");
         assert_eq!(queued.len(), 1, "and not lost");
 
-        let (_, surfaced) = step(&mut queued, false, 8);
-        assert!(matches!(surfaced, Some(Step::Settings(_))));
+        let (taken, _) = step(&mut queued, false, 8);
+        assert_eq!(taken, vec![Command::SetSettings(gains(3))]);
     }
 
     #[test]
-    fn a_setting_keeps_its_place_among_the_commands() {
+    fn two_settings_either_side_of_a_gesture_both_reach_the_engine() {
         let pad = pad(0, 0);
+        // The engine takes these one after another, so the first press runs under the
+        // first settings and the second under the second. A mailbox holding only the
+        // latest would have run both under it.
         let mut queued = vec![
+            Work::Command(Command::SetSettings(gains(1))),
             Work::Command(Command::Press(pad)),
-            Work::Settings(free_loop_core::Settings::default()),
-            Work::Command(Command::Rewind),
+            Work::Command(Command::SetSettings(gains(6))),
+            Work::Command(Command::Press(pad)),
         ];
 
-        // The press goes, then the settings surface, then the rewind: an input chosen
-        // between two gestures belongs between them.
         let (taken, surfaced) = step(&mut queued, false, 8);
-        assert_eq!(taken, vec![Command::Press(pad)]);
-        assert!(matches!(surfaced, Some(Step::Settings(_))));
-
-        let (taken, surfaced) = step(&mut queued, false, 8);
-        assert_eq!(taken, vec![Command::Rewind]);
         assert_eq!(surfaced, None);
+        assert_eq!(
+            taken,
+            vec![
+                Command::SetSettings(gains(1)),
+                Command::Press(pad),
+                Command::SetSettings(gains(6)),
+                Command::Press(pad),
+            ],
+            "in the order they were made"
+        );
     }
 
     #[test]
@@ -1322,7 +1318,7 @@ mod tests {
 
         // The save surfaces first, and its snapshot takes the place the request had.
         let (_, surfaced) = step(&mut queued, false, 8);
-        assert_eq!(surfaced, Some(Step::Request(Request::SaveSession(pad))));
+        assert_eq!(surfaced, Some(Request::SaveSession(pad)));
         queued.insert(0, Work::Command(Command::Snapshot { request: 1 }));
 
         // The load cannot start until that snapshot has gone: the audio side applies a
@@ -1334,7 +1330,7 @@ mod tests {
 
         let (taken, surfaced) = step(&mut queued, false, 8);
         assert_eq!(taken, vec![Command::Snapshot { request: 1 }]);
-        assert_eq!(surfaced, Some(Step::Request(Request::LoadSession(pad))));
+        assert_eq!(surfaced, Some(Request::LoadSession(pad)));
     }
 
     #[test]
@@ -1353,7 +1349,7 @@ mod tests {
         let (_, surfaced) = step(&mut queued, false, 8);
         assert_eq!(
             surfaced,
-            Some(Step::Request(Request::SaveSession(pad))),
+            Some(Request::SaveSession(pad)),
             "once the engine has taken the load"
         );
     }
@@ -1372,7 +1368,7 @@ mod tests {
             taken.is_empty(),
             "the resume went to the session being replaced"
         );
-        assert_eq!(surfaced, Some(Step::Request(Request::LoadSession(pad))));
+        assert_eq!(surfaced, Some(Request::LoadSession(pad)));
 
         // The run loop marks the load in flight, and the resume waits for it.
         let (taken, _) = step(&mut queued, true, 8);

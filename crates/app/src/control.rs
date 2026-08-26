@@ -155,8 +155,6 @@ pub enum TextUpdate {
 pub enum Work {
     /// For the engine.
     Command(Command),
-    /// The whole of the track settings, as they stood at this point.
-    Settings(Settings),
     /// For the caller, which has the disk and the loader.
     Request(Request),
 }
@@ -755,14 +753,14 @@ impl Controller {
 
     /// Notes that the settings moved, in its place among everything else asked for.
     ///
-    /// Adjacent changes coalesce into the later one, which cannot cross a command or a
-    /// request: those are what the position is for.
+    /// They go through the same queue as the rest, so nothing can overtake them. Adjacent
+    /// changes coalesce into the later one, which cannot cross anything else.
     fn mark_settings(&mut self) {
         let settings = self.settings();
-        if let Some(Work::Settings(last)) = self.work.last_mut() {
+        if let Some(Work::Command(Command::SetSettings(last))) = self.work.last_mut() {
             *last = settings;
         } else {
-            self.work.push(Work::Settings(settings));
+            self.command(Command::SetSettings(settings));
         }
     }
 
@@ -1327,8 +1325,8 @@ mod tests {
         controller
             .drain_work()
             .filter_map(|work| match work {
+                Work::Command(Command::SetSettings(_)) | Work::Request(_) => None,
                 Work::Command(command) => Some(command),
-                Work::Request(_) | Work::Settings(_) => None,
             })
             .collect()
     }
@@ -1344,7 +1342,7 @@ mod tests {
         controller
             .drain_work()
             .filter_map(|work| match work {
-                Work::Settings(settings) => Some(settings),
+                Work::Command(Command::SetSettings(settings)) => Some(settings),
                 _ => None,
             })
             .next_back()
@@ -2076,8 +2074,8 @@ mod tests {
         let mut requests = Vec::new();
         for item in controller.drain_work() {
             match item {
+                Work::Command(Command::SetSettings(latest)) => settings = Some(latest),
                 Work::Command(command) => commands.push(command),
-                Work::Settings(latest) => settings = Some(latest),
                 Work::Request(request) => requests.push(request),
             }
         }
@@ -2090,7 +2088,7 @@ mod tests {
             .drain_work()
             .filter_map(|work| match work {
                 Work::Request(request) => Some(request),
-                Work::Command(_) | Work::Settings(_) => None,
+                Work::Command(_) => None,
             })
             .collect()
     }
