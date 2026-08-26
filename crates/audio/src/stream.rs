@@ -483,6 +483,10 @@ impl AudioIo {
     /// # Errors
     ///
     /// Returns the command back if the queue is full.
+    #[allow(
+        clippy::result_large_err,
+        reason = "the command comes back to be retried in order, on the control thread"
+    )]
     pub fn send(&mut self, command: Command) -> Result<(), Command> {
         self.commands
             .push(command)

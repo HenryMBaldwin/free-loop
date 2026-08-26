@@ -8,9 +8,9 @@
 use core::time::Duration;
 
 use free_loop_core::{
-    CENTRE_STEP, Command, Event, LaunchMode, MAX_BPM, MIN_BPM, PAN_STEPS, Polyphony, SLOT_COUNT,
-    SessionModel, Settings, SlotAddr, Subdivision, TRACK_COUNT, Tempo, TimeSignature, TrackInput,
-    UNITY_STEP, column_mask, pad_bit, row_mask,
+    CENTRE_STEP, Command, Event, GAIN_STEPS, LaunchMode, MAX_BPM, MIN_BPM, PAN_STEPS, Polyphony,
+    SLOT_COUNT, SessionModel, Settings, SlotAddr, Subdivision, TRACK_COUNT, Tempo, TimeSignature,
+    TrackInput, UNITY_STEP, column_mask, pad_bit, row_mask,
 };
 use free_loop_surface::{Control, Led, LedColor, LedFrame, SHADES, SIDE_COUNT, SurfaceEvent};
 
@@ -54,6 +54,33 @@ fn bit(addr: SlotAddr) -> u64 {
     1 << (addr.track.index() * SLOT_COUNT + addr.slot.index())
 }
 
+/// Which mixing control a loop screen sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Knob {
+    /// How loud the loop plays within its track.
+    Level,
+    /// How far the loop is nudged from where its track sits.
+    Pan,
+}
+
+impl Knob {
+    /// The track-wide screen this is the loop-wide half of.
+    pub fn trackwise(self) -> Mode {
+        match self {
+            Self::Level => Mode::Volume,
+            Self::Pan => Mode::Pan,
+        }
+    }
+
+    /// Steps the row offers.
+    pub fn steps(self) -> usize {
+        match self {
+            Self::Level => GAIN_STEPS,
+            Self::Pan => PAN_STEPS,
+        }
+    }
+}
+
 /// What the grid is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -71,6 +98,10 @@ pub enum Mode {
     Volume,
     /// Where each track sits across the stereo field.
     Pan,
+    /// Waiting for the loop whose level or pan is to be set.
+    LoopPick(Knob),
+    /// One loop's level or pan, across the whole grid.
+    LoopSet(Knob, SlotAddr),
     /// Which input each track records.
     Input,
     /// One row of settings per track.
@@ -97,6 +128,8 @@ impl Mode {
             | Self::Solo
             | Self::Volume
             | Self::Pan
+            | Self::LoopPick(_)
+            | Self::LoopSet(..)
             | Self::Input
             | Self::Settings
             | Self::TimeSignature
@@ -156,6 +189,10 @@ pub enum TextUpdate {
 ///
 /// Commands and requests share a queue: a request can start a load, which the audio side
 /// applies after the commands it has already taken, so their order has to survive.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "work is queued by value to keep the order it was made in"
+)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Work {
     /// For the engine.
@@ -238,6 +275,8 @@ impl Controller {
             pickups: [0; TRACK_COUNT],
             polyphony: [Polyphony::Single; TRACK_COUNT],
             pans: [CENTRE_STEP; TRACK_COUNT],
+            loop_gains: [[UNITY_STEP; SLOT_COUNT]; TRACK_COUNT],
+            loop_pans: [[CENTRE_STEP; SLOT_COUNT]; TRACK_COUNT],
             input_count: 2,
             beat: 0,
             beat_lit: true,
@@ -437,6 +476,26 @@ impl Controller {
         self.dirty = true;
     }
 
+    /// How loud each loop plays within its track.
+    pub fn loop_gains(&self) -> [[u8; SLOT_COUNT]; TRACK_COUNT] {
+        self.chrome.loop_gains
+    }
+
+    /// How far each loop is nudged from where its track sits.
+    pub fn loop_pans(&self) -> [[u8; SLOT_COUNT]; TRACK_COUNT] {
+        self.chrome.loop_pans
+    }
+
+    /// Takes the loop levels and pans a loaded session came with.
+    ///
+    /// Pads the session does not fill go back to flat.
+    pub fn set_loop_mix(&mut self, mix: free_loop_session::LoopMix) {
+        self.chrome.loop_gains = mix.gains;
+        self.chrome.loop_pans = mix.pans;
+        self.mark_settings();
+        self.dirty = true;
+    }
+
     /// How many of each track's loops may sound at once.
     pub fn polyphony(&self) -> [Polyphony; TRACK_COUNT] {
         self.chrome.polyphony
@@ -535,6 +594,8 @@ impl Controller {
         self.chrome.pickups = [0; TRACK_COUNT];
         self.chrome.polyphony = [Polyphony::Single; TRACK_COUNT];
         self.chrome.pans = [CENTRE_STEP; TRACK_COUNT];
+        self.chrome.loop_gains = [[UNITY_STEP; SLOT_COUNT]; TRACK_COUNT];
+        self.chrome.loop_pans = [[CENTRE_STEP; SLOT_COUNT]; TRACK_COUNT];
         self.mark_settings();
         self.command(Command::ClearAll);
         self.command(Command::SetPaused(false));
@@ -595,6 +656,65 @@ impl Controller {
     }
 
     /// Opens a picker, or closes it if it was already open.
+    /// Puts one loop's level and pan back where a fresh take starts.
+    fn reset_loop_mix(&mut self, addr: SlotAddr) {
+        let (track, slot) = (addr.track.index(), addr.slot.index());
+        if self.chrome.loop_gains[track][slot] == UNITY_STEP
+            && self.chrome.loop_pans[track][slot] == CENTRE_STEP
+        {
+            return;
+        }
+        self.chrome.loop_gains[track][slot] = UNITY_STEP;
+        self.chrome.loop_pans[track][slot] = CENTRE_STEP;
+        self.mark_settings();
+    }
+
+    /// Swaps between working on tracks and working on one loop at a time.
+    fn flip_halves(&mut self) {
+        self.mode = match self.mode {
+            Mode::Volume => Mode::LoopPick(Knob::Level),
+            Mode::Pan => Mode::LoopPick(Knob::Pan),
+            Mode::LoopPick(knob) | Mode::LoopSet(knob, _) => knob.trackwise(),
+            other => other,
+        };
+        self.dirty = true;
+    }
+
+    /// Leaves the slider for the loop it belongs to, and the picker for the loops.
+    fn step_back(&mut self) {
+        self.mode = match self.mode {
+            Mode::LoopSet(knob, _) => Mode::LoopPick(knob),
+            _ => Mode::Perform,
+        };
+        self.dirty = true;
+    }
+
+    /// Opens the slider for the loop that was pressed.
+    fn pick_loop(&mut self, addr: SlotAddr) {
+        if let Mode::LoopPick(knob) = self.mode {
+            self.mode = Mode::LoopSet(knob, addr);
+            self.dirty = true;
+        }
+    }
+
+    /// Sets the loop the slider belongs to.
+    fn set_loop_step(&mut self, knob: Knob, step: usize) {
+        let Mode::LoopSet(_, addr) = self.mode else {
+            return;
+        };
+        if step >= knob.steps() {
+            return;
+        }
+        let step = u8::try_from(step).unwrap_or(CENTRE_STEP);
+        let (track, slot) = (addr.track.index(), addr.slot.index());
+        match knob {
+            Knob::Level => self.chrome.loop_gains[track][slot] = step,
+            Knob::Pan => self.chrome.loop_pans[track][slot] = step,
+        }
+        self.mark_settings();
+        self.dirty = true;
+    }
+
     fn set_mode(&mut self, wanted: Mode) {
         self.input_held = None;
         self.mode = if self.mode == wanted {
@@ -845,6 +965,8 @@ impl Controller {
             Role::Group => self.toggle_group(addr),
             Role::Level => self.set_level(addr),
             Role::Pan => self.set_pan(addr),
+            Role::PickLoop => self.pick_loop(addr),
+            Role::LoopStep(knob, step) => self.set_loop_step(knob, step),
             Role::InputChannel => self.press_input(addr),
             Role::Setting => self.toggle_setting(addr),
             Role::Beats(_) | Role::Unit(_) => self.press_time_signature(addr, now),
@@ -882,6 +1004,8 @@ impl Controller {
             }
             Role::NewSession => self.start_fresh(),
             Role::Open(mode) => self.set_mode(mode),
+            Role::Halves => self.flip_halves(),
+            Role::Back => self.step_back(),
             _ => {}
         }
     }
@@ -1172,6 +1296,10 @@ impl Controller {
         match event {
             Event::SlotChanged { addr, state } => {
                 self.session.mirror(addr, state);
+                // The trim belongs to the recording: an emptied pad goes back to flat.
+                if state == free_loop_core::SlotState::Empty {
+                    self.reset_loop_mix(addr);
+                }
                 self.dirty = true;
             }
             Event::Beat { beat, .. } => {
@@ -1241,6 +1369,8 @@ impl Controller {
             pickups: self.chrome.pickups,
             polyphony: self.chrome.polyphony,
             pans: self.chrome.pans,
+            loop_gains: self.chrome.loop_gains,
+            loop_pans: self.chrome.loop_pans,
         }
     }
 
@@ -1312,6 +1442,15 @@ impl Controller {
             paint::volumes(self.chrome)
         } else if self.mode == Mode::Pan {
             paint::pans(self.chrome)
+        } else if let Mode::LoopPick(_) = self.mode {
+            paint::loop_picker(&self.session, self.chrome)
+        } else if let Mode::LoopSet(knob, addr) = self.mode {
+            let (track, slot) = (addr.track.index(), addr.slot.index());
+            let (step, colour) = match knob {
+                Knob::Level => (self.chrome.loop_gains[track][slot], paint::LEVEL),
+                Knob::Pan => (self.chrome.loop_pans[track][slot], paint::PAN),
+            };
+            paint::loop_slider(usize::from(step), knob.steps(), colour, self.chrome)
         } else if self.mode == Mode::Input {
             paint::inputs(self.chrome)
         } else if self.mode == Mode::Settings {
@@ -3382,6 +3521,172 @@ mod tests {
             .next_back()
             .expect("the change was published");
         assert_eq!(settings.pans[2], 0);
+    }
+
+    /// Presses the top-row button that swaps a screen between its two halves.
+    fn halves() -> SurfaceEvent {
+        SurfaceEvent::ControlPressed(Control::Axis)
+    }
+
+    #[test]
+    fn the_halves_button_walks_between_track_and_loop_mixing() {
+        let mut controller = controller();
+        controller.on_surface(side(VOLUME_SIDE), T0);
+        assert_eq!(controller.mode(), Mode::Volume);
+
+        controller.on_surface(halves(), T0);
+        assert_eq!(controller.mode(), Mode::LoopPick(Knob::Level));
+
+        controller.on_surface(halves(), T0);
+        assert_eq!(controller.mode(), Mode::Volume, "and back again");
+
+        // The pan screen has the same two halves.
+        controller.on_surface(side(VOLUME_SIDE), T0);
+        controller.on_surface(side(PAN_SIDE), T0);
+        controller.on_surface(halves(), T0);
+        assert_eq!(controller.mode(), Mode::LoopPick(Knob::Pan));
+    }
+
+    #[test]
+    fn a_loop_is_chosen_before_its_slider_appears() {
+        let mut controller = controller();
+        let pad = SlotAddr::new(TrackId::new(2).unwrap(), SlotId::new(3).unwrap());
+        controller.on_surface(side(VOLUME_SIDE), T0);
+        controller.on_surface(halves(), T0);
+
+        controller.on_surface(
+            SurfaceEvent::PadPressed {
+                addr: pad,
+                velocity: 127,
+            },
+            T0,
+        );
+        assert_eq!(controller.mode(), Mode::LoopSet(Knob::Level, pad));
+    }
+
+    #[test]
+    fn the_side_button_steps_back_one_screen_at_a_time() {
+        let mut controller = controller();
+        let pad = SlotAddr::new(TrackId::new(2).unwrap(), SlotId::new(3).unwrap());
+        controller.on_surface(side(VOLUME_SIDE), T0);
+        controller.on_surface(halves(), T0);
+        controller.on_surface(
+            SurfaceEvent::PadPressed {
+                addr: pad,
+                velocity: 127,
+            },
+            T0,
+        );
+
+        controller.on_surface(side(VOLUME_SIDE), T0);
+        assert_eq!(
+            controller.mode(),
+            Mode::LoopPick(Knob::Level),
+            "the slider goes back to the loop it belongs to"
+        );
+        controller.on_surface(side(VOLUME_SIDE), T0);
+        assert_eq!(
+            controller.mode(),
+            Mode::Perform,
+            "and the picker to the loops"
+        );
+    }
+
+    #[test]
+    fn the_slider_sets_the_loop_it_was_opened_for() {
+        let mut controller = controller();
+        let pad = SlotAddr::new(TrackId::new(2).unwrap(), SlotId::new(3).unwrap());
+        controller.on_surface(side(VOLUME_SIDE), T0);
+        controller.on_surface(halves(), T0);
+        controller.on_surface(
+            SurfaceEvent::PadPressed {
+                addr: pad,
+                velocity: 127,
+            },
+            T0,
+        );
+
+        // Any row of the slider sets the same value, since every row shows it.
+        for row in [0, 5, 7] {
+            controller.on_surface(
+                SurfaceEvent::PadPressed {
+                    addr: SlotAddr::new(TrackId::new(row).unwrap(), SlotId::new(6).unwrap()),
+                    velocity: 127,
+                },
+                T0,
+            );
+            assert_eq!(controller.loop_gains()[2][3], 6, "row {row}");
+        }
+        assert_eq!(
+            controller.loop_gains()[2][4],
+            UNITY_STEP,
+            "and only that loop"
+        );
+    }
+
+    #[test]
+    fn a_pan_slider_stops_where_its_row_does() {
+        let mut controller = controller();
+        let pad = SlotAddr::new(TrackId::new(0).unwrap(), SlotId::new(0).unwrap());
+        controller.on_surface(side(PAN_SIDE), T0);
+        controller.on_surface(halves(), T0);
+        controller.on_surface(
+            SurfaceEvent::PadPressed {
+                addr: pad,
+                velocity: 127,
+            },
+            T0,
+        );
+
+        let last = u8::try_from(SLOT_COUNT - 1).unwrap();
+        controller.on_surface(
+            SurfaceEvent::PadPressed {
+                addr: SlotAddr::new(TrackId::new(0).unwrap(), SlotId::new(last).unwrap()),
+                velocity: 127,
+            },
+            T0,
+        );
+        assert_eq!(
+            controller.loop_pans()[0][0],
+            CENTRE_STEP,
+            "the column past the row is not a pan"
+        );
+    }
+
+    #[test]
+    fn emptying_a_pad_puts_its_loop_back_to_flat() {
+        let mut controller = controller();
+        let pad = SlotAddr::new(TrackId::new(1).unwrap(), SlotId::new(1).unwrap());
+        controller.on_surface(side(VOLUME_SIDE), T0);
+        controller.on_surface(halves(), T0);
+        controller.on_surface(
+            SurfaceEvent::PadPressed {
+                addr: pad,
+                velocity: 127,
+            },
+            T0,
+        );
+        controller.on_surface(
+            SurfaceEvent::PadPressed {
+                addr: SlotAddr::new(TrackId::new(0).unwrap(), SlotId::new(1).unwrap()),
+                velocity: 127,
+            },
+            T0,
+        );
+        assert_eq!(controller.loop_gains()[1][1], 1);
+
+        controller.on_engine(
+            Event::SlotChanged {
+                addr: pad,
+                state: SlotState::Empty,
+            },
+            T0,
+        );
+        assert_eq!(
+            controller.loop_gains()[1][1],
+            UNITY_STEP,
+            "a fresh take starts flat"
+        );
     }
 
     #[test]

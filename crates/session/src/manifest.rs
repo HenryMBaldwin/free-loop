@@ -34,6 +34,12 @@ pub struct ClipEntry {
     /// Stored per clip although volume is set per track.
     #[serde(default = "unity")]
     pub gain_step: u8,
+    /// How loud the loop plays within its track.
+    #[serde(default = "unity")]
+    pub trim: u8,
+    /// How far the loop is nudged from where its track sits.
+    #[serde(default = "centre")]
+    pub pan: u8,
     /// Audio held past the loop, which a pickup opens from.
     #[serde(default)]
     pub tail_frames: u64,
@@ -164,6 +170,12 @@ impl Manifest {
             if usize::from(entry.gain_step) >= GAIN_STEPS {
                 return Err("a clip's level is off the ladder");
             }
+            if usize::from(entry.trim) >= GAIN_STEPS {
+                return Err("a loop's trim is off the ladder");
+            }
+            if usize::from(entry.pan) >= PAN_STEPS {
+                return Err("a loop's pan is off the row");
+            }
             if entry.tail_frames > entry.len_frames {
                 return Err("a clip's tail is longer than the loop it follows");
             }
@@ -241,6 +253,8 @@ mod tests {
                 playing: true,
                 capture_offset_frames: 2_348,
                 gain_step: 2,
+                trim: UNITY_STEP,
+                pan: CENTRE_STEP,
                 tail_frames: 0,
                 launch_phase_frames: Some(48),
             }],

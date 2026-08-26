@@ -1,7 +1,7 @@
 //! Whole-state settings the controller holds and the engine follows.
 
 use crate::gain::UNITY_STEP;
-use crate::ids::{LaunchMode, PadMask, Polyphony, TRACK_COUNT, TrackInput};
+use crate::ids::{LaunchMode, PadMask, Polyphony, SLOT_COUNT, TRACK_COUNT, TrackInput};
 use crate::pan::CENTRE_STEP;
 
 /// Everything the controller sets as a whole value.
@@ -25,6 +25,10 @@ pub struct Settings {
     pub polyphony: [Polyphony; TRACK_COUNT],
     /// Where each track sits across the stereo field, as a step on the pan row.
     pub pans: [u8; TRACK_COUNT],
+    /// How loud each loop plays within its track, as a step on the gain ladder.
+    pub loop_gains: [[u8; SLOT_COUNT]; TRACK_COUNT],
+    /// How far each loop is nudged from where its track sits, as a step on the pan row.
+    pub loop_pans: [[u8; SLOT_COUNT]; TRACK_COUNT],
 }
 
 impl Settings {
@@ -39,6 +43,8 @@ impl Settings {
             pickups: [0; TRACK_COUNT],
             polyphony: [Polyphony::default(); TRACK_COUNT],
             pans: [CENTRE_STEP; TRACK_COUNT],
+            loop_gains: [[UNITY_STEP; SLOT_COUNT]; TRACK_COUNT],
+            loop_pans: [[CENTRE_STEP; SLOT_COUNT]; TRACK_COUNT],
         }
     }
 }

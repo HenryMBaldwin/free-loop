@@ -11,5 +11,6 @@ pub mod store;
 
 pub use manifest::{ClipEntry, Manifest};
 pub use store::{
-    LoadedClip, LoadedSession, SavedClip, SessionData, SessionError, SessionStore, TrackSettings,
+    LoadedClip, LoadedSession, LoopMix, SavedClip, SessionData, SessionError, SessionStore,
+    TrackSettings,
 };
