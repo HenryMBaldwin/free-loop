@@ -99,6 +99,16 @@ pub struct TrackEntry {
     pub pan: u8,
 }
 
+/// The format written today, where a clip's level is the loop's own trim.
+pub const VERSION: u32 = 2;
+
+/// The format where a clip's level was its track's.
+pub const FIRST_VERSION: u32 = 1;
+
+fn first_version() -> u32 {
+    FIRST_VERSION
+}
+
 /// Dead centre, for a session saved before tracks carried a pan.
 fn centre() -> u8 {
     CENTRE_STEP
@@ -107,6 +117,11 @@ fn centre() -> u8 {
 /// Everything a session holds apart from the audio itself.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
+    /// The format this was written in.
+    ///
+    /// Absent means the first, where a clip carried its track's level. See [`VERSION`].
+    #[serde(default = "first_version")]
+    pub version: u32,
     /// Beats per minute.
     pub tempo: f64,
     /// Beats in a bar.
@@ -173,6 +188,10 @@ impl Manifest {
             }
         }
 
+        if self.version > VERSION {
+            return Err("a session written by a newer version");
+        }
+
         let mut tracks = 0_u32;
         for entry in &self.tracks {
             if usize::from(entry.track) >= TRACK_COUNT {
@@ -230,6 +249,7 @@ mod tests {
 
     fn manifest() -> Manifest {
         Manifest {
+            version: VERSION,
             tempo: 120.0,
             beats_per_bar: 4,
             beat_unit: 4,

@@ -687,7 +687,13 @@ impl Controller {
     }
 
     /// Opens the slider for the loop that was pressed.
+    ///
+    /// A pad with no take is dark on the picker and does nothing here, since a trim set
+    /// on it would be invisible and would outlive the pad being empty.
     fn pick_loop(&mut self, addr: SlotAddr) {
+        if self.session.state(addr).clip().is_none() {
+            return;
+        }
         if let Mode::LoopPick(knob) = self.mode {
             self.mode = Mode::LoopSet(knob, addr);
             self.dirty = true;
@@ -3538,6 +3544,17 @@ mod tests {
         assert_eq!(settings.pans[2], 0);
     }
 
+    /// Puts a clip on a pad, the way a report from the engine does.
+    fn with_clip(controller: &mut Controller, addr: SlotAddr) {
+        controller.on_engine(
+            Event::SlotChanged {
+                addr,
+                state: SlotState::Stopped { clip: ClipId(0) },
+            },
+            T0,
+        );
+    }
+
     /// Presses the row-or-column button, which is also the track-or-loop button.
     fn halves() -> SurfaceEvent {
         SurfaceEvent::ControlPressed(Control::Axis)
@@ -3583,9 +3600,41 @@ mod tests {
     }
 
     #[test]
+    fn a_pad_with_no_take_cannot_be_mixed() {
+        let mut controller = controller();
+        let empty = SlotAddr::new(TrackId::new(6).unwrap(), SlotId::new(4).unwrap());
+        controller.on_surface(side(VOLUME_SIDE), T0);
+        controller.on_surface(halves(), T0);
+        let _ = commands(&mut controller);
+
+        controller.on_surface(
+            SurfaceEvent::PadPressed {
+                addr: empty,
+                velocity: 127,
+            },
+            T0,
+        );
+        assert_eq!(
+            controller.mode(),
+            Mode::LoopPick(Knob::Level),
+            "a dark pad does not open a slider"
+        );
+
+        // And nothing was published: the engine never hears about it.
+        assert_eq!(controller.loop_gains()[6][4], UNITY_STEP);
+        assert!(
+            controller
+                .drain_work()
+                .all(|work| !matches!(work, Work::Command(Command::SetSettings(_)))),
+            "nothing to tell the engine"
+        );
+    }
+
+    #[test]
     fn a_loop_is_chosen_before_its_slider_appears() {
         let mut controller = controller();
         let pad = SlotAddr::new(TrackId::new(2).unwrap(), SlotId::new(3).unwrap());
+        with_clip(&mut controller, pad);
         controller.on_surface(side(VOLUME_SIDE), T0);
         controller.on_surface(halves(), T0);
 
@@ -3603,6 +3652,7 @@ mod tests {
     fn the_side_button_steps_back_one_screen_at_a_time() {
         let mut controller = controller();
         let pad = SlotAddr::new(TrackId::new(2).unwrap(), SlotId::new(3).unwrap());
+        with_clip(&mut controller, pad);
         controller.on_surface(side(VOLUME_SIDE), T0);
         controller.on_surface(halves(), T0);
         controller.on_surface(
@@ -3631,6 +3681,7 @@ mod tests {
     fn the_slider_sets_the_loop_it_was_opened_for() {
         let mut controller = controller();
         let pad = SlotAddr::new(TrackId::new(2).unwrap(), SlotId::new(3).unwrap());
+        with_clip(&mut controller, pad);
         controller.on_surface(side(VOLUME_SIDE), T0);
         controller.on_surface(halves(), T0);
         controller.on_surface(
@@ -3663,6 +3714,7 @@ mod tests {
     fn a_pan_slider_stops_where_its_row_does() {
         let mut controller = controller();
         let pad = SlotAddr::new(TrackId::new(0).unwrap(), SlotId::new(0).unwrap());
+        with_clip(&mut controller, pad);
         controller.on_surface(side(PAN_SIDE), T0);
         controller.on_surface(halves(), T0);
         controller.on_surface(
@@ -3692,6 +3744,7 @@ mod tests {
     fn emptying_a_pad_puts_its_loop_back_to_flat() {
         let mut controller = controller();
         let pad = SlotAddr::new(TrackId::new(1).unwrap(), SlotId::new(1).unwrap());
+        with_clip(&mut controller, pad);
         controller.on_surface(side(VOLUME_SIDE), T0);
         controller.on_surface(halves(), T0);
         controller.on_surface(

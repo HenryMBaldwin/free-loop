@@ -11,7 +11,7 @@ use free_loop_core::{
     CENTRE_STEP, Frames, SLOT_COUNT, SlotAddr, TRACK_COUNT, TrackInput, UNITY_STEP,
 };
 
-use crate::manifest::{ClipEntry, MANIFEST, Manifest, TrackEntry};
+use crate::manifest::{self, ClipEntry, MANIFEST, Manifest, TrackEntry};
 
 /// Something went wrong reading or writing a session.
 #[derive(Debug, thiserror::Error)]
@@ -303,8 +303,16 @@ pub struct LoadedSession {
 
 impl LoadedSession {
     /// What each track's settings should be, defaulted where the session says nothing.
+    ///
+    /// In the first format a clip's level was its track's, and stands in where the track
+    /// entry carries none.
     pub fn tracks(&self) -> [TrackSettings; TRACK_COUNT] {
         let mut tracks = [TrackSettings::default(); TRACK_COUNT];
+        if self.manifest.version < manifest::VERSION {
+            for loaded in &self.clips {
+                tracks[loaded.addr.track.index()].gain_step = loaded.gain_step;
+            }
+        }
         for entry in &self.manifest.tracks {
             if let Some(slot) = tracks.get_mut(usize::from(entry.track)) {
                 slot.input = track_input(entry);
@@ -321,11 +329,17 @@ impl LoadedSession {
     }
 
     /// What each loop is trimmed to. Pads the session does not fill stay flat.
+    ///
+    /// A session in the first format has no loop levels of its own: only its pans are
+    /// read, and every trim stays at unity.
     pub fn loop_mix(&self) -> LoopMix {
         let mut mix = LoopMix::default();
+        let levelled = self.manifest.version >= manifest::VERSION;
         for loaded in &self.clips {
             let (track, slot) = (loaded.addr.track.index(), loaded.addr.slot.index());
-            mix.gains[track][slot] = loaded.gain_step;
+            if levelled {
+                mix.gains[track][slot] = loaded.gain_step;
+            }
             mix.pans[track][slot] = loaded.pan;
         }
         mix
@@ -488,6 +502,7 @@ impl SessionStore {
         }
 
         let manifest = Manifest {
+            version: manifest::VERSION,
             tempo: data.tempo,
             beats_per_bar: data.beats_per_bar,
             beat_unit: data.beat_unit,
@@ -1428,6 +1443,7 @@ mod tests {
     fn a_session_that_says_nothing_about_a_track_defaults_it() {
         let loaded = LoadedSession {
             manifest: Manifest {
+                version: manifest::VERSION,
                 tempo: 120.0,
                 beats_per_bar: 4,
                 beat_unit: 4,
@@ -1449,6 +1465,7 @@ mod tests {
     fn a_saved_track_setting_comes_back() {
         let loaded = LoadedSession {
             manifest: Manifest {
+                version: manifest::VERSION,
                 tempo: 120.0,
                 beats_per_bar: 4,
                 beat_unit: 4,
@@ -1512,6 +1529,7 @@ mod tests {
     /// A manifest holding nothing but track settings.
     fn track_manifest(tracks: Vec<TrackEntry>) -> Manifest {
         Manifest {
+            version: manifest::VERSION,
             tempo: 120.0,
             beats_per_bar: 4,
             beat_unit: 4,
@@ -1950,6 +1968,78 @@ mod tests {
             .zip(&expected)
             .position(|(got, want)| got != want);
         assert_eq!(wrong, None, "first sample that differs");
+    }
+
+    #[test]
+    fn a_session_from_the_first_format_applies_its_level_once() {
+        // Exactly what the previous version wrote: the track's level in both places.
+        let text = "
+            tempo = 120.0
+            beats_per_bar = 4
+            beat_unit = 4
+            sample_rate = 48000
+            channels = 2
+
+            [[clips]]
+            track = 1
+            slot = 0
+            file = \"t1s0.wav\"
+            len_frames = 64
+            phase_frames = 0
+            playing = false
+            gain_step = 2
+
+            [[tracks]]
+            track = 1
+            input_channels = [0, 1]
+            restart = false
+            pickup = 0
+            gain_step = 2
+            ";
+        let manifest: Manifest = toml::from_str(text).unwrap();
+        assert_eq!(manifest.version, manifest::FIRST_VERSION);
+        manifest.validate().unwrap();
+
+        let loaded = LoadedSession {
+            manifest,
+            clips: vec![loaded_clip(addr(1, 0), 2)],
+        };
+
+        assert_eq!(loaded.gains()[1], 2, "the track keeps its level");
+        assert_eq!(
+            loaded.loop_mix().gains[1][0],
+            UNITY_STEP,
+            "and the loop does not take it a second time"
+        );
+    }
+
+    #[test]
+    fn a_session_from_the_first_format_without_track_levels_still_reads_them() {
+        let text = "
+            tempo = 120.0
+            beats_per_bar = 4
+            beat_unit = 4
+            sample_rate = 48000
+            channels = 2
+            ";
+        let manifest: Manifest = toml::from_str(text).unwrap();
+        let loaded = LoadedSession {
+            manifest,
+            clips: vec![loaded_clip(addr(3, 0), 6)],
+        };
+
+        assert_eq!(loaded.gains()[3], 6, "the clip stood in for its track");
+        assert_eq!(loaded.loop_mix().gains[3][0], UNITY_STEP);
+    }
+
+    #[test]
+    fn a_session_from_a_newer_format_is_refused() {
+        let mut ahead = track_manifest(Vec::new());
+        ahead.version = manifest::VERSION + 1;
+        assert_eq!(
+            ahead.validate(),
+            Err("a session written by a newer version")
+        );
     }
 
     #[test]
