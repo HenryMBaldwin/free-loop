@@ -1953,6 +1953,55 @@ mod tests {
     }
 
     #[test]
+    fn both_pans_come_back_from_disk() {
+        let dir = TempDir::new("pans-round-trip");
+        let store = SessionStore::new(&dir.0);
+        let audio = clip(64, 0);
+
+        let mut tracks = [TrackSettings::default(); TRACK_COUNT];
+        tracks[1].pan = 0;
+        tracks[5].pan = 6;
+        let mut session = data(vec![
+            SavedClip {
+                addr: addr(1, 0),
+                playing: false,
+                gain_step: UNITY_STEP,
+                pan: 6,
+                launch_anchor: None,
+                clip: &audio,
+            },
+            SavedClip {
+                addr: addr(5, 2),
+                playing: false,
+                gain_step: UNITY_STEP,
+                pan: 1,
+                launch_anchor: None,
+                clip: &audio,
+            },
+        ]);
+        session.tracks = tracks;
+
+        store.save(addr(0, 0), &session, BUDGET).unwrap();
+        let loaded = store.load(addr(0, 0), 48_000, CH, BUDGET).unwrap();
+
+        assert_eq!(loaded.tracks()[1].pan, 0, "the track kept its place");
+        assert_eq!(loaded.tracks()[5].pan, 6);
+        assert_eq!(
+            loaded.tracks()[3].pan,
+            CENTRE_STEP,
+            "a track that was never moved is centred"
+        );
+
+        let mix = loaded.loop_mix();
+        assert_eq!(mix.pans[1][0], 6, "and the loop kept its nudge");
+        assert_eq!(mix.pans[5][2], 1);
+        assert_eq!(
+            mix.pans[0][0], CENTRE_STEP,
+            "a pad with nothing on it is centred"
+        );
+    }
+
+    #[test]
     fn a_trim_travels_with_the_loop_it_was_set_on() {
         let dir = TempDir::new("levels");
         let store = SessionStore::new(&dir.0);
