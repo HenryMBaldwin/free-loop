@@ -90,6 +90,9 @@ pub struct TrackEntry {
     /// on the clips stand in.
     #[serde(default)]
     pub gain_step: Option<u8>,
+    /// Whether the track's loops sound together.
+    #[serde(default)]
+    pub multiple: bool,
 }
 
 /// Everything a session holds apart from the audio itself.
@@ -293,6 +296,7 @@ mod tests {
             restart: false,
             pickup: 0,
             gain_step: None,
+            multiple: false,
             input_channels: None,
         };
         broken.tracks = vec![entry.clone(), entry];
@@ -308,6 +312,7 @@ mod tests {
             restart: false,
             pickup: 0,
             gain_step: Some(200),
+            multiple: false,
             input_channels: None,
         }];
         assert_eq!(broken.validate(), Err("a track's level is off the ladder"));
@@ -322,6 +327,7 @@ mod tests {
             restart: false,
             pickup: 0,
             gain_step: None,
+            multiple: false,
             input_channels: None,
         }];
         assert!(broken.validate().is_err());
@@ -344,6 +350,7 @@ mod tests {
             restart: true,
             pickup: 0,
             gain_step: Some(3),
+            multiple: false,
             input_channels: None,
         }];
         let written = toml::to_string(&manifest).unwrap();

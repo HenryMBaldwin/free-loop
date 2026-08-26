@@ -112,6 +112,8 @@ pub struct TrackSettings {
     pub pickup: u8,
     /// The step on the gain ladder the track plays at.
     pub gain_step: u8,
+    /// Whether the track's loops sound together.
+    pub multiple: bool,
 }
 
 impl Default for TrackSettings {
@@ -122,6 +124,7 @@ impl Default for TrackSettings {
             restart: false,
             pickup: 0,
             gain_step: UNITY_STEP,
+            multiple: false,
         }
     }
 }
@@ -285,6 +288,7 @@ impl LoadedSession {
                 slot.input = track_input(entry);
                 slot.restart = entry.restart;
                 slot.pickup = entry.pickup;
+                slot.multiple = entry.multiple;
                 if let Some(step) = entry.gain_step {
                     slot.gain_step = step;
                 }
@@ -468,6 +472,7 @@ impl SessionStore {
                     restart: track.restart,
                     pickup: track.pickup,
                     gain_step: Some(track.gain_step),
+                    multiple: track.multiple,
                 })
                 .collect(),
         };
@@ -1409,6 +1414,7 @@ mod tests {
                     restart: true,
                     pickup: 0,
                     gain_step: Some(3),
+                    multiple: true,
                 }],
             },
             clips: Vec::new(),
@@ -1418,7 +1424,34 @@ mod tests {
         assert_eq!(tracks[7].input, TrackInput::Mono(1));
         assert!(tracks[7].restart);
         assert_eq!(tracks[7].gain_step, 3);
+        assert!(tracks[7].multiple);
         assert_eq!(tracks[0], TrackSettings::default(), "and only that track");
+    }
+
+    #[test]
+    fn a_session_saved_before_tracks_carried_a_mode_loads_on_single() {
+        let manifest: Manifest = toml::from_str(
+            "
+            tempo = 120.0
+            beats_per_bar = 4
+            beat_unit = 4
+            sample_rate = 48000
+            channels = 2
+            clips = []
+            [[tracks]]
+            track = 3
+            input_channels = [0, 1]
+            restart = false
+            pickup = 0
+            ",
+        )
+        .unwrap();
+        let loaded = LoadedSession {
+            manifest,
+            clips: Vec::new(),
+        };
+
+        assert!(!loaded.tracks()[3].multiple);
     }
 
     /// A manifest holding nothing but track settings.
@@ -1454,6 +1487,7 @@ mod tests {
                 restart: false,
                 pickup: 0,
                 gain_step: Some(1),
+                multiple: false,
             }]),
             clips: Vec::new(),
         };
@@ -1471,6 +1505,7 @@ mod tests {
                 restart: false,
                 pickup: 0,
                 gain_step: Some(1),
+                multiple: false,
             }]),
             clips: vec![loaded_clip(addr(2, 0), 5), loaded_clip(addr(2, 1), 7)],
         };
@@ -1492,6 +1527,7 @@ mod tests {
                 restart: false,
                 pickup: 0,
                 gain_step: None,
+                multiple: false,
             }]),
             clips: vec![loaded_clip(addr(2, 0), 5)],
         };

@@ -329,3 +329,29 @@ impl LaunchMode {
         matches!(self, Self::Restart)
     }
 }
+
+/// How many of a track's loops may sound at once.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Polyphony {
+    /// Launching a loop hands the track over from whatever was sounding on it.
+    #[default]
+    Single,
+    /// Loops on the track sound together, and each is launched and stopped on its own.
+    Multiple,
+}
+
+impl Polyphony {
+    /// The other mode.
+    #[must_use]
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Single => Self::Multiple,
+            Self::Multiple => Self::Single,
+        }
+    }
+
+    /// Whether a launch hands the track over.
+    pub fn is_exclusive(self) -> bool {
+        matches!(self, Self::Single)
+    }
+}

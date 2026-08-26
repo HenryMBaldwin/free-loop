@@ -9,8 +9,8 @@ use free_loop_surface::Control;
 
 use crate::control::Mode;
 use crate::paint::{
-    self, INPUT_SIDE, MUTE_SIDE, NEW_SIDE, NO_PAD, PAUSE_SIDE, PICKUP_COLUMN, RESTART_COLUMN,
-    SETTINGS_SIDE, SOLO_SIDE, SignaturePart, VOLUME_SIDE, YES_PAD,
+    self, INPUT_SIDE, MUTE_SIDE, NEW_SIDE, NO_PAD, PAUSE_SIDE, PICKUP_COLUMN, POLYPHONY_COLUMN,
+    RESTART_COLUMN, SETTINGS_SIDE, SOLO_SIDE, SignaturePart, VOLUME_SIDE, YES_PAD,
 };
 
 /// One button on the surface.
@@ -165,6 +165,7 @@ pub fn name(mode: Mode, button: Button) -> Option<String> {
         (Role::Setting, Button::Grid(addr)) => match pad(addr) {
             (track, RESTART_COLUMN) => format!("track {track} restart"),
             (track, PICKUP_COLUMN) => format!("track {track} pickup"),
+            (track, POLYPHONY_COLUMN) => format!("track {track} single or multiple"),
             _ => return None,
         },
         (Role::Beats(beats), _) => {

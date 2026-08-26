@@ -3,7 +3,7 @@
 //! Pure and allocation-free like [`crate::slot`]: effects go to a caller-supplied sink
 //! rather than a collection.
 
-use crate::ids::{SLOT_COUNT, SlotAddr, SlotId, TRACK_COUNT, TrackId};
+use crate::ids::{Polyphony, SLOT_COUNT, SlotAddr, SlotId, TRACK_COUNT, TrackId};
 use crate::slot::{Ctx, Effect, SlotInput, SlotState, step};
 use crate::time::Frames;
 
@@ -49,10 +49,17 @@ impl SessionModel {
         SlotId::all().map(move |slot| SlotAddr::new(track, slot))
     }
 
-    /// Handles a press, applying the one-slot-per-track rule.
+    /// Handles a press, handing the track over when `polyphony` is exclusive.
     ///
-    /// While a track is recording, presses on its other pads are ignored.
-    pub fn press(&mut self, addr: SlotAddr, ctx: &Ctx, sink: &mut impl FnMut(SlotAddr, Effect)) {
+    /// While a track is recording, presses on its other pads are ignored whichever mode
+    /// it is in.
+    pub fn press(
+        &mut self,
+        addr: SlotAddr,
+        ctx: &Ctx,
+        polyphony: Polyphony,
+        sink: &mut impl FnMut(SlotAddr, Effect),
+    ) {
         let busy_elsewhere = Self::track_addrs(addr.track)
             .any(|other| other != addr && self.state(other).is_recording());
         if busy_elsewhere {
@@ -63,6 +70,10 @@ impl SessionModel {
         self.set(addr, state);
         for effect in effects.iter() {
             sink(addr, effect);
+        }
+
+        if !polyphony.is_exclusive() {
+            return;
         }
 
         // Whatever this pad takes over from hands back on the same boundary.
@@ -78,6 +89,35 @@ impl SessionModel {
             if other != addr {
                 self.apply(other, SlotInput::Yield { at: takeover_at }, ctx, sink);
             }
+        }
+    }
+
+    /// Leaves the lowest-numbered sounding pad on `track` and presses the rest.
+    ///
+    /// For a track leaving [`Polyphony::Multiple`]. Those pressed stop on the next
+    /// boundary.
+    pub fn fold_to_one(
+        &mut self,
+        track: TrackId,
+        ctx: &Ctx,
+        sink: &mut impl FnMut(SlotAddr, Effect),
+    ) {
+        let sounding = |state: SlotState| {
+            matches!(
+                state,
+                SlotState::Playing { .. } | SlotState::QueuedPlay { .. }
+            )
+        };
+        let mut kept = false;
+        for addr in Self::track_addrs(track) {
+            if !sounding(self.state(addr)) {
+                continue;
+            }
+            if !kept {
+                kept = true;
+                continue;
+            }
+            self.apply(addr, SlotInput::Press, ctx, sink);
         }
     }
 
@@ -217,10 +257,30 @@ mod tests {
 
     /// Records `bars` bars into `at` from bar `start_bar`, leaving it playing.
     fn record(model: &mut SessionModel, at: SlotAddr, start_bar: u64, bars: u64, clip: u32) {
-        model.press(at, &ctx(start_bar * BAR, clip), &mut ignore);
+        model.press(
+            at,
+            &ctx(start_bar * BAR, clip),
+            Polyphony::Single,
+            &mut ignore,
+        );
         model.advance(&ctx(start_bar * BAR, clip), &mut ignore);
         let end = (start_bar + bars) * BAR;
-        model.press(at, &ctx(end, clip), &mut ignore);
+        model.press(at, &ctx(end, clip), Polyphony::Single, &mut ignore);
+        model.advance(&ctx(end, clip), &mut ignore);
+        assert_eq!(model.state(at), SlotState::Playing { clip: ClipId(clip) });
+    }
+
+    /// Records `bars` bars into `at` from bar `start_bar`, leaving its siblings sounding.
+    fn record_beside(model: &mut SessionModel, at: SlotAddr, start_bar: u64, bars: u64, clip: u32) {
+        model.press(
+            at,
+            &ctx(start_bar * BAR, clip),
+            Polyphony::Multiple,
+            &mut ignore,
+        );
+        model.advance(&ctx(start_bar * BAR, clip), &mut ignore);
+        let end = (start_bar + bars) * BAR;
+        model.press(at, &ctx(end, clip), Polyphony::Multiple, &mut ignore);
         model.advance(&ctx(end, clip), &mut ignore);
         assert_eq!(model.state(at), SlotState::Playing { clip: ClipId(clip) });
     }
@@ -263,7 +323,12 @@ mod tests {
         assert_eq!(model.state(first), SlotState::Stopped { clip: ClipId(0) });
 
         // Relaunching the first queues the second to stop on the same boundary.
-        model.press(first, &ctx(6 * BAR + 1_000, 2), &mut ignore);
+        model.press(
+            first,
+            &ctx(6 * BAR + 1_000, 2),
+            Polyphony::Single,
+            &mut ignore,
+        );
         let boundary = Frames(7 * BAR);
         assert_eq!(
             model.state(first),
@@ -324,11 +389,11 @@ mod tests {
         let recording = addr(0, 0);
         let other = addr(0, 1);
 
-        model.press(recording, &ctx(BAR, 0), &mut ignore);
+        model.press(recording, &ctx(BAR, 0), Polyphony::Single, &mut ignore);
         model.advance(&ctx(BAR, 0), &mut ignore);
         assert!(model.state(recording).is_recording());
 
-        model.press(other, &ctx(BAR + 5_000, 0), &mut ignore);
+        model.press(other, &ctx(BAR + 5_000, 0), Polyphony::Single, &mut ignore);
         assert_eq!(model.state(other), SlotState::Empty);
         assert_eq!(
             model.state(recording),
@@ -339,7 +404,12 @@ mod tests {
         );
 
         // Other tracks are unaffected.
-        model.press(addr(1, 0), &ctx(BAR + 5_000, 0), &mut ignore);
+        model.press(
+            addr(1, 0),
+            &ctx(BAR + 5_000, 0),
+            Polyphony::Single,
+            &mut ignore,
+        );
         assert_eq!(
             model.state(addr(1, 0)),
             SlotState::QueuedRecord {
@@ -352,10 +422,10 @@ mod tests {
     fn the_recording_pad_can_still_stop_itself() {
         let mut model = SessionModel::new();
         let recording = addr(0, 0);
-        model.press(recording, &ctx(BAR, 0), &mut ignore);
+        model.press(recording, &ctx(BAR, 0), Polyphony::Single, &mut ignore);
         model.advance(&ctx(BAR, 0), &mut ignore);
 
-        model.press(recording, &ctx(3 * BAR, 0), &mut ignore);
+        model.press(recording, &ctx(3 * BAR, 0), Polyphony::Single, &mut ignore);
         assert_eq!(
             model.state(recording),
             SlotState::Recording {
@@ -370,7 +440,7 @@ mod tests {
         let mut model = SessionModel::new();
         record(&mut model, addr(0, 0), 1, 1, 0);
         record(&mut model, addr(1, 0), 1, 1, 1);
-        model.press(addr(2, 0), &ctx(3 * BAR, 2), &mut ignore);
+        model.press(addr(2, 0), &ctx(3 * BAR, 2), Polyphony::Single, &mut ignore);
         model.advance(&ctx(3 * BAR, 2), &mut ignore);
         assert!(model.state(addr(2, 0)).is_recording());
 
@@ -397,8 +467,18 @@ mod tests {
         let armed = addr(1, 0);
 
         record(&mut model, playing, 1, 1, 0);
-        model.press(playing, &ctx(3 * BAR + 100, 1), &mut ignore);
-        model.press(armed, &ctx(3 * BAR + 100, 1), &mut ignore);
+        model.press(
+            playing,
+            &ctx(3 * BAR + 100, 1),
+            Polyphony::Single,
+            &mut ignore,
+        );
+        model.press(
+            armed,
+            &ctx(3 * BAR + 100, 1),
+            Polyphony::Single,
+            &mut ignore,
+        );
 
         assert_eq!(
             model.state(playing),
@@ -437,7 +517,7 @@ mod tests {
     fn cancelling_recordings_leaves_playing_clips_alone() {
         let mut model = SessionModel::new();
         record(&mut model, addr(0, 0), 1, 1, 0);
-        model.press(addr(1, 0), &ctx(3 * BAR, 1), &mut ignore);
+        model.press(addr(1, 0), &ctx(3 * BAR, 1), Polyphony::Single, &mut ignore);
         model.advance(&ctx(3 * BAR, 1), &mut ignore);
         assert!(model.state(addr(1, 0)).is_recording());
 
@@ -496,7 +576,7 @@ mod tests {
     fn advance_reports_effects_against_the_right_pads() {
         let mut model = SessionModel::new();
         let target = addr(3, 5);
-        model.press(target, &ctx(BAR + 1_000, 0), &mut ignore);
+        model.press(target, &ctx(BAR + 1_000, 0), Polyphony::Single, &mut ignore);
 
         let mut seen = Vec::new();
         model.advance(&ctx(2 * BAR, 0), &mut |a, effect| seen.push((a, effect)));
@@ -509,6 +589,134 @@ mod tests {
                     at: Frames(2 * BAR)
                 }
             )]
+        );
+    }
+
+    #[test]
+    fn a_multiple_track_leaves_its_other_loops_sounding() {
+        let mut model = SessionModel::new();
+        let first = addr(0, 0);
+        let second = addr(0, 1);
+        record(&mut model, first, 1, 2, 0);
+
+        // Arming and taking a second loop on the same track.
+        record_beside(&mut model, second, 4, 1, 1);
+
+        assert_eq!(model.state(first), SlotState::Playing { clip: ClipId(0) });
+        assert_eq!(model.state(second), SlotState::Playing { clip: ClipId(1) });
+    }
+
+    #[test]
+    fn relaunching_on_a_multiple_track_stops_nothing_else() {
+        let mut model = SessionModel::new();
+        let first = addr(0, 0);
+        let second = addr(0, 1);
+        record(&mut model, first, 1, 1, 0);
+        record_beside(&mut model, second, 3, 1, 1);
+
+        // Stopping one leaves the other where it was.
+        model.press(
+            second,
+            &ctx(5 * BAR + 100, 2),
+            Polyphony::Multiple,
+            &mut ignore,
+        );
+        assert_eq!(model.state(first), SlotState::Playing { clip: ClipId(0) });
+        assert_eq!(
+            model.state(second),
+            SlotState::QueuedStop {
+                clip: ClipId(1),
+                at: Frames(6 * BAR)
+            }
+        );
+    }
+
+    #[test]
+    fn folding_a_track_keeps_its_lowest_sounding_loop() {
+        let mut model = SessionModel::new();
+        record(&mut model, addr(0, 1), 1, 1, 0);
+        record_beside(&mut model, addr(0, 3), 3, 1, 1);
+        record_beside(&mut model, addr(0, 5), 5, 1, 2);
+
+        model.fold_to_one(
+            TrackId::new(0).unwrap(),
+            &ctx(7 * BAR + 100, 3),
+            &mut ignore,
+        );
+
+        let boundary = Frames(8 * BAR);
+        assert_eq!(
+            model.state(addr(0, 1)),
+            SlotState::Playing { clip: ClipId(0) },
+            "the first one on the row stays"
+        );
+        for (slot, clip) in [(3, 1), (5, 2)] {
+            assert_eq!(
+                model.state(addr(0, slot)),
+                SlotState::QueuedStop {
+                    clip: ClipId(clip),
+                    at: boundary
+                },
+                "slot {slot} is queued to stop on the next boundary"
+            );
+        }
+    }
+
+    #[test]
+    fn folding_a_track_with_one_loop_leaves_it_alone() {
+        let mut model = SessionModel::new();
+        record(&mut model, addr(2, 4), 1, 1, 0);
+
+        model.fold_to_one(
+            TrackId::new(2).unwrap(),
+            &ctx(3 * BAR + 100, 1),
+            &mut ignore,
+        );
+
+        assert_eq!(
+            model.state(addr(2, 4)),
+            SlotState::Playing { clip: ClipId(0) }
+        );
+    }
+
+    #[test]
+    fn folding_a_track_counts_a_loop_that_has_not_started_yet() {
+        let mut model = SessionModel::new();
+        record(&mut model, addr(0, 0), 1, 1, 0);
+        record_beside(&mut model, addr(0, 2), 3, 1, 1);
+        // A relaunch after a stop leaves it queued.
+        model.press(
+            addr(0, 2),
+            &ctx(5 * BAR, 2),
+            Polyphony::Multiple,
+            &mut ignore,
+        );
+        model.advance(&ctx(6 * BAR, 2), &mut ignore);
+        model.press(
+            addr(0, 2),
+            &ctx(6 * BAR + 100, 2),
+            Polyphony::Multiple,
+            &mut ignore,
+        );
+        assert!(matches!(
+            model.state(addr(0, 2)),
+            SlotState::QueuedPlay { .. }
+        ));
+
+        model.fold_to_one(
+            TrackId::new(0).unwrap(),
+            &ctx(6 * BAR + 200, 2),
+            &mut ignore,
+        );
+
+        assert_eq!(
+            model.state(addr(0, 0)),
+            SlotState::Playing { clip: ClipId(0) }
+        );
+        assert_eq!(
+            model.state(addr(0, 2)),
+            SlotState::Stopped { clip: ClipId(1) },
+            "a launch that never started is simply dropped"
         );
     }
 }
