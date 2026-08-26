@@ -721,6 +721,7 @@ impl Engine {
             Command::SetClickSubdivision(subdivision) => self.subdivision = subdivision,
             Command::SetTempo(tempo) => self.set_tempo(tempo, sink),
             Command::SetTimeSignature(signature) => self.set_time_signature(signature, sink),
+            Command::SetSettings(settings) => self.apply_settings(settings),
         }
 
         self.settle_refusals(sink);
