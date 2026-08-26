@@ -1,7 +1,7 @@
 //! Whole-state settings the controller holds and the engine follows.
 
 use crate::gain::UNITY_STEP;
-use crate::ids::{LaunchMode, PadMask, TRACK_COUNT, TrackInput};
+use crate::ids::{LaunchMode, PadMask, Polyphony, TRACK_COUNT, TrackInput};
 
 /// Everything the controller sets as a whole value.
 ///
@@ -20,6 +20,8 @@ pub struct Settings {
     pub launch_modes: [LaunchMode; TRACK_COUNT],
     /// Beats each track opens its loops from the tail for. Zero takes the head.
     pub pickups: [u8; TRACK_COUNT],
+    /// How many of each track's loops may sound at once.
+    pub polyphony: [Polyphony; TRACK_COUNT],
 }
 
 impl Settings {
@@ -32,6 +34,7 @@ impl Settings {
             inputs: [TrackInput::default(); TRACK_COUNT],
             launch_modes: [LaunchMode::default(); TRACK_COUNT],
             pickups: [0; TRACK_COUNT],
+            polyphony: [Polyphony::default(); TRACK_COUNT],
         }
     }
 }

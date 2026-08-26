@@ -5,8 +5,8 @@
 use core::cmp::Ordering;
 
 use free_loop_core::{
-    LaunchMode, MAX_BPM, MIN_BPM, PadMask, SLOT_COUNT, SessionModel, SlotAddr, SlotState,
-    Subdivision, TRACK_COUNT, TimeSignature, TrackInput, UNITY_STEP, pad_bit,
+    LaunchMode, MAX_BPM, MIN_BPM, PadMask, Polyphony, SLOT_COUNT, SessionModel, SlotAddr,
+    SlotState, Subdivision, TRACK_COUNT, TimeSignature, TrackInput, UNITY_STEP, pad_bit,
 };
 
 use free_loop_surface::{Control, FIRST_BEAT_LED, Led, LedColor, LedFrame, LedStyle, SHADES};
@@ -40,6 +40,8 @@ pub struct Chrome {
     pub launch_modes: [LaunchMode; TRACK_COUNT],
     /// Beats each track opens its loops from the tail for. Zero is off.
     pub pickups: [u8; TRACK_COUNT],
+    /// How many of each track's loops may sound at once.
+    pub polyphony: [Polyphony; TRACK_COUNT],
     /// Input channels the device offers.
     pub input_count: usize,
 }
@@ -105,6 +107,7 @@ impl Default for Chrome {
             inputs: [TrackInput::default(); TRACK_COUNT],
             launch_modes: [LaunchMode::Follow; TRACK_COUNT],
             pickups: [0; TRACK_COUNT],
+            polyphony: [Polyphony::Single; TRACK_COUNT],
             input_count: 2,
         }
     }
@@ -199,6 +202,9 @@ pub const NO_PAD: (usize, usize) = (0, SLOT_COUNT - 1);
 
 /// The settings column for opening a loop from its tail.
 pub const PICKUP_COLUMN: usize = 1;
+
+/// The settings column holding whether a track's loops sound together.
+pub const POLYPHONY_COLUMN: usize = 2;
 
 /// The right-hand column button that runs the transport.
 pub const PAUSE_SIDE: usize = 4;
@@ -411,7 +417,8 @@ pub fn inputs(chrome: Chrome) -> LedFrame {
 /// Paints each row as one track's settings, one setting per column.
 ///
 /// Column zero is whether launching a clip restarts it, column one how many beats it
-/// opens from its tail for. The rest are unused for now.
+/// opens from its tail for, column two whether its loops sound together. The rest are
+/// unused for now.
 ///
 /// A setting with degrees grades its brightness, dimmest for off.
 pub fn settings(chrome: Chrome) -> LedFrame {
@@ -422,6 +429,7 @@ pub fn settings(chrome: Chrome) -> LedFrame {
         let step = match addr.slot.index() {
             RESTART_COLUMN => u8::from(chrome.launch_modes[track].restarts()) * (SHADES - 1),
             PICKUP_COLUMN => chrome.pickups[track].min(SHADES - 1),
+            POLYPHONY_COLUMN => u8::from(!chrome.polyphony[track].is_exclusive()) * (SHADES - 1),
             _ => continue,
         };
         frame.set_pad(addr, Led::shade(SETTING, step + 1));
@@ -859,7 +867,7 @@ mod tests {
             .unwrap(),
             next_clip_id: ClipId(0),
         };
-        session.press(addr(2, 3), &ctx, &mut |_, _| {});
+        session.press(addr(2, 3), &ctx, Polyphony::Single, &mut |_, _| {});
 
         let painted = frame(&session, Chrome::default());
         assert_eq!(painted.pad(addr(2, 3)), Led::flash(LedColor::Red));
@@ -1220,10 +1228,10 @@ mod tests {
     }
 
     #[test]
-    fn the_settings_grid_holds_two_columns_for_now() {
+    fn the_settings_grid_holds_three_columns_for_now() {
         let painted = settings(Chrome::default());
         let row = TrackId::new(0).unwrap();
-        for column in 2..u8::try_from(SLOT_COUNT).unwrap() {
+        for column in 3..u8::try_from(SLOT_COUNT).unwrap() {
             let addr = SlotAddr::new(row, SlotId::new(column).unwrap());
             assert!(
                 !painted.pad(addr).is_lit(),

@@ -12,8 +12,8 @@
 
 use free_loop_clip::{AudioBuffer, Clip, SegmentPool};
 use free_loop_core::{
-    ClipId, Command, Event, Frames, Settings, SlotAddr, SlotId, SlotState, Subdivision, Tempo,
-    TimeSignature, TrackId,
+    ClipId, Command, Event, Frames, Polyphony, Settings, SlotAddr, SlotId, SlotState, Subdivision,
+    Tempo, TimeSignature, TrackId,
 };
 use free_loop_engine::{ClickConfig, Engine, EngineConfig, Housekeeping, Snapshot};
 use std::sync::Arc;
@@ -100,7 +100,7 @@ impl Harness {
     /// Changes one setting and hands the whole state to the engine.
     fn setting(&mut self, change: impl FnOnce(&mut Settings)) {
         change(&mut self.settings);
-        self.engine.apply_settings(self.settings);
+        self.command(Command::SetSettings(self.settings));
     }
 
     /// Runs until the transport reaches `target`, returning the rendered output.
@@ -2356,10 +2356,13 @@ mod inputs {
         let mut events = Vec::new();
 
         // The fourth input.
-        engine.apply_settings(Settings {
-            inputs: [TrackInput::Mono(3); free_loop_core::TRACK_COUNT],
-            ..Settings::new()
-        });
+        engine.handle(
+            Command::SetSettings(Settings {
+                inputs: [TrackInput::Mono(3); free_loop_core::TRACK_COUNT],
+                ..Settings::new()
+            }),
+            &mut events,
+        );
 
         let pad = addr(0, 0);
         engine.handle(Command::Press(pad), &mut events);
@@ -2849,4 +2852,102 @@ mod seam {
             .collect();
         assert!(odd.is_empty(), "not constant at {odd:?}");
     }
+}
+
+#[test]
+fn a_multiple_track_plays_its_loops_together() {
+    let mut harness = Harness::new(128);
+    harness.setting(|settings| settings.polyphony[0] = Polyphony::Multiple);
+
+    record(&mut harness, addr(0, 0), 0, 1);
+    let at = harness.position();
+    record(&mut harness, addr(0, 1), at, 1);
+
+    assert_eq!(
+        harness.engine.state(addr(0, 0)),
+        SlotState::Playing { clip: ClipId(0) },
+        "the first loop was not handed over"
+    );
+    assert_eq!(
+        harness.engine.state(addr(0, 1)),
+        SlotState::Playing { clip: ClipId(1) }
+    );
+}
+
+#[test]
+fn turning_multiple_off_queues_every_loop_but_the_first_to_stop() {
+    let mut harness = Harness::new(128);
+    harness.setting(|settings| settings.polyphony[0] = Polyphony::Multiple);
+
+    record(&mut harness, addr(0, 1), 0, 1);
+    let at = harness.position();
+    record(&mut harness, addr(0, 3), at, 1);
+    let at = harness.position();
+    record(&mut harness, addr(0, 5), at, 1);
+
+    harness.setting(|settings| settings.polyphony[0] = Polyphony::Single);
+
+    assert_eq!(
+        harness.engine.state(addr(0, 1)),
+        SlotState::Playing { clip: ClipId(0) },
+        "the first one on the row keeps playing"
+    );
+    for (slot, clip) in [(3, 1), (5, 2)] {
+        assert!(
+            matches!(
+                harness.engine.state(addr(0, slot)),
+                SlotState::QueuedStop { clip: ClipId(id), .. } if id == clip
+            ),
+            "slot {slot} is queued to stop, not stopped outright"
+        );
+    }
+
+    // The queued stops land on the next boundary and the first loop is left sounding.
+    let boundary = harness.position().div_ceil(BAR) * BAR;
+    harness.run_to(boundary + 1);
+    assert_eq!(
+        harness.engine.state(addr(0, 1)),
+        SlotState::Playing { clip: ClipId(0) }
+    );
+    for slot in [3, 5] {
+        assert!(
+            matches!(
+                harness.engine.state(addr(0, slot)),
+                SlotState::Stopped { .. }
+            ),
+            "slot {slot} stopped on the boundary"
+        );
+    }
+}
+
+#[test]
+fn turning_multiple_off_on_one_track_leaves_the_others_alone() {
+    let mut harness = Harness::new(128);
+    harness.setting(|settings| {
+        settings.polyphony[0] = Polyphony::Multiple;
+        settings.polyphony[1] = Polyphony::Multiple;
+    });
+
+    record(&mut harness, addr(0, 0), 0, 1);
+    let at = harness.position();
+    record(&mut harness, addr(0, 1), at, 1);
+    let at = harness.position();
+    record(&mut harness, addr(1, 0), at, 1);
+    let at = harness.position();
+    record(&mut harness, addr(1, 1), at, 1);
+
+    harness.setting(|settings| settings.polyphony[0] = Polyphony::Single);
+
+    assert!(
+        matches!(
+            harness.engine.state(addr(0, 1)),
+            SlotState::QueuedStop { .. }
+        ),
+        "the track that changed is folded"
+    );
+    assert_eq!(
+        harness.engine.state(addr(1, 1)),
+        SlotState::Playing { clip: ClipId(3) },
+        "the track that did not is untouched"
+    );
 }

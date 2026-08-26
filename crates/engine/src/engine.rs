@@ -9,9 +9,9 @@
 //! exact frame it was scheduled for rather than at the next block edge.
 
 use free_loop_core::{
-    BarGrid, ClipId, Command, Ctx, Effect, Event, Frames, LaunchMode, PadMask, SLOT_COUNT,
-    SampleRate, SessionModel, Settings, SlotAddr, SlotState, Subdivision, TRACK_COUNT, Tempo,
-    TimeError, TimeSignature, TrackInput, UNITY_STEP, gain_for_step, pad_bit,
+    BarGrid, ClipId, Command, Ctx, Effect, Event, Frames, LaunchMode, PadMask, Polyphony,
+    SLOT_COUNT, SampleRate, SessionModel, Settings, SlotAddr, SlotState, Subdivision, TRACK_COUNT,
+    Tempo, TimeError, TimeSignature, TrackId, TrackInput, UNITY_STEP, gain_for_step, pad_bit,
 };
 
 use std::sync::Arc;
@@ -472,6 +472,8 @@ pub struct Engine {
     soloed: PadMask,
     /// How loud each track plays, as a step on the gain ladder.
     gains: [u8; TRACK_COUNT],
+    /// How many of each track's loops may sound at once.
+    polyphony: [Polyphony; TRACK_COUNT],
     /// The gain each pad is mixing at, which slides toward what it should be.
     levels: [[f32; SLOT_COUNT]; TRACK_COUNT],
     /// Frames a level takes to travel the full gain range.
@@ -551,6 +553,7 @@ impl Engine {
             muted: 0,
             soloed: 0,
             gains: [UNITY_STEP; TRACK_COUNT],
+            polyphony: [Polyphony::default(); TRACK_COUNT],
             levels: [[0.0; SLOT_COUNT]; TRACK_COUNT],
             declick: as_usize(config.declick.0),
             pending: None,
@@ -688,9 +691,12 @@ impl Engine {
         let ctx = self.ctx();
 
         match command {
-            Command::Press(addr) => self.with_session(|session, audio| {
-                session.press(addr, &ctx, &mut |a, e| audio.apply(a, e, sink));
-            }),
+            Command::Press(addr) => {
+                let polyphony = self.polyphony[addr.track.index()];
+                self.with_session(|session, audio| {
+                    session.press(addr, &ctx, polyphony, &mut |a, e| audio.apply(a, e, sink));
+                });
+            }
             Command::Clear(addr) => self.with_session(|session, audio| {
                 session.clear(addr, &ctx, &mut |a, e| audio.apply(a, e, sink));
             }),
@@ -721,24 +727,38 @@ impl Engine {
             Command::SetClickSubdivision(subdivision) => self.subdivision = subdivision,
             Command::SetTempo(tempo) => self.set_tempo(tempo, sink),
             Command::SetTimeSignature(signature) => self.set_time_signature(signature, sink),
-            Command::SetSettings(settings) => self.apply_settings(settings),
+            Command::SetSettings(settings) => self.apply_settings(settings, sink),
         }
 
         self.settle_refusals(sink);
         self.emit_changes(&before, sink);
     }
 
-    /// Takes the latest whole-state settings.
+    /// Takes the latest whole-state settings, folding any track that has just left
+    /// [`Polyphony::Multiple`].
     ///
     /// A take in progress keeps the input it started on, and a clip already sounding
     /// keeps the anchor it was launched with.
-    pub fn apply_settings(&mut self, settings: Settings) {
+    fn apply_settings(&mut self, settings: Settings, sink: &mut impl EventSink) {
+        let before = self.polyphony;
         self.gains = settings.gains;
         self.muted = settings.muted;
         self.soloed = settings.soloed;
         self.audio.inputs = settings.inputs;
         self.audio.launch_modes = settings.launch_modes;
         self.audio.pickups = settings.pickups;
+        self.polyphony = settings.polyphony;
+
+        let ctx = self.ctx();
+        for track in TrackId::all() {
+            let index = track.index();
+            if before[index].is_exclusive() || settings.polyphony[index] != Polyphony::Single {
+                continue;
+            }
+            self.with_session(|session, audio| {
+                session.fold_to_one(track, &ctx, &mut |a, e| audio.apply(a, e, sink));
+            });
+        }
     }
 
     /// Empties any pad that was armed but could not be given storage.

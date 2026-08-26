@@ -8,14 +8,16 @@
 use core::time::Duration;
 
 use free_loop_core::{
-    Command, Event, LaunchMode, MAX_BPM, MIN_BPM, SLOT_COUNT, SessionModel, Settings, SlotAddr,
-    Subdivision, TRACK_COUNT, Tempo, TimeSignature, TrackInput, UNITY_STEP, column_mask, pad_bit,
-    row_mask,
+    Command, Event, LaunchMode, MAX_BPM, MIN_BPM, Polyphony, SLOT_COUNT, SessionModel, Settings,
+    SlotAddr, Subdivision, TRACK_COUNT, Tempo, TimeSignature, TrackInput, UNITY_STEP, column_mask,
+    pad_bit, row_mask,
 };
 use free_loop_surface::{Control, Led, LedColor, LedFrame, SHADES, SIDE_COUNT, SurfaceEvent};
 
 use crate::paint;
-use crate::paint::{Axis, Chrome, NO_PAD, PICKUP_COLUMN, RESTART_COLUMN, SELECTED, YES_PAD};
+use crate::paint::{
+    Axis, Chrome, NO_PAD, PICKUP_COLUMN, POLYPHONY_COLUMN, RESTART_COLUMN, SELECTED, YES_PAD,
+};
 use crate::screen::{self, Button, Role};
 
 /// Beats per minute one press of the tempo buttons moves.
@@ -231,6 +233,7 @@ impl Controller {
             inputs: [TrackInput::default(); TRACK_COUNT],
             launch_modes: [LaunchMode::Follow; TRACK_COUNT],
             pickups: [0; TRACK_COUNT],
+            polyphony: [Polyphony::Single; TRACK_COUNT],
             input_count: 2,
             beat: 0,
             beat_lit: true,
@@ -386,6 +389,9 @@ impl Controller {
                 let next = self.chrome.pickups[track] + 1;
                 self.chrome.pickups[track] = if next > degrees { 0 } else { next };
             }
+            POLYPHONY_COLUMN => {
+                self.chrome.polyphony[track] = self.chrome.polyphony[track].toggled();
+            }
             _ => return,
         }
         self.mark_settings();
@@ -400,6 +406,18 @@ impl Controller {
     /// Takes the pickup settings a loaded session came with.
     pub fn set_pickups(&mut self, pickups: [u8; TRACK_COUNT]) {
         self.chrome.pickups = pickups;
+        self.mark_settings();
+        self.dirty = true;
+    }
+
+    /// How many of each track's loops may sound at once.
+    pub fn polyphony(&self) -> [Polyphony; TRACK_COUNT] {
+        self.chrome.polyphony
+    }
+
+    /// Takes the polyphony settings a loaded session came with.
+    pub fn set_polyphony(&mut self, polyphony: [Polyphony; TRACK_COUNT]) {
+        self.chrome.polyphony = polyphony;
         self.mark_settings();
         self.dirty = true;
     }
@@ -1191,6 +1209,7 @@ impl Controller {
             inputs: self.chrome.inputs,
             launch_modes: self.chrome.launch_modes,
             pickups: self.chrome.pickups,
+            polyphony: self.chrome.polyphony,
         }
     }
 
@@ -3223,6 +3242,53 @@ mod tests {
             controller.on_surface(press, T0);
             assert_eq!(controller.pickups()[2], beats);
         }
+    }
+
+    #[test]
+    fn the_third_settings_column_toggles_a_track_between_single_and_multiple() {
+        let mut controller = controller();
+        controller.on_surface(side(SETTINGS_SIDE), T0);
+        let column = u8::try_from(POLYPHONY_COLUMN).unwrap();
+        let pad = SlotAddr::new(TrackId::new(2).unwrap(), SlotId::new(column).unwrap());
+        let press = SurfaceEvent::PadPressed {
+            addr: pad,
+            velocity: 127,
+        };
+
+        assert_eq!(controller.polyphony()[2], Polyphony::Single, "single first");
+        controller.on_surface(press, T0);
+        assert_eq!(controller.polyphony()[2], Polyphony::Multiple);
+        controller.on_surface(press, T0);
+        assert_eq!(controller.polyphony()[2], Polyphony::Single);
+
+        assert!(
+            controller.polyphony()[3].is_exclusive(),
+            "the other tracks are left alone"
+        );
+    }
+
+    #[test]
+    fn the_polyphony_a_track_is_on_reaches_the_engine() {
+        let mut controller = controller();
+        controller.on_surface(side(SETTINGS_SIDE), T0);
+        let column = u8::try_from(POLYPHONY_COLUMN).unwrap();
+        controller.on_surface(
+            SurfaceEvent::PadPressed {
+                addr: SlotAddr::new(TrackId::new(5).unwrap(), SlotId::new(column).unwrap()),
+                velocity: 127,
+            },
+            T0,
+        );
+
+        let settings = controller
+            .drain_work()
+            .filter_map(|work| match work {
+                Work::Command(Command::SetSettings(settings)) => Some(settings),
+                _ => None,
+            })
+            .next_back()
+            .expect("the change was published");
+        assert_eq!(settings.polyphony[5], Polyphony::Multiple);
     }
 
     #[test]
