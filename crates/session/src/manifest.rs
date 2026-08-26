@@ -99,14 +99,11 @@ pub struct TrackEntry {
     pub pan: u8,
 }
 
-/// The format written today, where a clip's level is the loop's own trim.
-pub const VERSION: u32 = 2;
+/// The format written today.
+pub const VERSION: u32 = 1;
 
-/// The format where a clip's level was its track's.
-pub const FIRST_VERSION: u32 = 1;
-
-fn first_version() -> u32 {
-    FIRST_VERSION
+fn version() -> u32 {
+    VERSION
 }
 
 /// Dead centre, for a session saved before tracks carried a pan.
@@ -117,10 +114,8 @@ fn centre() -> u8 {
 /// Everything a session holds apart from the audio itself.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
-    /// The format this was written in.
-    ///
-    /// Absent means the first, where a clip carried its track's level. See [`VERSION`].
-    #[serde(default = "first_version")]
+    /// The format this was written in. See [`VERSION`].
+    #[serde(default = "version")]
     pub version: u32,
     /// Beats per minute.
     pub tempo: f64,
