@@ -1,0 +1,38 @@
+name: Lint commits
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-commits:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Install Commitlint
+        run: |
+          npm install --no-save --no-package-lock \
+            @commitlint/cli@21 \
+            @commitlint/config-conventional@21
+
+      - name: Lint commits
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          ./node_modules/.bin/commitlint \
+            --config .commitlintrc.yml \
+            --from "$BASE_SHA" \
+            --to "$HEAD_SHA" \
+            --verbose
