@@ -8,9 +8,9 @@
 use core::time::Duration;
 
 use free_loop_core::{
-    Command, Event, LaunchMode, MAX_BPM, MIN_BPM, Polyphony, SLOT_COUNT, SessionModel, Settings,
-    SlotAddr, Subdivision, TRACK_COUNT, Tempo, TimeSignature, TrackInput, UNITY_STEP, column_mask,
-    pad_bit, row_mask,
+    CENTRE_STEP, Command, Event, LaunchMode, MAX_BPM, MIN_BPM, PAN_STEPS, Polyphony, SLOT_COUNT,
+    SessionModel, Settings, SlotAddr, Subdivision, TRACK_COUNT, Tempo, TimeSignature, TrackInput,
+    UNITY_STEP, column_mask, pad_bit, row_mask,
 };
 use free_loop_surface::{Control, Led, LedColor, LedFrame, SHADES, SIDE_COUNT, SurfaceEvent};
 
@@ -69,6 +69,8 @@ pub enum Mode {
     Solo,
     /// How loud each track plays.
     Volume,
+    /// Where each track sits across the stereo field.
+    Pan,
     /// Which input each track records.
     Input,
     /// One row of settings per track.
@@ -94,6 +96,7 @@ impl Mode {
             | Self::Mute
             | Self::Solo
             | Self::Volume
+            | Self::Pan
             | Self::Input
             | Self::Settings
             | Self::TimeSignature
@@ -234,6 +237,7 @@ impl Controller {
             launch_modes: [LaunchMode::Follow; TRACK_COUNT],
             pickups: [0; TRACK_COUNT],
             polyphony: [Polyphony::Single; TRACK_COUNT],
+            pans: [CENTRE_STEP; TRACK_COUNT],
             input_count: 2,
             beat: 0,
             beat_lit: true,
@@ -350,6 +354,17 @@ impl Controller {
         self.dirty = true;
     }
 
+    /// Moves the pad's track across the stereo field. Pads past the row do nothing.
+    fn set_pan(&mut self, addr: SlotAddr) {
+        if addr.slot.index() >= PAN_STEPS {
+            return;
+        }
+        let step = u8::try_from(addr.slot.index()).unwrap_or(CENTRE_STEP);
+        self.chrome.pans[addr.track.index()] = step;
+        self.mark_settings();
+        self.dirty = true;
+    }
+
     /// Sets which channels the pad's track records, if the device offers them.
     ///
     /// A press on its own takes that one channel. A press while another pad on the same
@@ -406,6 +421,18 @@ impl Controller {
     /// Takes the pickup settings a loaded session came with.
     pub fn set_pickups(&mut self, pickups: [u8; TRACK_COUNT]) {
         self.chrome.pickups = pickups;
+        self.mark_settings();
+        self.dirty = true;
+    }
+
+    /// Where each track sits across the stereo field.
+    pub fn pans(&self) -> [u8; TRACK_COUNT] {
+        self.chrome.pans
+    }
+
+    /// Takes the pan settings a loaded session came with.
+    pub fn set_pans(&mut self, pans: [u8; TRACK_COUNT]) {
+        self.chrome.pans = pans;
         self.mark_settings();
         self.dirty = true;
     }
@@ -507,6 +534,7 @@ impl Controller {
         self.chrome.launch_modes = [self.default_launch_mode; TRACK_COUNT];
         self.chrome.pickups = [0; TRACK_COUNT];
         self.chrome.polyphony = [Polyphony::Single; TRACK_COUNT];
+        self.chrome.pans = [CENTRE_STEP; TRACK_COUNT];
         self.mark_settings();
         self.command(Command::ClearAll);
         self.command(Command::SetPaused(false));
@@ -816,6 +844,7 @@ impl Controller {
             Role::LoadFrom => self.press_load(addr),
             Role::Group => self.toggle_group(addr),
             Role::Level => self.set_level(addr),
+            Role::Pan => self.set_pan(addr),
             Role::InputChannel => self.press_input(addr),
             Role::Setting => self.toggle_setting(addr),
             Role::Beats(_) | Role::Unit(_) => self.press_time_signature(addr, now),
@@ -1211,6 +1240,7 @@ impl Controller {
             launch_modes: self.chrome.launch_modes,
             pickups: self.chrome.pickups,
             polyphony: self.chrome.polyphony,
+            pans: self.chrome.pans,
         }
     }
 
@@ -1280,6 +1310,8 @@ impl Controller {
 
         self.frame = if self.mode == Mode::Volume {
             paint::volumes(self.chrome)
+        } else if self.mode == Mode::Pan {
+            paint::pans(self.chrome)
         } else if self.mode == Mode::Input {
             paint::inputs(self.chrome)
         } else if self.mode == Mode::Settings {
@@ -1324,7 +1356,7 @@ mod tests {
 
     use super::*;
     use crate::paint::{
-        BEATS_ROW, INPUT_SIDE, MUTE_SIDE, NEW_SIDE, PAUSE_SIDE, SETTINGS_SIDE, SOLO_SIDE,
+        BEATS_ROW, INPUT_SIDE, MUTE_SIDE, NEW_SIDE, PAN_SIDE, PAUSE_SIDE, SETTINGS_SIDE, SOLO_SIDE,
         SUBDIVISION_ROW, UNIT_ROW, VOLUME_SIDE,
     };
     use free_loop_core::{ClipId, Frames, SlotId, SlotState, TrackId, column_mask, row_mask};
@@ -3293,6 +3325,66 @@ mod tests {
     }
 
     #[test]
+    fn a_pan_pad_puts_its_track_where_the_column_says() {
+        let mut controller = controller();
+        controller.on_surface(side(PAN_SIDE), T0);
+        assert_eq!(controller.mode(), Mode::Pan);
+
+        let press = |slot: u8| SurfaceEvent::PadPressed {
+            addr: SlotAddr::new(TrackId::new(4).unwrap(), SlotId::new(slot).unwrap()),
+            velocity: 127,
+        };
+        controller.on_surface(press(0), T0);
+        assert_eq!(controller.pans()[4], 0, "hard left");
+        controller.on_surface(press(6), T0);
+        assert_eq!(controller.pans()[4], 6, "hard right");
+        controller.on_surface(press(CENTRE_STEP), T0);
+        assert_eq!(controller.pans()[4], CENTRE_STEP);
+    }
+
+    #[test]
+    fn the_pad_past_the_pan_row_does_nothing() {
+        let mut controller = controller();
+        controller.on_surface(side(PAN_SIDE), T0);
+        let last = u8::try_from(SLOT_COUNT - 1).unwrap();
+        controller.on_surface(
+            SurfaceEvent::PadPressed {
+                addr: SlotAddr::new(TrackId::new(0).unwrap(), SlotId::new(last).unwrap()),
+                velocity: 127,
+            },
+            T0,
+        );
+        assert_eq!(
+            controller.pans()[0],
+            CENTRE_STEP,
+            "the column past the row is not a pan"
+        );
+    }
+
+    #[test]
+    fn a_pan_reaches_the_engine() {
+        let mut controller = controller();
+        controller.on_surface(side(PAN_SIDE), T0);
+        controller.on_surface(
+            SurfaceEvent::PadPressed {
+                addr: SlotAddr::new(TrackId::new(2).unwrap(), SlotId::new(0).unwrap()),
+                velocity: 127,
+            },
+            T0,
+        );
+
+        let settings = controller
+            .drain_work()
+            .filter_map(|work| match work {
+                Work::Command(Command::SetSettings(settings)) => Some(settings),
+                _ => None,
+            })
+            .next_back()
+            .expect("the change was published");
+        assert_eq!(settings.pans[2], 0);
+    }
+
+    #[test]
     fn a_hold_does_not_survive_leaving_the_input_page() {
         let mut controller = controller();
         controller.set_input_count(4);
@@ -3327,6 +3419,9 @@ mod tests {
         let mut polyphony = [Polyphony::Single; TRACK_COUNT];
         polyphony[7] = Polyphony::Multiple;
         controller.set_polyphony(polyphony);
+        let mut pans = [CENTRE_STEP; TRACK_COUNT];
+        pans[7] = 0;
+        controller.set_pans(pans);
         let _ = commands(&mut controller);
 
         controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
@@ -3336,6 +3431,7 @@ mod tests {
         assert_eq!(controller.inputs(), [TrackInput::default(); TRACK_COUNT]);
         assert_eq!(controller.pickups(), [0; TRACK_COUNT]);
         assert_eq!(controller.polyphony(), [Polyphony::Single; TRACK_COUNT]);
+        assert_eq!(controller.pans(), [CENTRE_STEP; TRACK_COUNT]);
     }
 
     #[test]

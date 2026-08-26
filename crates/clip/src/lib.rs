@@ -4,7 +4,7 @@
 //! Nothing here allocates or frees once audio is running: buffers hand their segments
 //! back to the pool they came from instead of dropping them.
 
-use free_loop_core::Frames;
+use free_loop_core::{Frames, Pan};
 
 /// Frames in one segment. At 48 kHz this is about 1.4 s.
 pub const SEGMENT_FRAMES: usize = 65_536;
@@ -73,6 +73,58 @@ impl Ramp {
         Self {
             start: self.at(frames),
             step: self.step,
+        }
+    }
+}
+
+/// Channels a pan can place a source across.
+const STEREO: usize = 2;
+
+/// A pan that may move across a block, rather than switching between blocks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PanRamp {
+    left: Ramp,
+    right: Ramp,
+    width: Ramp,
+}
+
+impl PanRamp {
+    /// Dead centre for the whole block.
+    pub const CENTRE: Self = Self::constant(Pan::CENTRE);
+
+    /// A pan that holds for the whole block.
+    pub const fn constant(pan: Pan) -> Self {
+        Self {
+            left: Ramp::constant(pan.left()),
+            right: Ramp::constant(pan.right()),
+            width: Ramp::constant(pan.width()),
+        }
+    }
+
+    /// A pan that travels from `start` to `end` over `frames`.
+    pub fn new(start: Pan, end: Pan, frames: usize) -> Self {
+        Self {
+            left: Ramp::new(start.left(), end.left(), frames),
+            right: Ramp::new(start.right(), end.right(), frames),
+            width: Ramp::new(start.width(), end.width(), frames),
+        }
+    }
+
+    /// The gains at frame `frame` of the block, as left, right and width.
+    fn at(self, frame: usize) -> (f32, f32, f32) {
+        (
+            self.left.at(frame),
+            self.right.at(frame),
+            self.width.at(frame),
+        )
+    }
+
+    /// The same pan as seen from `frames` in, for mixing a block in pieces.
+    fn from(self, frames: usize) -> Self {
+        Self {
+            left: self.left.from(frames),
+            right: self.right.from(frames),
+            width: self.width.from(frames),
         }
     }
 }
@@ -334,12 +386,31 @@ impl AudioBuffer {
     /// Adds `run` frames starting at `frame` into `dst`.
     ///
     /// Segments that were never written read as silence.
-    fn add_into(&self, frame: u64, dst: &mut [f32], run: usize, ramp: Ramp) {
+    fn add_into(&self, frame: u64, dst: &mut [f32], run: usize, ramp: Ramp, pan: PanRamp) {
         let (index, offset) = split(frame);
         let Some(Some(segment)) = self.segments.get(index) else {
             return;
         };
         let src = &segment.data[offset * self.channels..(offset + run) * self.channels];
+
+        // A centred pan takes the plain path: the mid/side round trip is only exact in
+        // real arithmetic, and every track sits here until one is moved.
+        if self.channels == STEREO && pan != PanRamp::CENTRE {
+            for (position, (out, sample)) in dst
+                .chunks_exact_mut(STEREO)
+                .zip(src.chunks_exact(STEREO))
+                .enumerate()
+            {
+                let gain = ramp.at(position);
+                let (left, right, width) = pan.at(position);
+                let mid = (sample[0] + sample[1]) * 0.5;
+                let side = (sample[0] - sample[1]) * 0.5 * width;
+                out[0] += (mid + side) * gain * left;
+                out[1] += (mid - side) * gain * right;
+            }
+            return;
+        }
+
         for (position, (out, sample)) in dst
             .chunks_exact_mut(self.channels)
             .zip(src.chunks_exact(self.channels))
@@ -524,7 +595,7 @@ impl Clip {
     /// For a clip whose playback position is decided when it is launched rather than when
     /// it was recorded. Otherwise as [`Clip::mix_into`].
     pub fn mix_from(&self, anchor: Frames, position: Frames, dst: &mut [f32], ramp: Ramp) {
-        self.mix_pickup(anchor, position, dst, ramp, Frames::ZERO);
+        self.mix_pickup(anchor, position, dst, ramp, Frames::ZERO, PanRamp::CENTRE);
     }
 
     /// Adds the loop into `dst`, opening its first `pickup` frames from the tail.
@@ -537,6 +608,7 @@ impl Clip {
         dst: &mut [f32],
         ramp: Ramp,
         pickup: Frames,
+        pan: PanRamp,
     ) {
         let len = self.len.0;
         if len == 0 || ramp.is_silent() {
@@ -561,7 +633,8 @@ impl Clip {
                 .min(as_usize(limit - phase));
 
             let slice = &mut dst[done * self.channels..(done + run) * self.channels];
-            self.buffer.add_into(source, slice, run, ramp.from(done));
+            self.buffer
+                .add_into(source, slice, run, ramp.from(done), pan.from(done));
 
             done += run;
             phase += run as u64;
@@ -583,6 +656,7 @@ mod tests {
     )]
 
     use super::*;
+    use free_loop_core::{CENTRE_STEP, PAN_STEPS, pan_for_step};
 
     const CH: usize = 2;
 
@@ -640,6 +714,105 @@ mod tests {
         let mut out = vec![0.0; 4];
         clip.mix_into(Frames(0), &mut out, Ramp::new(0.0, 1.0, 4));
         assert_eq!(out, vec![0.0, 0.25, 0.5, 0.75]);
+    }
+
+    /// A two-frame stereo clip with different content on each channel.
+    fn lopsided() -> Clip {
+        let mut pool = SegmentPool::new(1, CH);
+        let mut buffer = AudioBuffer::new(1, CH);
+        buffer.write(0, &[1.0, 0.0, 1.0, 0.0], &mut pool);
+        Clip::new(buffer, Frames(2), Frames(0), CH)
+    }
+
+    #[test]
+    fn a_centred_pan_leaves_the_source_untouched() {
+        let clip = lopsided();
+        let mut out = vec![0.0; 2 * CH];
+        clip.mix_pickup(
+            Frames(0),
+            Frames(0),
+            &mut out,
+            Ramp::UNITY,
+            Frames::ZERO,
+            PanRamp::CENTRE,
+        );
+        assert_eq!(out, vec![1.0, 0.0, 1.0, 0.0], "left stays left");
+    }
+
+    #[test]
+    fn a_hard_pan_sums_both_channels_onto_the_side_it_lands_on() {
+        let clip = lopsided();
+        let mut out = vec![0.0; 2 * CH];
+        let hard_right = PanRamp::constant(pan_for_step(6));
+        clip.mix_pickup(
+            Frames(0),
+            Frames(0),
+            &mut out,
+            Ramp::UNITY,
+            Frames::ZERO,
+            hard_right,
+        );
+
+        assert_eq!(out[0], 0.0, "nothing is left on the left");
+        // The source summed to mono is 0.5, at the far end of a constant-power sweep.
+        let hard = 0.5 * std::f32::consts::SQRT_2;
+        assert!((out[1] - hard).abs() < 1e-6, "got {}", out[1]);
+    }
+
+    #[test]
+    fn a_hard_pan_keeps_the_power_a_centred_one_had() {
+        let mut pool = SegmentPool::new(1, CH);
+        let mut buffer = AudioBuffer::new(1, CH);
+        // The same signal on both channels, which is what a mono input records.
+        buffer.write(0, &[1.0, 1.0], &mut pool);
+        let clip = Clip::new(buffer, Frames(1), Frames(0), CH);
+
+        let power = |step: u8| {
+            let mut out = vec![0.0; CH];
+            clip.mix_pickup(
+                Frames(0),
+                Frames(0),
+                &mut out,
+                Ramp::UNITY,
+                Frames::ZERO,
+                PanRamp::constant(pan_for_step(step)),
+            );
+            out[0].mul_add(out[0], out[1] * out[1])
+        };
+
+        let centre = power(CENTRE_STEP);
+        assert_eq!(
+            centre, 2.0,
+            "a centred track plays as recorded on both sides"
+        );
+        for step in 0..u8::try_from(PAN_STEPS).unwrap() {
+            assert!(
+                (power(step) - centre).abs() < 1e-5,
+                "step {step} changes level"
+            );
+        }
+    }
+
+    #[test]
+    fn a_moving_pan_travels_across_the_block() {
+        let mut pool = SegmentPool::new(1, CH);
+        let mut buffer = AudioBuffer::new(1, CH);
+        buffer.write(0, &[1.0, 1.0, 1.0, 1.0], &mut pool);
+        let clip = Clip::new(buffer, Frames(2), Frames(0), CH);
+
+        let mut out = vec![0.0; 2 * CH];
+        clip.mix_pickup(
+            Frames(0),
+            Frames(0),
+            &mut out,
+            Ramp::UNITY,
+            Frames::ZERO,
+            PanRamp::new(Pan::CENTRE, pan_for_step(6), 2),
+        );
+
+        assert_eq!(out[0], 1.0, "the first frame is still centred");
+        assert!(out[2] < out[0], "and the left has begun to give way");
+        assert!(out[3] > out[1], "as the right takes over");
     }
 
     #[test]

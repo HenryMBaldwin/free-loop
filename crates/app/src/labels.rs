@@ -142,6 +142,7 @@ mod tests {
             Mode::Mute,
             Mode::Solo,
             Mode::Volume,
+            Mode::Pan,
             Mode::Input,
             Mode::Settings,
             Mode::TimeSignature,

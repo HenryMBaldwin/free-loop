@@ -640,6 +640,7 @@ fn load_session(
                 }
             }));
             controller.set_pickups(core::array::from_fn(|track| restored.tracks[track].pickup));
+            controller.set_pans(core::array::from_fn(|track| restored.tracks[track].pan));
             controller.set_polyphony(core::array::from_fn(|track| {
                 if restored.tracks[track].multiple {
                     free_loop_core::Polyphony::Multiple
@@ -806,6 +807,7 @@ fn save_settings(controller: &Controller) -> SaveSettings {
     let modes = controller.launch_modes();
     let pickups = controller.pickups();
     let polyphony = controller.polyphony();
+    let pans = controller.pans();
     let gains = controller.gains();
     SaveSettings {
         tempo: controller.tempo(),
@@ -816,6 +818,7 @@ fn save_settings(controller: &Controller) -> SaveSettings {
             pickup: pickups[track],
             gain_step: gains[track],
             multiple: !polyphony[track].is_exclusive(),
+            pan: pans[track],
         }),
     }
 }

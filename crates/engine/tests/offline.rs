@@ -12,8 +12,8 @@
 
 use free_loop_clip::{AudioBuffer, Clip, SegmentPool};
 use free_loop_core::{
-    ClipId, Command, Event, Frames, Polyphony, Settings, SlotAddr, SlotId, SlotState, Subdivision,
-    Tempo, TimeSignature, TrackId,
+    CENTRE_STEP, ClipId, Command, Event, Frames, Polyphony, Settings, SlotAddr, SlotId, SlotState,
+    Subdivision, Tempo, TimeSignature, TrackId,
 };
 use free_loop_engine::{ClickConfig, Engine, EngineConfig, Housekeeping, Snapshot};
 use std::sync::Arc;
@@ -2451,6 +2451,35 @@ mod declick {
     /// Frames a level takes to travel the full range in these tests. Two blocks of 128.
     const RAMP: u64 = 256;
 
+    #[test]
+    fn a_pan_change_travels_rather_than_jumping() {
+        let mut harness = Harness::with_declick(128, Frames(RAMP));
+        let pad = addr(0, 0);
+        record(&mut harness, pad, 0, 1);
+        harness.run_frames(512);
+
+        harness.setting(|settings| settings.pans[0] = 0);
+        // One block, which is half the length the sweep takes.
+        let out = harness.run_frames(128);
+        let right = out
+            .chunks_exact(2)
+            .map(|frame| frame[1].abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            right > 0.0,
+            "the right still sounds while the pan is moving"
+        );
+
+        // And it has arrived by the time the ramp is over.
+        harness.run_frames(512);
+        let out = harness.run_frames(512);
+        let right = out
+            .chunks_exact(2)
+            .map(|frame| frame[1].abs())
+            .fold(0.0_f32, f32::max);
+        assert!(right < 1e-4, "the sweep finished, got {right}");
+    }
+
     /// Blocks for a fade, plus the one that carries out what was waiting on it.
     const BLOCKS: usize = 3;
 
@@ -3029,4 +3058,66 @@ fn leaving_multiple_mid_take_hands_the_track_to_the_take() {
             "slot {slot} hands over to the take"
         );
     }
+}
+
+/// The peak the loop puts out on each side, once a pan change has settled.
+fn sides(harness: &mut Harness) -> (f32, f32) {
+    let out = harness.run_frames(4_096);
+    let peak = |channel: usize| {
+        out.chunks_exact(2)
+            .map(|frame| frame[channel].abs())
+            .fold(0.0_f32, f32::max)
+    };
+    (peak(0), peak(1))
+}
+
+#[test]
+fn panning_a_track_moves_it_across_the_field() {
+    let mut harness = Harness::new(128);
+    let pad = addr(0, 0);
+    record(&mut harness, pad, 0, 1);
+
+    let (left, right) = sides(&mut harness);
+    assert!(
+        (left - right).abs() < 1e-4,
+        "a fresh track is centred, got {left} and {right}"
+    );
+
+    harness.setting(|settings| settings.pans[0] = 6);
+    // Long enough for the sweep to arrive.
+    harness.run_frames(4_096);
+    let (left, right) = sides(&mut harness);
+    assert!(left < 1e-4, "nothing is left on the left, got {left}");
+    assert!(right > 0.0);
+
+    harness.setting(|settings| settings.pans[0] = 0);
+    harness.run_frames(4_096);
+    let (left, right) = sides(&mut harness);
+    assert!(right < 1e-4, "and none on the right, got {right}");
+    assert!(left > 0.0);
+}
+
+#[test]
+fn a_pan_only_moves_the_track_it_was_set_on() {
+    let mut harness = Harness::new(128);
+    record(&mut harness, addr(0, 0), 0, 1);
+    let at = harness.position();
+    record(&mut harness, addr(1, 0), at, 1);
+
+    harness.setting(|settings| settings.pans[0] = 0);
+    harness.run_frames(8_192);
+
+    // Track 1 is still centred, which keeps the right sounding.
+    let (left, right) = sides(&mut harness);
+    assert!(right > 0.0, "the other track holds its place");
+    assert!(left > right, "and the panned one has moved");
+}
+
+#[test]
+fn a_track_starts_centred() {
+    let harness = Harness::new(128);
+    assert_eq!(
+        harness.settings.pans,
+        [CENTRE_STEP; free_loop_core::TRACK_COUNT]
+    );
 }
