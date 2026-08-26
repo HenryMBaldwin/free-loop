@@ -2951,3 +2951,82 @@ fn turning_multiple_off_on_one_track_leaves_the_others_alone() {
         "the track that did not is untouched"
     );
 }
+
+#[test]
+fn a_single_track_loaded_with_two_sounding_loops_is_folded() {
+    let mut harness = Harness::new(128);
+    // The engine never leaves Single here: there is no transition to fold on.
+    harness
+        .housekeeping
+        .loader
+        .begin(Tempo::new(120.0).unwrap(), TimeSignature::FOUR_FOUR)
+        .unwrap();
+    for pad in [addr(0, 1), addr(0, 3)] {
+        harness
+            .housekeeping
+            .loader
+            .clip(pad, lent_clip(4_096, 0), true, None)
+            .unwrap();
+    }
+    harness.housekeeping.loader.end().unwrap();
+    harness.run_frames(128);
+    for pad in [addr(0, 1), addr(0, 3)] {
+        assert!(
+            matches!(harness.engine.state(pad), SlotState::Playing { .. }),
+            "the session arrived with both sounding"
+        );
+    }
+
+    // The settings the loaded session came with, which say Single.
+    harness.setting(|settings| settings.polyphony[0] = Polyphony::Single);
+
+    assert!(
+        matches!(harness.engine.state(addr(0, 1)), SlotState::Playing { .. }),
+        "the first one on the row keeps playing"
+    );
+    assert!(
+        matches!(
+            harness.engine.state(addr(0, 3)),
+            SlotState::QueuedStop { .. }
+        ),
+        "and the second is folded away"
+    );
+}
+
+#[test]
+fn leaving_multiple_mid_take_hands_the_track_to_the_take() {
+    let mut harness = Harness::new(128);
+    harness.setting(|settings| settings.polyphony[0] = Polyphony::Multiple);
+
+    record(&mut harness, addr(0, 1), 0, 1);
+    let at = harness.position();
+    record(&mut harness, addr(0, 3), at, 1);
+
+    // A third take, still capturing.
+    harness.command(Command::Press(addr(0, 6)));
+    let starts = harness.position().div_ceil(BAR) * BAR;
+    harness.run_to(starts + 1);
+    assert!(matches!(
+        harness.engine.state(addr(0, 6)),
+        SlotState::Recording { .. }
+    ));
+
+    harness.setting(|settings| settings.polyphony[0] = Polyphony::Single);
+
+    assert!(
+        matches!(
+            harness.engine.state(addr(0, 6)),
+            SlotState::Recording { .. }
+        ),
+        "the take is not discarded"
+    );
+    for slot in [1, 3] {
+        assert!(
+            matches!(
+                harness.engine.state(addr(0, slot)),
+                SlotState::QueuedStop { .. }
+            ),
+            "slot {slot} hands over to the take"
+        );
+    }
+}

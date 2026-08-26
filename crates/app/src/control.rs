@@ -506,6 +506,7 @@ impl Controller {
         self.chrome.inputs = [self.default_input; TRACK_COUNT];
         self.chrome.launch_modes = [self.default_launch_mode; TRACK_COUNT];
         self.chrome.pickups = [0; TRACK_COUNT];
+        self.chrome.polyphony = [Polyphony::Single; TRACK_COUNT];
         self.mark_settings();
         self.command(Command::ClearAll);
         self.command(Command::SetPaused(false));
@@ -3323,6 +3324,9 @@ mod tests {
         let mut pickups = [0; TRACK_COUNT];
         pickups[7] = 2;
         controller.set_pickups(pickups);
+        let mut polyphony = [Polyphony::Single; TRACK_COUNT];
+        polyphony[7] = Polyphony::Multiple;
+        controller.set_polyphony(polyphony);
         let _ = commands(&mut controller);
 
         controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
@@ -3331,6 +3335,7 @@ mod tests {
         assert_eq!(controller.launch_modes(), [LaunchMode::Follow; TRACK_COUNT]);
         assert_eq!(controller.inputs(), [TrackInput::default(); TRACK_COUNT]);
         assert_eq!(controller.pickups(), [0; TRACK_COUNT]);
+        assert_eq!(controller.polyphony(), [Polyphony::Single; TRACK_COUNT]);
     }
 
     #[test]
