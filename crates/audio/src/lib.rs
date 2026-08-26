@@ -16,6 +16,8 @@ pub mod ring;
 pub mod stream;
 
 pub use config::{AudioConfig, Negotiated};
+// Named by [`Negotiated`], so a caller can build or match one without depending on cpal.
+pub use cpal::SampleFormat;
 pub use error::AudioError;
 pub use ring::{CaptureReader, CaptureWriter, ChannelMap, MAX_BLOCK_FRAMES};
 pub use stream::{

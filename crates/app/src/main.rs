@@ -1217,11 +1217,145 @@ fn report(event: Event) {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, reason = "tests should fail loudly")]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::float_cmp,
+        reason = "tests should fail loudly, and compare the exact values they set"
+    )]
 
     use super::*;
 
     const DEADLINE: Duration = Duration::from_secs(2);
+
+    /// An engine that never runs, so a pass can be driven without a device.
+    #[derive(Default)]
+    struct FakeAudio {
+        /// Commands it took, in the order it took them.
+        taken: Vec<Command>,
+        /// How many more it will take before the ring is full.
+        room: usize,
+        /// Reports to hand over on the next drain.
+        reports: Vec<Event>,
+        dropped: DroppedEvents,
+        offset: u32,
+    }
+
+    impl FakeAudio {
+        /// One with room for everything it is given.
+        fn new() -> Self {
+            Self {
+                room: usize::MAX,
+                ..Self::default()
+            }
+        }
+    }
+
+    impl Audio for FakeAudio {
+        fn send(&mut self, command: Command) -> Result<(), Command> {
+            if self.room == 0 {
+                return Err(command);
+            }
+            self.room -= 1;
+            self.taken.push(command);
+            Ok(())
+        }
+
+        fn drain_events(&mut self, mut handler: impl FnMut(Event)) {
+            for event in self.reports.drain(..) {
+                handler(event);
+            }
+        }
+
+        fn dropped_events(&self) -> DroppedEvents {
+            self.dropped
+        }
+
+        fn tick(&mut self, _now: Duration) -> Option<DeviceChange> {
+            None
+        }
+
+        fn capture_offset_frames(&self) -> u32 {
+            self.offset
+        }
+    }
+
+    /// Everything a pass needs, held together so a test can drive one.
+    struct Harness {
+        io: FakeAudio,
+        surface: free_loop_surface::MockSurface,
+        controller: Controller,
+        housekeeping: Housekeeping,
+        store: SessionStore,
+        config: Config,
+        running: AtomicBool,
+        state: Looping,
+        at: Duration,
+    }
+
+    impl Harness {
+        fn new(io: FakeAudio) -> Self {
+            let config = Config::parse("").unwrap();
+            let engine = free_loop_engine::EngineConfig::stereo_48k().unwrap();
+            let (_engine, housekeeping) = Engine::new(engine).unwrap();
+            Self {
+                io,
+                surface: free_loop_surface::MockSurface::new(),
+                controller: Controller::new(120.0, TimeSignature::FOUR_FOUR, true),
+                housekeeping,
+                store: SessionStore::new(std::env::temp_dir().join("free-loop-harness")),
+                config,
+                running: AtomicBool::new(true),
+                state: Looping::new(false),
+                at: Duration::ZERO,
+            }
+        }
+
+        fn negotiated() -> free_loop_audio::Negotiated {
+            free_loop_audio::Negotiated {
+                sample_rate: 48_000,
+                channels: 2,
+                input_channels: 2,
+                capture_channels: 2,
+                input_format: free_loop_audio::SampleFormat::F32,
+                output_format: free_loop_audio::SampleFormat::F32,
+                buffer_frames: None,
+                cushion_frames: 0,
+                capture_offset: None,
+            }
+        }
+
+        /// What the performer did, before the next pass picks it up.
+        fn press(&mut self, event: SurfaceEvent) {
+            self.surface.press(event);
+        }
+
+        /// Runs one pass, a tick later than the last.
+        fn pass(&mut self) {
+            self.at += TICK;
+            let mut session = Session {
+                io: &mut self.io,
+                surface: &mut self.surface,
+                controller: &mut self.controller,
+                housekeeping: &mut self.housekeeping,
+                store: &self.store,
+                config: &self.config,
+                negotiated: Self::negotiated(),
+                running: &self.running,
+                showing: None,
+            };
+            session.pass(&mut self.state, self.at);
+        }
+
+        /// Everything the engine has taken, ignoring the settings it starts with.
+        fn taken(&self) -> Vec<Command> {
+            self.io
+                .taken
+                .iter()
+                .filter(|command| !matches!(command, Command::SetSettings(_)))
+                .copied()
+                .collect()
+        }
+    }
 
     fn dropped(counts: &[(free_loop_core::EventKind, u64)]) -> DroppedEvents {
         let mut array = [0; free_loop_core::EventKind::COUNT];
@@ -1267,6 +1401,105 @@ mod tests {
             gains: [step; free_loop_core::TRACK_COUNT],
             ..free_loop_core::Settings::new()
         }
+    }
+
+    #[test]
+    fn a_gesture_reaches_the_engine_as_a_command() {
+        let mut harness = Harness::new(FakeAudio::new());
+        let pad = pad(2, 3);
+
+        harness.press(SurfaceEvent::PadPressed {
+            addr: pad,
+            velocity: 100,
+        });
+        harness.press(SurfaceEvent::PadReleased { addr: pad });
+        harness.pass();
+
+        assert_eq!(harness.taken(), vec![Command::Press(pad)]);
+    }
+
+    #[test]
+    fn a_full_engine_takes_the_rest_on_a_later_pass_in_order() {
+        let mut harness = Harness::new(FakeAudio::new());
+        let pad = pad(0, 0);
+        // The settings the controller starts on go out first, and would take the room.
+        harness.pass();
+        harness.io.taken.clear();
+
+        // Room for one, so the second waits without letting the third overtake it.
+        harness.io.room = 1;
+        harness.press(SurfaceEvent::ControlPressed(
+            free_loop_surface::Control::Rewind,
+        ));
+        harness.press(SurfaceEvent::ControlPressed(
+            free_loop_surface::Control::StopAll,
+        ));
+        harness.press(SurfaceEvent::PadPressed {
+            addr: pad,
+            velocity: 100,
+        });
+        harness.press(SurfaceEvent::PadReleased { addr: pad });
+        harness.pass();
+        assert_eq!(harness.taken(), vec![Command::Rewind], "one fitted");
+
+        harness.io.room = usize::MAX;
+        harness.pass();
+        assert_eq!(
+            harness.taken(),
+            vec![Command::Rewind, Command::StopAll, Command::Press(pad)],
+            "the rest follow in the order they were made"
+        );
+    }
+
+    #[test]
+    fn a_setting_reaches_the_engine_between_the_gestures_it_sits_between() {
+        let mut harness = Harness::new(FakeAudio::new());
+        let loop_pad = pad(0, 0);
+        let level = pad(1, 5);
+        let volume = u8::try_from(free_loop::paint::VOLUME_SIDE).unwrap();
+
+        // A press, then a level set on the volume screen, then another press.
+        harness.press(SurfaceEvent::PadPressed {
+            addr: loop_pad,
+            velocity: 100,
+        });
+        harness.press(SurfaceEvent::PadReleased { addr: loop_pad });
+        harness.press(SurfaceEvent::SidePressed { index: volume });
+        harness.press(SurfaceEvent::PadPressed {
+            addr: level,
+            velocity: 100,
+        });
+        harness.press(SurfaceEvent::SidePressed { index: volume });
+        harness.press(SurfaceEvent::ControlPressed(
+            free_loop_surface::Control::Rewind,
+        ));
+        harness.pass();
+
+        let kinds: Vec<&str> = harness
+            .io
+            .taken
+            .iter()
+            .map(|command| match command {
+                Command::Press(_) => "press",
+                Command::SetSettings(_) => "settings",
+                Command::Rewind => "rewind",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["settings", "press", "settings", "rewind"],
+            "the level lands between the two gestures, not before both"
+        );
+    }
+
+    #[test]
+    fn a_report_from_the_engine_reaches_the_controller() {
+        let mut harness = Harness::new(FakeAudio::new());
+        harness.io.reports.push(Event::Tempo { bpm: 90.0 });
+
+        harness.pass();
+        assert_eq!(harness.controller.tempo(), 90.0);
     }
 
     #[test]
