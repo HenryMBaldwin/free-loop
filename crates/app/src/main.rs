@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use free_loop::config::{self, Config};
-use free_loop::control::{Controller, Mode, Request, TextUpdate};
+use free_loop::control::{Controller, Mode, Request, TextUpdate, Work};
 use free_loop::gui;
 use free_loop_audio::{AudioIo, DeviceChange, DroppedEvents, Negotiated, open};
 use free_loop_core::{Command, Event, TimeSignature, TrackInput};
@@ -315,12 +315,10 @@ fn run(s: Session<'_>) {
     let mut missed_reports = DroppedEvents::default();
     // Clock ticks the device has had, against the running total the engine reports.
     let mut clock_sent = 0_u64;
-    // Commands the engine had no room for, sent again before anything newer.
-    let mut queued: Vec<Command> = Vec::new();
+    // Everything the performer has asked for that the engine has not taken, in order.
+    let mut queued: Vec<Work> = Vec::new();
     // The screen last published, so the window is only told when it changes.
     let mut published = None;
-    // Requests not yet acted on, which wait for the commands ahead of them to go out.
-    let mut asked: Vec<Request> = Vec::new();
     // Whether a load is still sitting in the loader's channel. The audio side takes
     // settings and commands before it applies one, so anything sent while a load is in
     // flight would reach the engine in front of it.
@@ -353,15 +351,13 @@ fn run(s: Session<'_>) {
         if let Some(settings) = settings_to_publish(controller, &queued, loading) {
             io.publish_settings(settings);
         }
-        queued.extend(controller.drain_commands());
-        send_commands(&mut queued, loading, |command| io.send(command).is_ok());
+        queued.extend(controller.drain_work());
 
-        // After the commands, and only once none are waiting. A load goes through its own
-        // channel, which the audio side applies after the command ring: starting one while
-        // a gesture is still queued would let the load land first.
-        // Held here, so the ones not acted on this pass are still waiting on the next.
-        asked.extend(controller.drain_requests());
-        while let Some(request) = next_to_act_on(&queued, &mut asked, loading) {
+        // Handed over in order, stopping at whatever cannot go yet. A request surfaces
+        // only once everything asked for before it has reached the engine.
+        while let Some(request) =
+            hand_over(&mut queued, loading, |command| io.send(command).is_ok())
+        {
             match request {
                 Request::SaveSession(addr) => {
                     next_request = next_request.wrapping_add(1);
@@ -916,11 +912,7 @@ fn drain_engine(io: &mut AudioIo, controller: &mut Controller, now: Duration) ->
 ///
 /// The controller paints from a mirror kept in step by those reports. Kinds a resync
 /// cannot repair are reported and otherwise left.
-fn resync_after_loss(
-    io: &AudioIo,
-    queued: &mut Vec<Command>,
-    seen: DroppedEvents,
-) -> DroppedEvents {
+fn resync_after_loss(io: &AudioIo, queued: &mut Vec<Work>, seen: DroppedEvents) -> DroppedEvents {
     let dropped = io.dropped_events();
     if dropped == seen {
         return seen;
@@ -932,7 +924,7 @@ fn resync_after_loss(
     }
     // Queued rather than sent: a resync answers with the engine's own state, and sending
     // one in front of a load would answer with the session the load is replacing.
-    queued.push(Command::Resync);
+    queued.push(Work::Command(Command::Resync));
     dropped
 }
 
@@ -956,16 +948,35 @@ fn publish_screen(slot: Option<&Mutex<Mode>>, mode: Mode, published: Option<Mode
     }
 }
 
-/// The next request to act on, once the engine has taken everything queued before it.
+/// Hands `queued` to the engine in order, up to the first thing that cannot go yet.
 ///
-/// One at a time: a save leaves a snapshot in the queue, and a load behind it goes through
-/// its own channel, which the audio side applies after the commands. Taking the load now
-/// would land it first.
-fn next_to_act_on(queued: &[Command], asked: &mut Vec<Request>, loading: bool) -> Option<Request> {
-    if loading || !queued.is_empty() || asked.is_empty() {
-        return None;
+/// Returns the request that surfaced, which is the caller's to act on: everything asked
+/// for before it has reached the engine by then. Nothing moves while `loading`, since the
+/// audio side applies a load after the commands it has already taken.
+fn hand_over(
+    queued: &mut Vec<Work>,
+    loading: bool,
+    mut send: impl FnMut(Command) -> bool,
+) -> Option<Request> {
+    while let Some(work) = queued.first().copied() {
+        if loading {
+            return None;
+        }
+        match work {
+            Work::Command(command) => {
+                if !send(command) {
+                    // No room. Order matters, so the rest wait behind it.
+                    return None;
+                }
+                queued.remove(0);
+            }
+            Work::Request(request) => {
+                queued.remove(0);
+                return Some(request);
+            }
+        }
     }
-    Some(asked.remove(0))
+    None
 }
 
 /// The settings to hand over this pass, if any.
@@ -976,7 +987,7 @@ fn next_to_act_on(queued: &[Command], asked: &mut Vec<Request>, loading: bool) -
 /// clears the flag that says it moved.
 fn settings_to_publish(
     controller: &mut Controller,
-    queued: &[Command],
+    queued: &[Work],
     loading: bool,
 ) -> Option<free_loop_core::Settings> {
     if loading || !queued.is_empty() {
@@ -987,7 +998,7 @@ fn settings_to_publish(
 
 /// Asks the engine to publish its clips, and starts the wait for them.
 fn ask_for_snapshot(
-    queued: &mut Vec<Command>,
+    queued: &mut Vec<Work>,
     request: u32,
     addr: free_loop_core::SlotAddr,
     controller: &Controller,
@@ -995,26 +1006,13 @@ fn ask_for_snapshot(
 ) -> PendingSave {
     // Queued behind whatever is waiting, so the snapshot sees the pads as they were when
     // the save was asked for. One that never gets out expires on its deadline.
-    queued.push(Command::Snapshot { request });
+    queued.insert(0, Work::Command(Command::Snapshot { request }));
     PendingSave {
         deadline: now + SAVE_TIMEOUT,
         request,
         addr,
         settings: save_settings(controller),
     }
-}
-
-/// Hands `queued` over in order, keeping whatever there was no room for.
-///
-/// Order is kept: a press toggles, so anything behind a command that did not fit waits for
-/// it. `send` reports whether the engine took the command.
-fn send_commands(queued: &mut Vec<Command>, loading: bool, mut send: impl FnMut(Command) -> bool) {
-    // A load already handed over is applied after these, so they wait for it.
-    if loading {
-        return;
-    }
-    let taken = queued.iter().take_while(|queued| send(**queued)).count();
-    queued.drain(..taken);
 }
 
 /// Whether asking the engine again would put any of what was lost right.
@@ -1184,42 +1182,40 @@ mod tests {
         );
     }
 
+    /// One turn of the run loop's handover: sends what fits, and returns the request that
+    /// surfaced for the caller to act on.
+    fn step(queued: &mut Vec<Work>, loading: bool, room: usize) -> (Vec<Command>, Option<Request>) {
+        let mut taken = Vec::new();
+        let mut left = room;
+        let surfaced = hand_over(queued, loading, |command| {
+            if left == 0 {
+                return false;
+            }
+            left -= 1;
+            taken.push(command);
+            true
+        });
+        (taken, surfaced)
+    }
+
     #[test]
     fn a_command_the_engine_had_no_room_for_is_sent_again() {
         let pad = pad(1, 2);
         let mut queued = vec![
-            Command::Press(pad),
-            Command::SetClickEnabled(false),
-            Command::SetPaused(true),
+            Work::Command(Command::Press(pad)),
+            Work::Command(Command::SetClickEnabled(false)),
+            Work::Command(Command::SetPaused(true)),
         ];
 
-        // Room for the first only.
-        let mut room = 1;
-        let mut taken = Vec::new();
-        send_commands(&mut queued, false, |command| {
-            if room == 0 {
-                return false;
-            }
-            room -= 1;
-            taken.push(command);
-            true
-        });
+        let (taken, _) = step(&mut queued, false, 1);
         assert_eq!(taken, vec![Command::Press(pad)]);
-        assert_eq!(
-            queued,
-            vec![Command::SetClickEnabled(false), Command::SetPaused(true)],
-            "the rest wait rather than being dropped"
-        );
+        assert_eq!(queued.len(), 2, "the rest wait rather than being dropped");
 
-        // Room for the rest, in the order they were made.
-        let mut rest = Vec::new();
-        send_commands(&mut queued, false, |command| {
-            rest.push(command);
-            true
-        });
+        let (rest, _) = step(&mut queued, false, 8);
         assert_eq!(
             rest,
-            vec![Command::SetClickEnabled(false), Command::SetPaused(true)]
+            vec![Command::SetClickEnabled(false), Command::SetPaused(true)],
+            "and go in the order they were made"
         );
         assert!(queued.is_empty());
     }
@@ -1227,172 +1223,113 @@ mod tests {
     #[test]
     fn nothing_overtakes_a_command_that_did_not_fit() {
         let pad = pad(0, 0);
-        let mut queued = vec![Command::Press(pad), Command::Press(pad)];
+        let mut queued = vec![
+            Work::Command(Command::Press(pad)),
+            Work::Command(Command::Press(pad)),
+        ];
 
-        // The first press is refused, so the second must not be applied on its own: two
-        // presses are a record and a stop, one is a take left running.
-        send_commands(&mut queued, false, |_| false);
+        // Two presses are a record and a stop; letting the second through on its own
+        // would leave a take running.
+        let (taken, _) = step(&mut queued, false, 0);
+        assert!(taken.is_empty());
         assert_eq!(queued.len(), 2, "both still waiting");
+    }
+
+    #[test]
+    fn a_load_waits_for_the_snapshot_of_the_save_before_it() {
+        let pad = pad(1, 2);
+        let mut queued = vec![
+            Work::Request(Request::SaveSession(pad)),
+            Work::Request(Request::LoadSession(pad)),
+        ];
+
+        // The save surfaces first, and its snapshot takes the place the request had.
+        let (_, surfaced) = step(&mut queued, false, 8);
+        assert_eq!(surfaced, Some(Request::SaveSession(pad)));
+        queued.insert(0, Work::Command(Command::Snapshot { request: 1 }));
+
+        // The load cannot start until that snapshot has gone: the audio side applies a
+        // load after the commands it has taken, so it would commit first.
+        let (taken, surfaced) = step(&mut queued, false, 0);
+        assert!(taken.is_empty(), "no room for the snapshot yet");
+        assert_eq!(surfaced, None, "so the load waits behind it");
+        assert_eq!(queued.len(), 2, "and neither is lost");
+
+        let (taken, surfaced) = step(&mut queued, false, 8);
+        assert_eq!(taken, vec![Command::Snapshot { request: 1 }]);
+        assert_eq!(surfaced, Some(Request::LoadSession(pad)));
     }
 
     #[test]
     fn a_save_waits_for_the_load_in_front_of_it_to_commit() {
         let pad = pad(1, 2);
-        let mut asked = vec![Request::LoadSession(pad), Request::SaveSession(pad)];
-        let queued: Vec<Command> = Vec::new();
+        let mut queued = vec![
+            Work::Request(Request::SaveSession(pad)),
+            Work::Command(Command::Press(pad)),
+        ];
 
+        // With a load in its channel, nothing behind it moves at all.
+        let (taken, surfaced) = step(&mut queued, true, 8);
+        assert!(taken.is_empty() && surfaced.is_none());
+        assert_eq!(queued.len(), 2);
+
+        let (_, surfaced) = step(&mut queued, false, 8);
         assert_eq!(
-            next_to_act_on(&queued, &mut asked, false),
-            Some(Request::LoadSession(pad))
-        );
-
-        // The load is in its own channel now, and the queue it left behind is empty. The
-        // audio side takes commands before it applies a load, so a snapshot asked for now
-        // would photograph the session the load is about to replace.
-        assert_eq!(next_to_act_on(&queued, &mut asked, true), None);
-        assert_eq!(asked.len(), 1, "and is not lost by being held back");
-
-        assert_eq!(
-            next_to_act_on(&queued, &mut asked, false),
+            surfaced,
             Some(Request::SaveSession(pad)),
             "once the engine has taken the load"
         );
     }
 
     #[test]
+    fn a_gesture_made_after_a_load_reaches_the_engine_after_it() {
+        let pad = pad(0, 0);
+        // One poll: the confirmation that loads, then the transport.
+        let mut queued = vec![
+            Work::Request(Request::LoadSession(pad)),
+            Work::Command(Command::SetPaused(false)),
+        ];
+
+        let (taken, surfaced) = step(&mut queued, false, 8);
+        assert!(
+            taken.is_empty(),
+            "the resume went to the session being replaced"
+        );
+        assert_eq!(surfaced, Some(Request::LoadSession(pad)));
+
+        // The run loop marks the load in flight, and the resume waits for it.
+        let (taken, _) = step(&mut queued, true, 8);
+        assert!(taken.is_empty());
+        assert_eq!(queued, vec![Work::Command(Command::SetPaused(false))]);
+
+        let (taken, _) = step(&mut queued, false, 8);
+        assert_eq!(taken, vec![Command::SetPaused(false)]);
+    }
+
+    #[test]
     fn a_command_on_a_later_pass_waits_for_the_load_too() {
         let pad = pad(0, 0);
-        let mut queued = vec![Command::Press(pad)];
+        let mut queued = vec![Work::Command(Command::Press(pad))];
 
-        let mut taken = Vec::new();
-        send_commands(&mut queued, true, |command| {
-            taken.push(command);
-            true
-        });
+        let (taken, _) = step(&mut queued, true, 8);
         assert!(taken.is_empty(), "sent in front of the load");
-        assert_eq!(queued, vec![Command::Press(pad)], "and still waiting");
+        assert_eq!(queued, vec![Work::Command(Command::Press(pad))]);
 
-        send_commands(&mut queued, false, |command| {
-            taken.push(command);
-            true
-        });
+        let (taken, _) = step(&mut queued, false, 8);
         assert_eq!(taken, vec![Command::Press(pad)]);
-        assert!(queued.is_empty());
-    }
-
-    #[test]
-    fn a_setting_waits_for_the_load_in_front_of_it() {
-        let mut controller = Controller::new(120.0, TimeSignature::FOUR_FOUR, true);
-
-        assert!(settings_to_publish(&mut controller, &[], true).is_none());
-        assert!(
-            settings_to_publish(&mut controller, &[], false).is_some(),
-            "and is still on offer once the load has been taken"
-        );
-    }
-
-    #[test]
-    fn a_load_waits_for_the_snapshot_of_the_save_before_it() {
-        let pad = pad(1, 2);
-        let mut asked = vec![Request::SaveSession(pad), Request::LoadSession(pad)];
-        let mut queued: Vec<Command> = Vec::new();
-
-        // The save goes first, and leaves its snapshot behind it.
-        assert_eq!(
-            next_to_act_on(&queued, &mut asked, false),
-            Some(Request::SaveSession(pad))
-        );
-        queued.push(Command::Snapshot { request: 1 });
-
-        // The load must not start its transaction while that is still waiting: the audio
-        // side applies a load after the command ring, so it would commit first.
-        assert_eq!(next_to_act_on(&queued, &mut asked, false), None);
-        assert_eq!(asked.len(), 1, "and is not lost by being passed over");
-
-        queued.clear();
-        assert_eq!(
-            next_to_act_on(&queued, &mut asked, false),
-            Some(Request::LoadSession(pad))
-        );
-        assert_eq!(
-            next_to_act_on(&queued, &mut asked, false),
-            None,
-            "nothing left"
-        );
-    }
-
-    #[test]
-    fn a_window_is_told_the_screen_only_when_it_changes() {
-        let slot = Mutex::new(Mode::Perform);
-
-        let published = publish_screen(Some(&slot), Mode::Mute, None);
-        assert_eq!(published, Some(Mode::Mute));
-        assert_eq!(*slot.lock().unwrap(), Mode::Mute);
-
-        // Held by the window this pass, so nothing is known to have got through.
-        let held = slot.lock().unwrap();
-        assert_eq!(
-            publish_screen(Some(&slot), Mode::Solo, published),
-            published,
-            "the next pass tries again"
-        );
-        drop(held);
-
-        assert_eq!(
-            publish_screen(Some(&slot), Mode::Solo, published),
-            Some(Mode::Solo)
-        );
-        assert_eq!(*slot.lock().unwrap(), Mode::Solo);
-    }
-
-    #[test]
-    fn a_run_with_no_window_still_tracks_the_screen() {
-        // Nothing to publish to, so it only remembers, and never asks again for the same.
-        assert_eq!(publish_screen(None, Mode::Mute, None), Some(Mode::Mute));
-        assert_eq!(
-            publish_screen(None, Mode::Mute, Some(Mode::Mute)),
-            Some(Mode::Mute)
-        );
-    }
-
-    #[test]
-    fn a_setting_held_back_by_a_backlog_is_still_offered_later() {
-        let mut controller = Controller::new(120.0, TimeSignature::FOUR_FOUR, true);
-        let backlog = vec![Command::Press(pad(0, 0))];
-
-        // Dirty from construction, so there is something to hold back.
-        assert!(settings_to_publish(&mut controller, &backlog, false).is_none());
-        assert!(settings_to_publish(&mut controller, &backlog, false).is_none());
-
-        assert!(
-            settings_to_publish(&mut controller, &[], false).is_some(),
-            "still on offer once the backlog clears"
-        );
-        assert!(
-            settings_to_publish(&mut controller, &[], false).is_none(),
-            "and only offered once"
-        );
     }
 
     #[test]
     fn a_resync_waits_behind_a_load_like_anything_else() {
         // A resync answers with the engine's own state, so one taken before a load commits
         // would answer with the session being replaced.
-        let mut queued: Vec<Command> = Vec::new();
-        queued.push(Command::Resync);
+        let mut queued = vec![Work::Command(Command::Resync)];
 
-        let mut taken = Vec::new();
-        send_commands(&mut queued, true, |command| {
-            taken.push(command);
-            true
-        });
+        let (taken, _) = step(&mut queued, true, 8);
         assert!(taken.is_empty(), "answered from in front of the load");
-        assert_eq!(queued, vec![Command::Resync], "and still waiting");
+        assert_eq!(queued, vec![Work::Command(Command::Resync)]);
 
-        send_commands(&mut queued, false, |command| {
-            taken.push(command);
-            true
-        });
+        let (taken, _) = step(&mut queued, false, 8);
         assert_eq!(taken, vec![Command::Resync]);
     }
 

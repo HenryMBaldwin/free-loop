@@ -17,4 +17,4 @@ pub mod paint;
 pub mod screen;
 
 pub use config::{Config, ConfigError};
-pub use control::{Controller, Mode, Request, TextUpdate};
+pub use control::{Controller, Mode, Request, TextUpdate, Work};
