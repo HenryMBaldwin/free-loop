@@ -1,8 +1,8 @@
 //! What a session records besides its audio.
 
 use free_loop_core::{
-    CENTRE_STEP, GAIN_STEPS, INPUT_CHANNELS, IndexOutOfRange, SLOT_COUNT, SlotAddr, SlotId,
-    TRACK_COUNT, TrackId, UNITY_STEP, pad_bit,
+    CENTRE_STEP, GAIN_STEPS, INPUT_CHANNELS, IndexOutOfRange, PAN_STEPS, SLOT_COUNT, SlotAddr,
+    SlotId, TRACK_COUNT, TrackId, UNITY_STEP, pad_bit,
 };
 use serde::{Deserialize, Serialize};
 
@@ -200,6 +200,9 @@ impl Manifest {
             {
                 return Err("a track's level is off the ladder");
             }
+            if usize::from(entry.pan) >= PAN_STEPS {
+                return Err("a track's pan is off the row");
+            }
         }
 
         Ok(())
@@ -326,6 +329,29 @@ mod tests {
             input_channels: None,
         }];
         assert_eq!(broken.validate(), Err("a track's level is off the ladder"));
+    }
+
+    #[test]
+    fn a_track_pan_off_the_row_is_refused() {
+        let off_the_row = u8::try_from(PAN_STEPS).unwrap();
+        for pan in [off_the_row, u8::MAX] {
+            let mut broken = manifest();
+            broken.tracks = vec![TrackEntry {
+                track: 3,
+                input: 0,
+                restart: false,
+                pickup: 0,
+                gain_step: None,
+                multiple: false,
+                pan,
+                input_channels: None,
+            }];
+            assert_eq!(
+                broken.validate(),
+                Err("a track's pan is off the row"),
+                "pan {pan} was accepted"
+            );
+        }
     }
 
     #[test]

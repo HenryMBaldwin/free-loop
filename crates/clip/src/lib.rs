@@ -395,18 +395,29 @@ impl AudioBuffer {
 
         // A centred pan takes the plain path: the mid/side round trip is only exact in
         // real arithmetic, and every track sits here until one is moved.
-        if self.channels == STEREO && pan != PanRamp::CENTRE {
+        if pan != PanRamp::CENTRE {
+            let pairs = self.channels / STEREO;
+            let odd = self.channels % STEREO == 1;
             for (position, (out, sample)) in dst
-                .chunks_exact_mut(STEREO)
-                .zip(src.chunks_exact(STEREO))
+                .chunks_exact_mut(self.channels)
+                .zip(src.chunks_exact(self.channels))
                 .enumerate()
             {
                 let gain = ramp.at(position);
                 let (left, right, width) = pan.at(position);
-                let mid = (sample[0] + sample[1]) * 0.5;
-                let side = (sample[0] - sample[1]) * 0.5 * width;
-                out[0] += (mid + side) * gain * left;
-                out[1] += (mid - side) * gain * right;
+                // Each stereo pair carries the field. A width the device does not pair up
+                // has no side to spread across.
+                for pair in 0..pairs {
+                    let (l, r) = (sample[pair * STEREO], sample[pair * STEREO + 1]);
+                    let mid = (l + r) * 0.5;
+                    let side = (l - r) * 0.5 * width;
+                    out[pair * STEREO] += (mid + side) * gain * left;
+                    out[pair * STEREO + 1] += (mid - side) * gain * right;
+                }
+                if odd {
+                    let last = self.channels - 1;
+                    out[last] += sample[last] * gain;
+                }
             }
             return;
         }
@@ -791,6 +802,49 @@ mod tests {
                 "step {step} changes level"
             );
         }
+    }
+
+    #[test]
+    fn a_pan_carries_across_every_stereo_pair_of_a_wider_output() {
+        const WIDE: usize = 4;
+        let mut pool = SegmentPool::new(1, WIDE);
+        let mut buffer = AudioBuffer::new(1, WIDE);
+        buffer.write(0, &[1.0, 1.0, 1.0, 1.0], &mut pool);
+        let clip = Clip::new(buffer, Frames(1), Frames(0), WIDE);
+
+        let mut out = vec![0.0; WIDE];
+        clip.mix_pickup(
+            Frames(0),
+            Frames(0),
+            &mut out,
+            Ramp::UNITY,
+            Frames::ZERO,
+            PanRamp::constant(pan_for_step(6)),
+        );
+
+        assert_eq!(out[0], 0.0, "the first pair moved over");
+        assert!(out[1] > 0.0);
+        assert_eq!(out[2], 0.0, "and so did the second");
+        assert!(out[3] > 0.0);
+    }
+
+    #[test]
+    fn a_mono_output_has_nowhere_to_pan_and_keeps_its_level() {
+        let mut pool = SegmentPool::new(1, 1);
+        let mut buffer = AudioBuffer::new(1, 1);
+        buffer.write(0, &[1.0], &mut pool);
+        let clip = Clip::new(buffer, Frames(1), Frames(0), 1);
+
+        let mut out = vec![0.0; 1];
+        clip.mix_pickup(
+            Frames(0),
+            Frames(0),
+            &mut out,
+            Ramp::UNITY,
+            Frames::ZERO,
+            PanRamp::constant(pan_for_step(0)),
+        );
+        assert_eq!(out[0], 1.0, "one channel is played as it was recorded");
     }
 
     #[test]
