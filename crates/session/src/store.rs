@@ -1957,6 +1957,29 @@ mod tests {
     }
 
     #[test]
+    fn a_manifest_with_no_stamp_is_always_the_first_format() {
+        let text = "
+            tempo = 120.0
+            beats_per_bar = 4
+            beat_unit = 4
+            sample_rate = 48000
+            channels = 2
+            ";
+        let read: Manifest = toml::from_str(text).unwrap();
+        // The literal, not the current version: an unstamped file does not follow it up.
+        assert_eq!(read.version, 1);
+        assert_eq!(read.version, manifest::FIRST_VERSION);
+        read.validate().unwrap();
+    }
+
+    #[test]
+    fn a_session_claiming_no_format_is_refused() {
+        let mut none = track_manifest(Vec::new());
+        none.version = 0;
+        assert_eq!(none.validate(), Err("a session with no format of its own"));
+    }
+
+    #[test]
     fn a_session_from_a_newer_format_is_refused() {
         let mut ahead = track_manifest(Vec::new());
         ahead.version = manifest::VERSION + 1;

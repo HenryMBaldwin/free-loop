@@ -102,8 +102,16 @@ pub struct TrackEntry {
 /// The format written today.
 pub const VERSION: u32 = 1;
 
-fn version() -> u32 {
-    VERSION
+/// The format a manifest is read as when it carries no stamp.
+///
+/// Fixed: a file written before the stamp existed is in the first format whatever the
+/// current one becomes.
+pub const FIRST_VERSION: u32 = 1;
+
+const _: () = assert!(FIRST_VERSION <= VERSION);
+
+fn first_version() -> u32 {
+    FIRST_VERSION
 }
 
 /// Dead centre, for a session saved before tracks carried a pan.
@@ -115,7 +123,7 @@ fn centre() -> u8 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     /// The format this was written in. See [`VERSION`].
-    #[serde(default = "version")]
+    #[serde(default = "first_version")]
     pub version: u32,
     /// Beats per minute.
     pub tempo: f64,
@@ -183,6 +191,9 @@ impl Manifest {
             }
         }
 
+        if self.version < FIRST_VERSION {
+            return Err("a session with no format of its own");
+        }
         if self.version > VERSION {
             return Err("a session written by a newer version");
         }
