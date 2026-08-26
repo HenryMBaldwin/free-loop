@@ -3,6 +3,7 @@
 //! Only instructions whose effect depends on when they arrive.
 
 use crate::ids::{SlotAddr, TrackId};
+use crate::settings::Settings;
 use crate::time::{Subdivision, Tempo, TimeSignature};
 
 /// An instruction for the realtime side.
@@ -44,4 +45,6 @@ pub enum Command {
     /// Change the time signature. Rejected once any clip exists, with
     /// [`crate::event::Event::TimeSignatureRejected`].
     SetTimeSignature(TimeSignature),
+    /// Take the whole of the track settings.
+    SetSettings(Settings),
 }
