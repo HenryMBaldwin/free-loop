@@ -740,7 +740,6 @@ impl Engine {
     /// A take in progress keeps the input it started on, and a clip already sounding
     /// keeps the anchor it was launched with.
     fn apply_settings(&mut self, settings: Settings, sink: &mut impl EventSink) {
-        let before = self.polyphony;
         self.gains = settings.gains;
         self.muted = settings.muted;
         self.soloed = settings.soloed;
@@ -749,10 +748,11 @@ impl Engine {
         self.audio.pickups = settings.pickups;
         self.polyphony = settings.polyphony;
 
+        // Every exclusive track, not only one that has just become exclusive: a loaded
+        // session can arrive with several loops sounding on one.
         let ctx = self.ctx();
         for track in TrackId::all() {
-            let index = track.index();
-            if before[index].is_exclusive() || settings.polyphony[index] != Polyphony::Single {
+            if !settings.polyphony[track.index()].is_exclusive() {
                 continue;
             }
             self.with_session(|session, audio| {

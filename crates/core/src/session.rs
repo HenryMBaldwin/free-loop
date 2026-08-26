@@ -92,16 +92,30 @@ impl SessionModel {
         }
     }
 
-    /// Leaves the lowest-numbered sounding pad on `track` and presses the rest.
+    /// Leaves one loop sounding on `track` and stops the rest on a bar boundary.
     ///
-    /// For a track leaving [`Polyphony::Multiple`]. Those pressed stop on the next
-    /// boundary.
+    /// For a track leaving [`Polyphony::Multiple`]. A take in flight is the one kept and
+    /// the rest hand over to it; with no take the lowest-numbered survives.
     pub fn fold_to_one(
         &mut self,
         track: TrackId,
         ctx: &Ctx,
         sink: &mut impl FnMut(SlotAddr, Effect),
     ) {
+        // One take at most: arming a pad blocks presses on the rest of its track.
+        let take = Self::track_addrs(track).find_map(|addr| match self.state(addr) {
+            SlotState::QueuedRecord { at } => Some(at),
+            SlotState::Recording { .. } => Some(ctx.grid.next_boundary(ctx.now)),
+            _ => None,
+        });
+
+        if let Some(at) = take {
+            for addr in Self::track_addrs(track) {
+                self.apply(addr, SlotInput::Yield { at }, ctx, sink);
+            }
+            return;
+        }
+
         let sounding = |state: SlotState| {
             matches!(
                 state,
@@ -658,6 +672,86 @@ mod tests {
                     at: boundary
                 },
                 "slot {slot} is queued to stop on the next boundary"
+            );
+        }
+    }
+
+    #[test]
+    fn folding_a_track_hands_its_loops_to_an_armed_take() {
+        let mut model = SessionModel::new();
+        record(&mut model, addr(0, 1), 1, 1, 0);
+        record_beside(&mut model, addr(0, 3), 3, 1, 1);
+        // Armed while both play, and not yet started.
+        model.press(
+            addr(0, 6),
+            &ctx(5 * BAR + 100, 2),
+            Polyphony::Multiple,
+            &mut ignore,
+        );
+        let arrives = Frames(6 * BAR);
+        assert_eq!(
+            model.state(addr(0, 6)),
+            SlotState::QueuedRecord { at: arrives }
+        );
+
+        model.fold_to_one(
+            TrackId::new(0).unwrap(),
+            &ctx(5 * BAR + 200, 2),
+            &mut ignore,
+        );
+
+        assert_eq!(
+            model.state(addr(0, 6)),
+            SlotState::QueuedRecord { at: arrives },
+            "the take is untouched"
+        );
+        for (slot, clip) in [(1, 0), (3, 1)] {
+            assert_eq!(
+                model.state(addr(0, slot)),
+                SlotState::QueuedStop {
+                    clip: ClipId(clip),
+                    at: arrives
+                },
+                "slot {slot} hands over on the boundary the take starts on"
+            );
+        }
+    }
+
+    #[test]
+    fn folding_a_track_hands_its_loops_to_a_running_take() {
+        let mut model = SessionModel::new();
+        record(&mut model, addr(0, 1), 1, 1, 0);
+        record_beside(&mut model, addr(0, 3), 3, 1, 1);
+        model.press(
+            addr(0, 6),
+            &ctx(5 * BAR, 2),
+            Polyphony::Multiple,
+            &mut ignore,
+        );
+        model.advance(&ctx(5 * BAR, 2), &mut ignore);
+        assert!(matches!(
+            model.state(addr(0, 6)),
+            SlotState::Recording { .. }
+        ));
+
+        model.fold_to_one(
+            TrackId::new(0).unwrap(),
+            &ctx(5 * BAR + 100, 2),
+            &mut ignore,
+        );
+
+        assert!(
+            matches!(model.state(addr(0, 6)), SlotState::Recording { .. }),
+            "capture is not discarded"
+        );
+        for (slot, clip) in [(1, 0), (3, 1)] {
+            assert_eq!(
+                model.state(addr(0, slot)),
+                SlotState::QueuedStop {
+                    clip: ClipId(clip),
+                    at: Frames(6 * BAR)
+                },
+                "slot {slot} hands over on the next boundary"
             );
         }
     }
