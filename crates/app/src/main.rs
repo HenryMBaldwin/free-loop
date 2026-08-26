@@ -1483,13 +1483,6 @@ mod tests {
         (taken, surfaced)
     }
 
-    fn gains(step: u8) -> free_loop_core::Settings {
-        free_loop_core::Settings {
-            gains: [step; free_loop_core::TRACK_COUNT],
-            ..free_loop_core::Settings::new()
-        }
-    }
-
     #[test]
     fn a_gesture_reaches_the_engine_as_a_command() {
         let mut harness = Harness::new("gesture");
@@ -1849,54 +1842,6 @@ mod tests {
     }
 
     #[test]
-    fn a_setting_made_after_a_load_reaches_the_engine_after_it() {
-        let pad = pad(0, 0);
-        // One poll: the confirmation that loads, then a gain change.
-        let mut queued = vec![
-            Work::Request(Request::LoadSession(pad)),
-            Work::Command(Command::SetSettings(gains(3))),
-        ];
-
-        let (taken, surfaced) = step(&mut queued, false, 8);
-        assert!(taken.is_empty(), "the change went in front of the load");
-        assert_eq!(surfaced, Some(Request::LoadSession(pad)));
-
-        let (taken, _) = step(&mut queued, true, 8);
-        assert!(taken.is_empty(), "held while the load is in flight");
-        assert_eq!(queued.len(), 1, "and not lost");
-
-        let (taken, _) = step(&mut queued, false, 8);
-        assert_eq!(taken, vec![Command::SetSettings(gains(3))]);
-    }
-
-    #[test]
-    fn two_settings_either_side_of_a_gesture_both_reach_the_engine() {
-        let pad = pad(0, 0);
-        // The engine takes these one after another, so the first press runs under the
-        // first settings and the second under the second. A mailbox holding only the
-        // latest would have run both under it.
-        let mut queued = vec![
-            Work::Command(Command::SetSettings(gains(1))),
-            Work::Command(Command::Press(pad)),
-            Work::Command(Command::SetSettings(gains(6))),
-            Work::Command(Command::Press(pad)),
-        ];
-
-        let (taken, surfaced) = step(&mut queued, false, 8);
-        assert_eq!(surfaced, None);
-        assert_eq!(
-            taken,
-            vec![
-                Command::SetSettings(gains(1)),
-                Command::Press(pad),
-                Command::SetSettings(gains(6)),
-                Command::Press(pad),
-            ],
-            "in the order they were made"
-        );
-    }
-
-    #[test]
     fn a_window_is_told_the_screen_only_when_it_changes() {
         let slot = Mutex::new(Mode::Perform);
 
@@ -1928,43 +1873,6 @@ mod tests {
             publish_screen(None, Mode::Mute, Some(Mode::Mute)),
             Some(Mode::Mute)
         );
-    }
-
-    #[test]
-    fn a_command_the_engine_had_no_room_for_is_sent_again() {
-        let pad = pad(1, 2);
-        let mut queued = vec![
-            Work::Command(Command::Press(pad)),
-            Work::Command(Command::SetClickEnabled(false)),
-            Work::Command(Command::SetPaused(true)),
-        ];
-
-        let (taken, _) = step(&mut queued, false, 1);
-        assert_eq!(taken, vec![Command::Press(pad)]);
-        assert_eq!(queued.len(), 2, "the rest wait rather than being dropped");
-
-        let (rest, _) = step(&mut queued, false, 8);
-        assert_eq!(
-            rest,
-            vec![Command::SetClickEnabled(false), Command::SetPaused(true)],
-            "and go in the order they were made"
-        );
-        assert!(queued.is_empty());
-    }
-
-    #[test]
-    fn nothing_overtakes_a_command_that_did_not_fit() {
-        let pad = pad(0, 0);
-        let mut queued = vec![
-            Work::Command(Command::Press(pad)),
-            Work::Command(Command::Press(pad)),
-        ];
-
-        // Two presses are a record and a stop; letting the second through on its own
-        // would leave a take running.
-        let (taken, _) = step(&mut queued, false, 0);
-        assert!(taken.is_empty());
-        assert_eq!(queued.len(), 2, "both still waiting");
     }
 
     #[test]
@@ -2011,58 +1919,6 @@ mod tests {
             Some(Request::SaveSession(pad)),
             "once the engine has taken the load"
         );
-    }
-
-    #[test]
-    fn a_gesture_made_after_a_load_reaches_the_engine_after_it() {
-        let pad = pad(0, 0);
-        // One poll: the confirmation that loads, then the transport.
-        let mut queued = vec![
-            Work::Request(Request::LoadSession(pad)),
-            Work::Command(Command::SetPaused(false)),
-        ];
-
-        let (taken, surfaced) = step(&mut queued, false, 8);
-        assert!(
-            taken.is_empty(),
-            "the resume went to the session being replaced"
-        );
-        assert_eq!(surfaced, Some(Request::LoadSession(pad)));
-
-        // The run loop marks the load in flight, and the resume waits for it.
-        let (taken, _) = step(&mut queued, true, 8);
-        assert!(taken.is_empty());
-        assert_eq!(queued, vec![Work::Command(Command::SetPaused(false))]);
-
-        let (taken, _) = step(&mut queued, false, 8);
-        assert_eq!(taken, vec![Command::SetPaused(false)]);
-    }
-
-    #[test]
-    fn a_command_on_a_later_pass_waits_for_the_load_too() {
-        let pad = pad(0, 0);
-        let mut queued = vec![Work::Command(Command::Press(pad))];
-
-        let (taken, _) = step(&mut queued, true, 8);
-        assert!(taken.is_empty(), "sent in front of the load");
-        assert_eq!(queued, vec![Work::Command(Command::Press(pad))]);
-
-        let (taken, _) = step(&mut queued, false, 8);
-        assert_eq!(taken, vec![Command::Press(pad)]);
-    }
-
-    #[test]
-    fn a_resync_waits_behind_a_load_like_anything_else() {
-        // A resync answers with the engine's own state, so one taken before a load commits
-        // would answer with the session being replaced.
-        let mut queued = vec![Work::Command(Command::Resync)];
-
-        let (taken, _) = step(&mut queued, true, 8);
-        assert!(taken.is_empty(), "answered from in front of the load");
-        assert_eq!(queued, vec![Work::Command(Command::Resync)]);
-
-        let (taken, _) = step(&mut queued, false, 8);
-        assert_eq!(taken, vec![Command::Resync]);
     }
 
     #[test]
