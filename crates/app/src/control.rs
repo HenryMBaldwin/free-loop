@@ -147,6 +147,18 @@ pub enum TextUpdate {
     Stop,
 }
 
+/// One thing the performer asked for, in the order it was asked.
+///
+/// Commands and requests share a queue: a request can start a load, which the audio side
+/// applies after the commands it has already taken, so their order has to survive.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Work {
+    /// For the engine.
+    Command(Command),
+    /// For the caller, which has the disk and the loader.
+    Request(Request),
+}
+
 /// Work for the caller to do, which the controller cannot because it owns no I/O.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Request {
@@ -187,10 +199,10 @@ pub struct Controller {
     warning: u64,
     /// A pad held down on the input page, which the next press pairs with.
     input_held: Option<SlotAddr>,
-    commands: Vec<Command>,
+    /// Commands and requests in the order the performer made them.
+    work: Vec<Work>,
     /// Whether the settings have moved since the engine was last told.
     settings_changed: bool,
-    requests: Vec<Request>,
     /// A tempo button being held down.
     tempo_hold: Option<TempoHold>,
     /// When the beat indicator goes dark again.
@@ -250,9 +262,8 @@ impl Controller {
             held: [[None; SLOT_COUNT]; TRACK_COUNT],
             warning: 0,
             input_held: None,
-            commands: Vec::new(),
+            work: Vec::new(),
             settings_changed: true,
-            requests: Vec::new(),
             tempo_hold: None,
             beat_off: None,
             text: None,
@@ -303,7 +314,7 @@ impl Controller {
             return;
         }
         self.chrome.paused = true;
-        self.commands.push(Command::SetPaused(true));
+        self.command(Command::SetPaused(true));
         self.dirty = true;
     }
 
@@ -478,26 +489,25 @@ impl Controller {
         self.chrome.launch_modes = [self.default_launch_mode; TRACK_COUNT];
         self.chrome.pickups = [0; TRACK_COUNT];
         self.settings_changed = true;
-        self.commands.push(Command::ClearAll);
-        self.commands.push(Command::SetPaused(false));
+        self.command(Command::ClearAll);
+        self.command(Command::SetPaused(false));
 
         // After the clear, so the engine is no longer holding clips to protect and takes
         // the change rather than refusing it.
         self.tempo = self.default_tempo;
         self.tempo_before_request = self.default_tempo;
         if let Ok(tempo) = Tempo::new(self.default_tempo) {
-            self.commands.push(Command::SetTempo(tempo));
+            self.command(Command::SetTempo(tempo));
         }
         self.adopt_signature(self.default_time_signature);
-        self.commands
-            .push(Command::SetTimeSignature(self.default_time_signature));
+        self.command(Command::SetTimeSignature(self.default_time_signature));
         self.dirty = true;
     }
 
     /// Saves over the pad, asking first if it holds anything.
     fn press_save(&mut self, addr: SlotAddr) {
         if self.sessions & bit(addr) == 0 {
-            self.requests.push(Request::SaveSession(addr));
+            self.request(Request::SaveSession(addr));
             return;
         }
         self.mode = Mode::ConfirmSave(addr);
@@ -511,7 +521,7 @@ impl Controller {
             return;
         }
         if !self.session.has_any_clip() {
-            self.requests.push(Request::LoadSession(addr));
+            self.request(Request::LoadSession(addr));
             return;
         }
         self.mode = Mode::ConfirmLoad(addr);
@@ -529,8 +539,8 @@ impl Controller {
             return;
         }
         match self.mode {
-            Mode::ConfirmSave(pad) => self.requests.push(Request::SaveSession(pad)),
-            Mode::ConfirmLoad(pad) => self.requests.push(Request::LoadSession(pad)),
+            Mode::ConfirmSave(pad) => self.request(Request::SaveSession(pad)),
+            Mode::ConfirmLoad(pad) => self.request(Request::LoadSession(pad)),
             _ => return,
         }
         self.mode = Mode::Perform;
@@ -585,7 +595,7 @@ impl Controller {
         if !self.chrome.subdivision.fits(signature) {
             let fitting = Subdivision::fitting(signature);
             self.chrome.subdivision = fitting;
-            self.commands.push(Command::SetClickSubdivision(fitting));
+            self.command(Command::SetClickSubdivision(fitting));
         }
         // A pickup cannot reach past the bar it opens from.
         let degrees = signature.beats_per_bar().saturating_sub(1);
@@ -607,8 +617,7 @@ impl Controller {
         }
         if subdivision != self.chrome.subdivision {
             self.chrome.subdivision = subdivision;
-            self.commands
-                .push(Command::SetClickSubdivision(subdivision));
+            self.command(Command::SetClickSubdivision(subdivision));
             self.dirty = true;
         }
         self.scroll(subdivision.name().to_owned(), now);
@@ -638,7 +647,7 @@ impl Controller {
             // until the engine says it took the change. The value to fall back to stays
             // the last one the engine confirmed, however many presses go unanswered.
             self.show_signature_state(next);
-            self.commands.push(Command::SetTimeSignature(next));
+            self.command(Command::SetTimeSignature(next));
         }
         self.show_signature(next, now);
     }
@@ -729,9 +738,17 @@ impl Controller {
         Some(update)
     }
 
-    /// Takes everything the caller needs to act on.
-    pub fn drain_requests(&mut self) -> std::vec::Drain<'_, Request> {
-        self.requests.drain(..)
+    /// Takes everything the performer asked for, in order.
+    pub fn drain_work(&mut self) -> std::vec::Drain<'_, Work> {
+        self.work.drain(..)
+    }
+
+    fn command(&mut self, command: Command) {
+        self.work.push(Work::Command(command));
+    }
+
+    fn request(&mut self, request: Request) {
+        self.work.push(Work::Request(request));
     }
 
     /// Handles something the performer did, at time `now` since the app started.
@@ -786,7 +803,7 @@ impl Controller {
             .take()
             .is_some()
         {
-            self.commands.push(Command::Press(addr));
+            self.command(Command::Press(addr));
         }
     }
 
@@ -796,8 +813,8 @@ impl Controller {
             Role::Transport => self.toggle_paused(),
             Role::Tempo(direction) => self.press_tempo(direction, now),
             Role::Click => self.press_click(now),
-            Role::StopAll => self.commands.push(Command::StopAll),
-            Role::Rewind => self.commands.push(Command::Rewind),
+            Role::StopAll => self.command(Command::StopAll),
+            Role::Rewind => self.command(Command::Rewind),
             Role::Axis => {
                 self.chrome.axis = self.chrome.axis.flipped();
                 self.dirty = true;
@@ -822,7 +839,7 @@ impl Controller {
     /// Freezes or resumes the transport.
     fn toggle_paused(&mut self) {
         self.chrome.paused = !self.chrome.paused;
-        self.commands.push(Command::SetPaused(self.chrome.paused));
+        self.command(Command::SetPaused(self.chrome.paused));
         self.dirty = true;
     }
 
@@ -862,7 +879,7 @@ impl Controller {
             let holding = now.saturating_sub(since);
 
             if holding >= CLEAR_HOLD {
-                self.commands.push(Command::Clear(addr));
+                self.command(Command::Clear(addr));
                 // Forget the hold rather than wait for the release, so it fires once and
                 // a pad still physically down does not empty again every pass.
                 self.held[addr.track.index()][addr.slot.index()] = None;
@@ -924,12 +941,12 @@ impl Controller {
     /// Drops any nudge still queued: one authoritative value goes out instead, since the
     /// earlier one may already have been drained.
     fn undo_nudge(&mut self, was: f64) {
-        self.commands
-            .retain(|command| !matches!(command, Command::SetTempo(_)));
+        self.work
+            .retain(|work| !matches!(work, Work::Command(Command::SetTempo(_))));
         self.tempo = was;
         self.tempo_before_request = was;
         if let Ok(tempo) = Tempo::new(was) {
-            self.commands.push(Command::SetTempo(tempo));
+            self.command(Command::SetTempo(tempo));
         }
         self.dirty = true;
     }
@@ -1020,8 +1037,7 @@ impl Controller {
     /// Turns the click on or off.
     fn toggle_click(&mut self) {
         self.chrome.click_enabled = !self.chrome.click_enabled;
-        self.commands
-            .push(Command::SetClickEnabled(self.chrome.click_enabled));
+        self.command(Command::SetClickEnabled(self.chrome.click_enabled));
         self.dirty = true;
     }
 
@@ -1087,7 +1103,7 @@ impl Controller {
         // Assume it lands; the engine only speaks up when it does not.
         self.tempo_before_request = self.tempo;
         self.tempo = wanted;
-        self.commands.push(Command::SetTempo(tempo));
+        self.command(Command::SetTempo(tempo));
     }
 
     /// Handles something the engine reported.
@@ -1151,11 +1167,6 @@ impl Controller {
             // The clock goes straight to the surface rather than through the grid.
             | Event::Clock { .. } => {}
         }
-    }
-
-    /// Takes everything queued for the engine.
-    pub fn drain_commands(&mut self) -> std::vec::Drain<'_, Command> {
-        self.commands.drain(..)
     }
 
     /// What every track should be set to.
@@ -1301,8 +1312,15 @@ mod tests {
         Controller::new(120.0, TimeSignature::FOUR_FOUR, true)
     }
 
+    /// The commands the controller has asked for, in order, ignoring any request.
     fn commands(controller: &mut Controller) -> Vec<Command> {
-        controller.drain_commands().collect()
+        controller
+            .drain_work()
+            .filter_map(|work| match work {
+                Work::Command(command) => Some(command),
+                Work::Request(_) => None,
+            })
+            .collect()
     }
 
     /// The settings the controller has ready for the engine, which must have moved.
@@ -2029,8 +2047,28 @@ mod tests {
         assert_ne!(frozen.side(PAUSE_SIDE), running);
     }
 
+    /// Everything asked for, split by kind, for a test that wants both.
+    fn work(controller: &mut Controller) -> (Vec<Command>, Vec<Request>) {
+        let mut commands = Vec::new();
+        let mut requests = Vec::new();
+        for item in controller.drain_work() {
+            match item {
+                Work::Command(command) => commands.push(command),
+                Work::Request(request) => requests.push(request),
+            }
+        }
+        (commands, requests)
+    }
+
+    /// The requests the controller has made, in order, ignoring any command.
     fn requests(controller: &mut Controller) -> Vec<Request> {
-        controller.drain_requests().collect()
+        controller
+            .drain_work()
+            .filter_map(|work| match work {
+                Work::Request(request) => Some(request),
+                Work::Command(_) => None,
+            })
+            .collect()
     }
 
     #[test]
@@ -2051,14 +2089,12 @@ mod tests {
         controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
         press(&mut controller, addr(2, 3), T0);
 
+        let (commands, requests) = work(&mut controller);
         assert!(
-            commands(&mut controller).is_empty(),
+            commands.is_empty(),
             "a pad in the picker must not touch the loops"
         );
-        assert_eq!(
-            requests(&mut controller),
-            vec![Request::SaveSession(addr(2, 3))]
-        );
+        assert_eq!(requests, vec![Request::SaveSession(addr(2, 3))]);
     }
 
     #[test]
@@ -2154,7 +2190,7 @@ mod tests {
         press(&mut controller, addr(1, 1), T0);
 
         assert!(
-            controller.drain_requests().next().is_none(),
+            requests(&mut controller).into_iter().next().is_none(),
             "nothing is written until it is answered"
         );
         let frame = controller.take_frame().unwrap();
@@ -2175,14 +2211,17 @@ mod tests {
         controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
         press(&mut controller, addr(1, 1), T0);
         press(&mut controller, no(), T0);
-        assert!(controller.drain_requests().next().is_none(), "no means no");
+        assert!(
+            requests(&mut controller).into_iter().next().is_none(),
+            "no means no"
+        );
         assert_eq!(controller.mode(), Mode::Perform);
 
         controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
         press(&mut controller, addr(1, 1), T0);
         press(&mut controller, yes(), T0);
         assert_eq!(
-            controller.drain_requests().next(),
+            requests(&mut controller).into_iter().next(),
             Some(Request::SaveSession(addr(1, 1))),
             "and the pad asked about is the pad written"
         );
@@ -2195,7 +2234,7 @@ mod tests {
         press(&mut controller, addr(3, 3), T0);
 
         assert_eq!(
-            controller.drain_requests().next(),
+            requests(&mut controller).into_iter().next(),
             Some(Request::SaveSession(addr(3, 3))),
             "there is nothing to lose"
         );
@@ -2215,11 +2254,11 @@ mod tests {
 
         controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
         press(&mut controller, addr(1, 1), T0);
-        assert!(controller.drain_requests().next().is_none());
+        assert!(requests(&mut controller).into_iter().next().is_none());
 
         press(&mut controller, yes(), T0);
         assert_eq!(
-            controller.drain_requests().next(),
+            requests(&mut controller).into_iter().next(),
             Some(Request::LoadSession(addr(1, 1)))
         );
     }
@@ -2232,7 +2271,7 @@ mod tests {
         press(&mut controller, addr(1, 1), T0);
 
         assert_eq!(
-            controller.drain_requests().next(),
+            requests(&mut controller).into_iter().next(),
             Some(Request::LoadSession(addr(1, 1))),
             "nothing on the grid to lose"
         );
