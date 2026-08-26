@@ -13,7 +13,7 @@
 use free_loop_clip::{AudioBuffer, Clip, SegmentPool};
 use free_loop_core::{
     CENTRE_STEP, ClipId, Command, Event, Frames, Polyphony, Settings, SlotAddr, SlotId, SlotState,
-    Subdivision, Tempo, TimeSignature, TrackId,
+    Subdivision, Tempo, TimeSignature, TrackId, UNITY_STEP,
 };
 use free_loop_engine::{ClickConfig, Engine, EngineConfig, Housekeeping, Snapshot};
 use std::sync::Arc;
@@ -3163,4 +3163,93 @@ fn a_pan_reaches_a_wider_output_than_a_stereo_pair() {
     assert!(peak(1) > 0.0);
     assert!(peak(2) < 1e-4, "and the second, got {}", peak(2));
     assert!(peak(3) > 0.0);
+}
+
+#[test]
+fn a_loop_trim_scales_what_its_track_is_already_playing() {
+    let mut harness = Harness::new(128);
+    let pad = addr(0, 0);
+    record(&mut harness, pad, 0, 1);
+
+    let peak = |harness: &mut Harness| {
+        harness
+            .run_frames(4_096)
+            .iter()
+            .fold(0.0_f32, |peak, s| peak.max(s.abs()))
+    };
+
+    let flat = peak(&mut harness);
+    assert!(flat > 0.0);
+
+    // One step down on the loop, with the track fader untouched.
+    harness.setting(|settings| settings.loop_gains[0][0] = UNITY_STEP - 1);
+    let trimmed = peak(&mut harness);
+    assert!(trimmed < flat, "the trim cut it: {trimmed} against {flat}");
+
+    // The same step down on the track instead, which should land in the same place.
+    harness.setting(|settings| {
+        settings.loop_gains[0][0] = UNITY_STEP;
+        settings.gains[0] = UNITY_STEP - 1;
+    });
+    let faded = peak(&mut harness);
+    assert!((faded - trimmed).abs() < 1e-3, "{faded} against {trimmed}");
+}
+
+#[test]
+fn a_loop_trim_only_touches_its_own_pad() {
+    let mut harness = Harness::new(128);
+    record(&mut harness, addr(0, 0), 0, 1);
+    let at = harness.position();
+    record(&mut harness, addr(1, 0), at, 1);
+
+    let loud = harness
+        .run_frames(4_096)
+        .iter()
+        .fold(0.0_f32, |peak, s| peak.max(s.abs()));
+
+    // Silence one loop; the other track carries on.
+    harness.setting(|settings| settings.loop_gains[0][0] = 0);
+    let rest = harness
+        .run_frames(4_096)
+        .iter()
+        .fold(0.0_f32, |peak, s| peak.max(s.abs()));
+    assert!(rest > 0.0, "the other track is untouched");
+    assert!(rest < loud, "and the silenced one is gone");
+}
+
+#[test]
+fn a_loop_pan_nudges_its_track_rather_than_replacing_it() {
+    let mut harness = Harness::new(128);
+    let pad = addr(0, 0);
+    record(&mut harness, pad, 0, 1);
+
+    let sides = |harness: &mut Harness| {
+        let out = harness.run_frames(4_096);
+        let peak = |channel: usize| {
+            out.chunks_exact(2)
+                .map(|frame| frame[channel].abs())
+                .fold(0.0_f32, f32::max)
+        };
+        (peak(0), peak(1))
+    };
+
+    // Track hard left, loop hard right: they cancel back to centre.
+    harness.setting(|settings| {
+        settings.pans[0] = 0;
+        settings.loop_pans[0][0] = 6;
+    });
+    let (left, right) = sides(&mut harness);
+    assert!(
+        (left - right).abs() < 1e-4,
+        "a nudge the other way lands centre, got {left} and {right}"
+    );
+
+    // Both to the right, which cannot go further than the end of the row.
+    harness.setting(|settings| {
+        settings.pans[0] = 6;
+        settings.loop_pans[0][0] = 6;
+    });
+    let (left, right) = sides(&mut harness);
+    assert!(left < 1e-4, "still hard right, got {left}");
+    assert!(right > 0.0);
 }

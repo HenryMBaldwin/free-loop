@@ -78,6 +78,10 @@ pub struct SavedClip<'a> {
     pub playing: bool,
     /// The step on the gain ladder its track was playing at.
     pub gain_step: u8,
+    /// How loud the loop plays within its track.
+    pub trim: u8,
+    /// How far the loop is nudged from where its track sits.
+    pub pan: u8,
     /// Where the launch that is playing it put it, if the track restarts its clips.
     pub launch_anchor: Option<Frames>,
     /// The audio.
@@ -143,10 +147,33 @@ pub struct LoadedClip {
     pub playing: bool,
     /// The step on the gain ladder its track should play at.
     pub gain_step: u8,
+    /// How loud the loop plays within its track.
+    pub trim: u8,
+    /// How far the loop is nudged from where its track sits.
+    pub pan: u8,
     /// Where the launch that was playing it put it, if there was one.
     pub launch_anchor: Option<Frames>,
     /// The audio, with storage owned by the caller.
     pub clip: Clip,
+}
+
+/// What each loop is trimmed to within its track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoopMix {
+    /// How loud each loop plays within its track.
+    pub gains: [[u8; SLOT_COUNT]; TRACK_COUNT],
+    /// How far each loop is nudged from where its track sits.
+    pub pans: [[u8; SLOT_COUNT]; TRACK_COUNT],
+}
+
+impl Default for LoopMix {
+    /// Every loop flat, which is where a pad with no take sits.
+    fn default() -> Self {
+        Self {
+            gains: [[UNITY_STEP; SLOT_COUNT]; TRACK_COUNT],
+            pans: [[CENTRE_STEP; SLOT_COUNT]; TRACK_COUNT],
+        }
+    }
 }
 
 /// A session's manifest, read but not yet checked, with its audio still on disk.
@@ -187,6 +214,8 @@ impl Accepted {
                 addr: pad,
                 playing: entry.playing,
                 gain_step: entry.gain_step,
+                trim: entry.trim,
+                pan: entry.pan,
                 launch_anchor: entry.launch_phase_frames.map(Frames),
                 // Generated from the pad rather than taken from the file, which could name
                 // anything, including a path out of the session directory.
@@ -301,6 +330,17 @@ impl LoadedSession {
             }
         }
         tracks
+    }
+
+    /// What each loop is trimmed to. Pads the session does not fill stay flat.
+    pub fn loop_mix(&self) -> LoopMix {
+        let mut mix = LoopMix::default();
+        for loaded in &self.clips {
+            let (track, slot) = (loaded.addr.track.index(), loaded.addr.slot.index());
+            mix.gains[track][slot] = loaded.trim;
+            mix.pans[track][slot] = loaded.pan;
+        }
+        mix
     }
 
     /// The level each track should play at.
@@ -455,6 +495,8 @@ impl SessionStore {
                 capture_offset_frames: saved.clip.capture_offset().0,
                 tail_frames: saved.clip.tail().0,
                 gain_step: saved.gain_step,
+                trim: saved.trim,
+                pan: saved.pan,
             });
         }
 
@@ -884,6 +926,8 @@ mod tests {
                 addr,
                 playing: true,
                 gain_step: UNITY_STEP,
+                trim: UNITY_STEP,
+                pan: CENTRE_STEP,
                 launch_anchor: None,
                 clip: &good,
             }]
@@ -914,6 +958,8 @@ mod tests {
                 addr: *pad,
                 playing: false,
                 gain_step: UNITY_STEP,
+                trim: UNITY_STEP,
+                pan: CENTRE_STEP,
                 launch_anchor: None,
                 clip: audio,
             })
@@ -1017,6 +1063,8 @@ mod tests {
                     addr: addr(0, 0),
                     playing: true,
                     gain_step: UNITY_STEP,
+                    trim: UNITY_STEP,
+                    pan: CENTRE_STEP,
                     launch_anchor: None,
                     clip: &held,
                 }]),
@@ -1036,6 +1084,8 @@ mod tests {
                 addr: addr(0, slot),
                 playing: false,
                 gain_step: UNITY_STEP,
+                trim: UNITY_STEP,
+                pan: CENTRE_STEP,
                 launch_anchor: None,
                 clip: &tiny,
             })
@@ -1108,6 +1158,8 @@ mod tests {
                         addr: addr(0, 0),
                         playing: true,
                         gain_step: UNITY_STEP,
+                        trim: UNITY_STEP,
+                        pan: CENTRE_STEP,
                         launch_anchor: None,
                         clip: &held,
                     },
@@ -1115,6 +1167,8 @@ mod tests {
                         addr: addr(1, 0),
                         playing: true,
                         gain_step: UNITY_STEP,
+                        trim: UNITY_STEP,
+                        pan: CENTRE_STEP,
                         launch_anchor: None,
                         clip: &held,
                     },
@@ -1201,6 +1255,8 @@ mod tests {
                     addr: addr(0, 0),
                     playing: true,
                     gain_step: UNITY_STEP,
+                    trim: UNITY_STEP,
+                    pan: CENTRE_STEP,
                     launch_anchor: None,
                     clip: &held,
                 }]),
@@ -1245,6 +1301,8 @@ mod tests {
                 addr: addr_of,
                 playing: true,
                 gain_step: UNITY_STEP,
+                trim: UNITY_STEP,
+                pan: CENTRE_STEP,
                 launch_anchor: None,
                 clip: &held,
             }]
@@ -1281,6 +1339,8 @@ mod tests {
                 addr: pad,
                 playing: true,
                 gain_step: UNITY_STEP,
+                trim: UNITY_STEP,
+                pan: CENTRE_STEP,
                 launch_anchor: None,
                 clip: &audio,
             }]
@@ -1313,6 +1373,8 @@ mod tests {
                     addr: addr(1, 1),
                     playing: false,
                     gain_step: UNITY_STEP,
+                    trim: UNITY_STEP,
+                    pan: CENTRE_STEP,
                     launch_anchor: None,
                     clip: &held,
                 }]),
@@ -1342,6 +1404,8 @@ mod tests {
                     addr: addr(0, 0),
                     playing: true,
                     gain_step: UNITY_STEP,
+                    trim: UNITY_STEP,
+                    pan: CENTRE_STEP,
                     // A launch put it a bar off the phase it was recorded at.
                     launch_anchor: Some(Frames(365)),
                     clip: &clip,
@@ -1371,6 +1435,8 @@ mod tests {
                     addr: addr(0, 0),
                     playing: true,
                     gain_step: UNITY_STEP,
+                    trim: UNITY_STEP,
+                    pan: CENTRE_STEP,
                     launch_anchor: None,
                     clip: &clip,
                 }]),
@@ -1486,6 +1552,8 @@ mod tests {
             addr: at,
             playing: false,
             gain_step,
+            trim: UNITY_STEP,
+            pan: CENTRE_STEP,
             launch_anchor: None,
             clip: clip(64, 0),
         }
@@ -1593,6 +1661,8 @@ mod tests {
                     addr: addr(1, 0),
                     playing: true,
                     gain_step: 2,
+                    trim: UNITY_STEP,
+                    pan: CENTRE_STEP,
                     launch_anchor: None,
                     clip: &audio,
                 }]),
@@ -1633,6 +1703,8 @@ mod tests {
                     addr: addr(0, 0),
                     playing: false,
                     gain_step: UNITY_STEP,
+                    trim: UNITY_STEP,
+                    pan: CENTRE_STEP,
                     launch_anchor: None,
                     clip: &audio,
                 }]),
@@ -1666,6 +1738,8 @@ mod tests {
                     addr: addr(0, 0),
                     playing: false,
                     gain_step: UNITY_STEP,
+                    trim: UNITY_STEP,
+                    pan: CENTRE_STEP,
                     launch_anchor: None,
                     clip: &audio,
                 }]),
@@ -1693,6 +1767,8 @@ mod tests {
                         addr: addr(0, 0),
                         playing: false,
                         gain_step: UNITY_STEP,
+                        trim: UNITY_STEP,
+                        pan: CENTRE_STEP,
                         launch_anchor: None,
                         clip: &audio,
                     },
@@ -1700,6 +1776,8 @@ mod tests {
                         addr: addr(1, 1),
                         playing: false,
                         gain_step: UNITY_STEP,
+                        trim: UNITY_STEP,
+                        pan: CENTRE_STEP,
                         launch_anchor: None,
                         clip: &audio,
                     },
@@ -1716,6 +1794,8 @@ mod tests {
                     addr: addr(0, 0),
                     playing: false,
                     gain_step: UNITY_STEP,
+                    trim: UNITY_STEP,
+                    pan: CENTRE_STEP,
                     launch_anchor: None,
                     clip: &audio,
                 }]),
@@ -1754,6 +1834,8 @@ mod tests {
                         addr: addr(0, 0),
                         playing: false,
                         gain_step: UNITY_STEP,
+                        trim: UNITY_STEP,
+                        pan: CENTRE_STEP,
                         launch_anchor: None,
                         clip: &audio,
                     }]),
@@ -1792,6 +1874,8 @@ mod tests {
                     addr: addr(4, 5),
                     playing: true,
                     gain_step: UNITY_STEP,
+                    trim: UNITY_STEP,
+                    pan: CENTRE_STEP,
                     launch_anchor: None,
                     clip: &audio,
                 }]),
@@ -1833,6 +1917,8 @@ mod tests {
                     addr: addr(0, 0),
                     playing: false,
                     gain_step: UNITY_STEP,
+                    trim: UNITY_STEP,
+                    pan: CENTRE_STEP,
                     launch_anchor: None,
                     clip: &audio,
                 }]),
@@ -1870,6 +1956,8 @@ mod tests {
                     addr: addr(0, 0),
                     playing: false,
                     gain_step: UNITY_STEP,
+                    trim: UNITY_STEP,
+                    pan: CENTRE_STEP,
                     launch_anchor: None,
                     clip: &audio,
                 }]),
@@ -1909,6 +1997,8 @@ mod tests {
                         addr: addr(1, 0),
                         playing: false,
                         gain_step: 2,
+                        trim: UNITY_STEP,
+                        pan: CENTRE_STEP,
                         launch_anchor: None,
                         clip: &audio,
                     },
@@ -1916,6 +2006,8 @@ mod tests {
                         addr: addr(3, 0),
                         playing: false,
                         gain_step: 6,
+                        trim: UNITY_STEP,
+                        pan: CENTRE_STEP,
                         launch_anchor: None,
                         clip: &audio,
                     },
@@ -1964,6 +2056,8 @@ mod tests {
                     addr: addr(0, 0),
                     playing: false,
                     gain_step: UNITY_STEP,
+                    trim: UNITY_STEP,
+                    pan: CENTRE_STEP,
                     launch_anchor: None,
                     clip: &audio,
                 }]),
@@ -1994,6 +2088,8 @@ mod tests {
                 addr: pad,
                 playing: false,
                 gain_step: UNITY_STEP,
+                trim: UNITY_STEP,
+                pan: CENTRE_STEP,
                 launch_anchor: None,
                 clip: &audio,
             }]
@@ -2026,6 +2122,8 @@ mod tests {
                     addr: addr(0, 0),
                     playing: false,
                     gain_step: UNITY_STEP,
+                    trim: UNITY_STEP,
+                    pan: CENTRE_STEP,
                     launch_anchor: None,
                     clip: &audio,
                 }]),

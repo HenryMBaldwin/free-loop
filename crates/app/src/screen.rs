@@ -7,7 +7,7 @@
 use free_loop_core::{SlotAddr, Subdivision};
 use free_loop_surface::Control;
 
-use crate::control::Mode;
+use crate::control::{Knob, Mode};
 use crate::paint::{
     self, INPUT_SIDE, MUTE_SIDE, NEW_SIDE, NO_PAD, PAN_SIDE, PAUSE_SIDE, PICKUP_COLUMN,
     POLYPHONY_COLUMN, RESTART_COLUMN, SETTINGS_SIDE, SOLO_SIDE, SignaturePart, VOLUME_SIDE,
@@ -49,6 +49,14 @@ pub enum Role {
     Level,
     /// Where a track sits across the stereo field.
     Pan,
+    /// The loop whose level or pan is to be set.
+    PickLoop,
+    /// One step of a loop's level or pan.
+    LoopStep(Knob, usize),
+    /// Swaps a screen between its track-wide and loop-wide halves.
+    Halves,
+    /// Steps back one screen without leaving for the loops.
+    Back,
     /// The input a track records.
     InputChannel,
     /// One of a track's settings.
@@ -95,6 +103,10 @@ pub fn exits(mode: Mode) -> [Option<Button>; 2] {
         Mode::Perform => [None, None],
         Mode::Volume => one(Button::Side(VOLUME_SIDE)),
         Mode::Pan => one(Button::Side(PAN_SIDE)),
+        Mode::LoopPick(knob) | Mode::LoopSet(knob, _) => one(Button::Side(match knob {
+            Knob::Level => VOLUME_SIDE,
+            Knob::Pan => PAN_SIDE,
+        })),
         Mode::Input => one(Button::Side(INPUT_SIDE)),
         Mode::Settings => one(Button::Side(SETTINGS_SIDE)),
         Mode::Mute => one(Button::Side(MUTE_SIDE)),
@@ -120,6 +132,10 @@ pub fn title(mode: Mode) -> &'static str {
         Mode::Solo => "solo",
         Mode::Volume => "volume",
         Mode::Pan => "pan",
+        Mode::LoopPick(Knob::Level) => "loop volume",
+        Mode::LoopPick(Knob::Pan) => "loop pan",
+        Mode::LoopSet(Knob::Level, _) => "this loop's volume",
+        Mode::LoopSet(Knob::Pan, _) => "this loop's pan",
         Mode::Input => "input",
         Mode::Settings => "settings",
         Mode::TimeSignature => "time signature",
@@ -169,17 +185,20 @@ pub fn name(mode: Mode, button: Button) -> Option<String> {
             if slot >= PAN_STEPS {
                 return None;
             }
-            let place = match slot {
-                0 => "hard left".to_owned(),
-                slot if slot == usize::from(CENTRE_STEP) => "centre".to_owned(),
-                slot if slot == PAN_STEPS - 1 => "hard right".to_owned(),
-                slot if slot < usize::from(CENTRE_STEP) => {
-                    format!("left {}", usize::from(CENTRE_STEP) - slot)
-                }
-                slot => format!("right {}", slot - usize::from(CENTRE_STEP)),
-            };
-            format!("track {track} pan {place}")
+            format!("track {track} pan {}", place(slot))
         }
+        (Role::PickLoop, Button::Grid(addr)) => {
+            let (track, slot) = pad(addr);
+            format!("set loop {track},{slot}")
+        }
+        (Role::LoopStep(Knob::Level, step), _) => format!("level {}", step + 1),
+        (Role::LoopStep(Knob::Pan, step), _) => format!("pan {}", place(step)),
+        (Role::Halves, _) => match mode {
+            Mode::LoopPick(knob) | Mode::LoopSet(knob, _) => {
+                format!("back to {}", title(knob.trackwise()))
+            }
+            _ => "one loop at a time".to_owned(),
+        },
         (Role::InputChannel, Button::Grid(addr)) => {
             let (track, slot) = pad(addr);
             format!("track {track} input {slot}")
@@ -220,10 +239,23 @@ pub fn name(mode: Mode, button: Button) -> Option<String> {
 fn leaving(mode: Mode, ways: [Option<Button>; 2]) -> String {
     match mode {
         Mode::ConfirmSave(_) | Mode::ConfirmLoad(_) => format!("back to {}", title(mode)),
+        Mode::LoopSet(knob, _) => format!("back to {}", title(Mode::LoopPick(knob))),
         _ if ways.into_iter().flatten().count() > 1 => {
             format!("hold both to leave {}", title(mode))
         }
         _ => format!("leave {}", title(mode)),
+    }
+}
+
+/// Where a step on the pan row sits, said in words.
+fn place(step: usize) -> String {
+    let centre = usize::from(CENTRE_STEP);
+    match step {
+        0 => "hard left".to_owned(),
+        step if step == centre => "centre".to_owned(),
+        step if step == PAN_STEPS - 1 => "hard right".to_owned(),
+        step if step < centre => format!("left {}", centre - step),
+        step => format!("right {}", step - centre),
     }
 }
 
@@ -236,6 +268,14 @@ fn grid(mode: Mode, addr: SlotAddr) -> Role {
         Mode::Mute | Mode::Solo => Role::Group,
         Mode::Volume => Role::Level,
         Mode::Pan => Role::Pan,
+        Mode::LoopPick(_) => Role::PickLoop,
+        Mode::LoopSet(knob, _) => {
+            if addr.slot.index() < knob.steps() {
+                Role::LoopStep(knob, addr.slot.index())
+            } else {
+                Role::Inert
+            }
+        }
         Mode::Input => Role::InputChannel,
         Mode::Settings => Role::Setting,
         Mode::TimeSignature => match paint::signature_part(addr) {
@@ -258,6 +298,10 @@ fn top(mode: Mode, control: Control) -> Role {
         (Mode::Perform, Control::Rewind) => Role::Rewind,
         // Grouping is what mute and solo do, so it is reachable from both of them.
         (Mode::Perform | Mode::Mute | Mode::Solo, Control::Axis) => Role::Axis,
+        // The same button, meaning the other way of working on this screen.
+        (Mode::Volume | Mode::Pan | Mode::LoopPick(_) | Mode::LoopSet(..), Control::Axis) => {
+            Role::Halves
+        }
         (Mode::Perform | Mode::SavePicker | Mode::ConfirmSave(_), Control::SaveSession) => {
             Role::Open(Mode::SavePicker)
         }
@@ -273,6 +317,8 @@ fn side(mode: Mode, index: usize) -> Role {
         (Mode::LoadPicker, NEW_SIDE) => Role::NewSession,
         (Mode::Perform | Mode::Volume, VOLUME_SIDE) => Role::Open(Mode::Volume),
         (Mode::Perform | Mode::Pan, PAN_SIDE) => Role::Open(Mode::Pan),
+        (Mode::LoopPick(Knob::Level) | Mode::LoopSet(Knob::Level, _), VOLUME_SIDE)
+        | (Mode::LoopPick(Knob::Pan) | Mode::LoopSet(Knob::Pan, _), PAN_SIDE) => Role::Back,
         (Mode::Perform | Mode::Input, INPUT_SIDE) => Role::Open(Mode::Input),
         (Mode::Perform | Mode::Settings, SETTINGS_SIDE) => Role::Open(Mode::Settings),
         (Mode::Perform | Mode::Mute, MUTE_SIDE) => Role::Open(Mode::Mute),
@@ -300,6 +346,10 @@ mod tests {
             Mode::Solo,
             Mode::Volume,
             Mode::Pan,
+            Mode::LoopPick(Knob::Level),
+            Mode::LoopPick(Knob::Pan),
+            Mode::LoopSet(Knob::Level, pad),
+            Mode::LoopSet(Knob::Pan, pad),
             Mode::Input,
             Mode::Settings,
             Mode::TimeSignature,
@@ -372,6 +422,7 @@ mod tests {
     fn one_screen_cannot_be_reached_from_another() {
         let screens = [
             Button::Side(VOLUME_SIDE),
+            Button::Side(PAN_SIDE),
             Button::Side(INPUT_SIDE),
             Button::Side(SETTINGS_SIDE),
             Button::Side(MUTE_SIDE),

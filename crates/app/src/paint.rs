@@ -45,6 +45,10 @@ pub struct Chrome {
     pub polyphony: [Polyphony; TRACK_COUNT],
     /// Where each track sits across the stereo field, as a step on the pan row.
     pub pans: [u8; TRACK_COUNT],
+    /// How loud each loop plays within its track.
+    pub loop_gains: [[u8; SLOT_COUNT]; TRACK_COUNT],
+    /// How far each loop is nudged from where its track sits.
+    pub loop_pans: [[u8; SLOT_COUNT]; TRACK_COUNT],
     /// Input channels the device offers.
     pub input_count: usize,
 }
@@ -112,6 +116,8 @@ impl Default for Chrome {
             pickups: [0; TRACK_COUNT],
             polyphony: [Polyphony::Single; TRACK_COUNT],
             pans: [CENTRE_STEP; TRACK_COUNT],
+            loop_gains: [[UNITY_STEP; SLOT_COUNT]; TRACK_COUNT],
+            loop_pans: [[CENTRE_STEP; SLOT_COUNT]; TRACK_COUNT],
             input_count: 2,
         }
     }
@@ -185,6 +191,9 @@ pub const MUTED: LedColor = LedColor::Red;
 
 /// Colour a soloed group takes, matching its side button.
 pub const SOLOED: LedColor = LedColor::Blue;
+
+/// Colour a level takes, matching the track volumes.
+pub const LEVEL: LedColor = LedColor::White;
 
 /// Colour the pan row takes.
 pub const PAN: LedColor = LedColor::Green;
@@ -420,6 +429,46 @@ pub fn pans(chrome: Chrome) -> LedFrame {
             Led::dim(PAN_CENTRE)
         } else {
             Led::dim(PAN)
+        };
+        frame.set_pad(addr, led);
+    }
+
+    finish(&mut frame, chrome);
+    frame
+}
+
+/// Paints the loops, waiting for the one whose level or pan is to be set.
+///
+/// A pad holding a clip is lit; the rest are dark.
+pub fn loop_picker(session: &SessionModel, chrome: Chrome) -> LedFrame {
+    let mut frame = LedFrame::new();
+
+    for addr in SlotAddr::all() {
+        if session.state(addr).clip().is_some() {
+            frame.set_pad(addr, Led::dim(SELECTED));
+        }
+    }
+
+    finish(&mut frame, chrome);
+    frame
+}
+
+/// Paints one loop's level or pan across the whole grid, as a full-height slider.
+///
+/// Every row shows the same value. Columns past the end of the row are dark.
+pub fn loop_slider(step: usize, steps: usize, colour: LedColor, chrome: Chrome) -> LedFrame {
+    let mut frame = LedFrame::new();
+
+    for addr in SlotAddr::all() {
+        let column = addr.slot.index();
+        let led = if column >= steps {
+            Led::OFF
+        } else {
+            match column.cmp(&step) {
+                Ordering::Equal => Led::solid(colour),
+                Ordering::Less => Led::dim(colour),
+                Ordering::Greater => Led::OFF,
+            }
         };
         frame.set_pad(addr, led);
     }

@@ -11,8 +11,8 @@
 use free_loop_core::{
     BarGrid, CENTRE_STEP, ClipId, Command, Ctx, Effect, Event, Frames, LaunchMode, PadMask, Pan,
     Polyphony, SLOT_COUNT, SampleRate, SessionModel, Settings, SlotAddr, SlotState, Subdivision,
-    TRACK_COUNT, Tempo, TimeError, TimeSignature, TrackId, TrackInput, UNITY_STEP, gain_for_step,
-    pad_bit, pan_for_step,
+    TRACK_COUNT, Tempo, TimeError, TimeSignature, TrackId, TrackInput, UNITY_STEP, compose_steps,
+    gain_for_step, pad_bit, pan_for_step,
 };
 
 use std::sync::Arc;
@@ -477,8 +477,12 @@ pub struct Engine {
     polyphony: [Polyphony; TRACK_COUNT],
     /// Where each track sits across the stereo field, as a step on the pan row.
     pans: [u8; TRACK_COUNT],
-    /// The pan each track is mixing at, which slides toward where it should be.
-    pan_now: [Pan; TRACK_COUNT],
+    /// How loud each loop plays within its track.
+    loop_gains: [[u8; SLOT_COUNT]; TRACK_COUNT],
+    /// How far each loop is nudged from where its track sits.
+    loop_pans: [[u8; SLOT_COUNT]; TRACK_COUNT],
+    /// The pan each pad is mixing at, which slides toward where it should be.
+    pan_now: [[Pan; SLOT_COUNT]; TRACK_COUNT],
     /// The gain each pad is mixing at, which slides toward what it should be.
     levels: [[f32; SLOT_COUNT]; TRACK_COUNT],
     /// Frames a level takes to travel the full gain range.
@@ -560,7 +564,9 @@ impl Engine {
             gains: [UNITY_STEP; TRACK_COUNT],
             polyphony: [Polyphony::default(); TRACK_COUNT],
             pans: [CENTRE_STEP; TRACK_COUNT],
-            pan_now: [Pan::CENTRE; TRACK_COUNT],
+            loop_gains: [[UNITY_STEP; SLOT_COUNT]; TRACK_COUNT],
+            loop_pans: [[CENTRE_STEP; SLOT_COUNT]; TRACK_COUNT],
+            pan_now: [[Pan::CENTRE; SLOT_COUNT]; TRACK_COUNT],
             levels: [[0.0; SLOT_COUNT]; TRACK_COUNT],
             declick: as_usize(config.declick.0),
             pending: None,
@@ -617,6 +623,12 @@ impl Engine {
         gain_for_step(self.gains[track.index()])
     }
 
+    /// How loud a pad plays: its track's level, trimmed by the loop's own.
+    fn pad_gain(&self, addr: SlotAddr) -> f32 {
+        self.gain(addr.track)
+            * gain_for_step(self.loop_gains[addr.track.index()][addr.slot.index()])
+    }
+
     /// Whether a pad would be heard if it were playing.
     ///
     /// A solo anywhere silences everything outside it.
@@ -637,7 +649,7 @@ impl Engine {
         if !self.session.state(addr).is_sounding() || !self.is_audible(addr) {
             return 0.0;
         }
-        self.gain(addr.track)
+        self.pad_gain(addr)
     }
 
     /// How a level moves toward `target` over `run` frames, and where it ends up.
@@ -666,17 +678,20 @@ impl Engine {
         clippy::cast_precision_loss,
         reason = "block lengths are far below f32's exact range"
     )]
-    fn pan_ramps(&mut self, run: usize) -> [PanRamp; TRACK_COUNT] {
+    fn pan_ramps(&mut self, run: usize) -> [[PanRamp; SLOT_COUNT]; TRACK_COUNT] {
         core::array::from_fn(|track| {
-            let from = self.pan_now[track];
-            let target = pan_for_step(self.pans[track]);
-            if self.declick == 0 {
-                self.pan_now[track] = target;
-                return PanRamp::constant(target);
-            }
-            let reached = from.toward(target, run as f32 / self.declick as f32);
-            self.pan_now[track] = reached;
-            PanRamp::new(from, reached, run)
+            core::array::from_fn(|slot| {
+                let from = self.pan_now[track][slot];
+                let target =
+                    pan_for_step(compose_steps(self.pans[track], self.loop_pans[track][slot]));
+                if self.declick == 0 {
+                    self.pan_now[track][slot] = target;
+                    return PanRamp::constant(target);
+                }
+                let reached = from.toward(target, run as f32 / self.declick as f32);
+                self.pan_now[track][slot] = reached;
+                PanRamp::new(from, reached, run)
+            })
         })
     }
 
@@ -773,6 +788,8 @@ impl Engine {
         self.audio.pickups = settings.pickups;
         self.polyphony = settings.polyphony;
         self.pans = settings.pans;
+        self.loop_gains = settings.loop_gains;
+        self.loop_pans = settings.loop_pans;
 
         // Every exclusive track, not only one that has just become exclusive: a loaded
         // session can arrive with several loops sounding on one.
@@ -1260,7 +1277,6 @@ impl Engine {
     ) {
         let out = &mut output[offset * self.channels..(offset + run) * self.channels];
 
-        // Hoisted out of the pad loop: a track's pads share its pan.
         let pans = self.pan_ramps(run);
 
         for addr in SlotAddr::all() {
@@ -1276,7 +1292,7 @@ impl Engine {
             if let Some(clip) = self.audio.clip(addr) {
                 let anchor = self.audio.anchor(addr, clip);
                 let pickup = self.grid.beat_offset(u32::from(self.audio.pickups[track]));
-                clip.mix_pickup(anchor, self.position, out, ramp, pickup, pans[track]);
+                clip.mix_pickup(anchor, self.position, out, ramp, pickup, pans[track][slot]);
             }
         }
 

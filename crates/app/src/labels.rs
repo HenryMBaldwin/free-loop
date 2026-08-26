@@ -58,6 +58,7 @@ mod tests {
     #![allow(clippy::unwrap_used, reason = "tests should fail loudly")]
 
     use super::*;
+    use crate::control::Knob;
     use crate::paint::{MUTE_SIDE, PAUSE_SIDE, VOLUME_SIDE};
     use launchpad_emulator::DeviceSpec;
     use launchpad_emulator::devices::LaunchpadX;
@@ -143,6 +144,10 @@ mod tests {
             Mode::Solo,
             Mode::Volume,
             Mode::Pan,
+            Mode::LoopPick(Knob::Level),
+            Mode::LoopPick(Knob::Pan),
+            Mode::LoopSet(Knob::Level, pad(1, 2)),
+            Mode::LoopSet(Knob::Pan, pad(1, 2)),
             Mode::Input,
             Mode::Settings,
             Mode::TimeSignature,

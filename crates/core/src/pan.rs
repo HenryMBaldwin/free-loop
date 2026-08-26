@@ -10,6 +10,11 @@ pub const PAN_STEPS: usize = 7;
 /// The step that sits dead centre.
 pub const CENTRE_STEP: u8 = 3;
 
+/// The step at the right-hand end of the row.
+pub const LAST_STEP: u8 = CENTRE_STEP * 2;
+
+const _: () = assert!(PAN_STEPS == CENTRE_STEP as usize * 2 + 1);
+
 /// Where a track sits across the stereo field.
 ///
 /// `width` collapses the source's own stereo image as the track moves off centre, so a
@@ -78,6 +83,18 @@ const LADDER: [Pan; PAN_STEPS] = [
 
 const fn pan(left: f32, right: f32, width: f32) -> Pan {
     Pan { left, right, width }
+}
+
+/// A track's step nudged by one of its loops, held inside the row.
+///
+/// Loop pan is an offset from centre, not a position of its own.
+pub fn compose_steps(track: u8, loop_step: u8) -> u8 {
+    let track = track.min(LAST_STEP);
+    let nudge = loop_step.min(LAST_STEP);
+    track
+        .saturating_add(nudge)
+        .saturating_sub(CENTRE_STEP)
+        .min(LAST_STEP)
 }
 
 /// Where a step sits. Steps past the end read as centre.
@@ -164,6 +181,43 @@ mod tests {
     #[test]
     fn a_step_past_the_end_reads_as_centre() {
         assert_eq!(pan_for_step(99), Pan::CENTRE);
+    }
+
+    #[test]
+    fn a_loop_at_centre_leaves_its_track_where_it_was() {
+        for track in 0..u8::try_from(PAN_STEPS).unwrap() {
+            assert_eq!(compose_steps(track, CENTRE_STEP), track);
+        }
+    }
+
+    #[test]
+    fn a_loop_nudges_its_track_across_the_row() {
+        assert_eq!(
+            compose_steps(CENTRE_STEP, 6),
+            6,
+            "centre track, hard right loop"
+        );
+        assert_eq!(
+            compose_steps(CENTRE_STEP, 0),
+            0,
+            "centre track, hard left loop"
+        );
+        assert_eq!(compose_steps(0, 6), CENTRE_STEP, "they cancel out");
+        assert_eq!(compose_steps(2, 4), CENTRE_STEP);
+    }
+
+    #[test]
+    fn a_nudge_past_the_end_stops_at_the_end() {
+        assert_eq!(compose_steps(6, 6), 6);
+        assert_eq!(compose_steps(0, 0), 0);
+        assert_eq!(compose_steps(5, 6), 6);
+    }
+
+    #[test]
+    fn a_step_past_the_row_is_held_inside_it() {
+        let last = u8::try_from(PAN_STEPS - 1).unwrap();
+        assert_eq!(compose_steps(200, CENTRE_STEP), last);
+        assert_eq!(compose_steps(CENTRE_STEP, 200), last);
     }
 
     #[test]

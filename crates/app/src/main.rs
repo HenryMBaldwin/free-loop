@@ -309,6 +309,10 @@ fn play(
 /// without one.
 trait Audio {
     /// Queues a command for the engine. `Err` if the ring is full.
+    #[allow(
+        clippy::result_large_err,
+        reason = "the command comes back to be retried in order, on the control thread"
+    )]
     fn send(&mut self, command: Command) -> Result<(), Command>;
 
     /// Hands every report the engine has made to `handler`.
@@ -641,6 +645,7 @@ fn load_session(
             }));
             controller.set_pickups(core::array::from_fn(|track| restored.tracks[track].pickup));
             controller.set_pans(core::array::from_fn(|track| restored.tracks[track].pan));
+            controller.set_loop_mix(restored.loop_mix);
             controller.set_polyphony(core::array::from_fn(|track| {
                 if restored.tracks[track].multiple {
                     free_loop_core::Polyphony::Multiple
@@ -705,6 +710,10 @@ fn carry_out_save(
 }
 
 /// What became of the save that was waiting.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the answer carries the settings the save was asked with"
+)]
 #[derive(Debug)]
 enum SaveOutcome {
     /// Still waiting for its answer.
@@ -799,6 +808,10 @@ struct SaveSettings {
     /// The signature the material is in, which a load can have changed.
     time_signature: TimeSignature,
     tracks: [TrackSettings; free_loop_core::TRACK_COUNT],
+    /// How loud each loop plays within its track.
+    loop_gains: [[u8; free_loop_core::SLOT_COUNT]; free_loop_core::TRACK_COUNT],
+    /// How far each loop is nudged from where its track sits.
+    loop_pans: [[u8; free_loop_core::SLOT_COUNT]; free_loop_core::TRACK_COUNT],
 }
 
 /// What the controller currently has set.
@@ -812,6 +825,8 @@ fn save_settings(controller: &Controller) -> SaveSettings {
     SaveSettings {
         tempo: controller.tempo(),
         time_signature: controller.time_signature(),
+        loop_gains: controller.loop_gains(),
+        loop_pans: controller.loop_pans(),
         tracks: core::array::from_fn(|track| TrackSettings {
             input: inputs[track],
             restart: modes[track].restarts(),
@@ -837,6 +852,8 @@ fn save(
         .map(|snapshot| SavedClip {
             addr: snapshot.addr,
             gain_step: settings.tracks[snapshot.addr.track.index()].gain_step,
+            trim: settings.loop_gains[snapshot.addr.track.index()][snapshot.addr.slot.index()],
+            pan: settings.loop_pans[snapshot.addr.track.index()][snapshot.addr.slot.index()],
             playing: matches!(
                 snapshot.state,
                 free_loop_core::SlotState::Playing { .. }
@@ -916,6 +933,7 @@ fn load(
     let session = checked.materialise()?;
     let restored = Restored {
         tracks: session.tracks(),
+        loop_mix: session.loop_mix(),
         tempo: session.manifest.tempo,
         time_signature,
     };
@@ -941,6 +959,8 @@ fn load(
 /// What a loaded session sets besides its audio.
 struct Restored {
     tracks: [TrackSettings; free_loop_core::TRACK_COUNT],
+    /// What each loop was trimmed to within its track.
+    loop_mix: free_loop_session::LoopMix,
     /// What the session was recorded at, which the engine has already taken.
     tempo: f64,
     /// What the session was recorded in, which the engine has already taken.
@@ -1443,6 +1463,8 @@ mod tests {
                             addr: pad(0, 0),
                             playing: true,
                             gain_step: free_loop_core::UNITY_STEP,
+                            trim: free_loop_core::UNITY_STEP,
+                            pan: free_loop_core::CENTRE_STEP,
                             launch_anchor: None,
                             clip: &clip,
                         }],
@@ -2128,6 +2150,10 @@ mod tests {
                 tempo: 120.0,
                 time_signature: TimeSignature::FOUR_FOUR,
                 tracks: [TrackSettings::default(); free_loop_core::TRACK_COUNT],
+                loop_gains: [[free_loop_core::UNITY_STEP; free_loop_core::SLOT_COUNT];
+                    free_loop_core::TRACK_COUNT],
+                loop_pans: [[free_loop_core::CENTRE_STEP; free_loop_core::SLOT_COUNT];
+                    free_loop_core::TRACK_COUNT],
             },
         }
     }
