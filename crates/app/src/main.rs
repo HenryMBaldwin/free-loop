@@ -321,6 +321,10 @@ fn run(s: Session<'_>) {
     let mut published = None;
     // Requests not yet acted on, which wait for the commands ahead of them to go out.
     let mut asked: Vec<Request> = Vec::new();
+    // Whether a load is still sitting in the loader's channel. The audio side takes
+    // settings and commands before it applies one, so anything sent while a load is in
+    // flight would reach the engine in front of it.
+    let mut loading = false;
 
     while running.load(Ordering::Relaxed) {
         let now = started.elapsed();
@@ -342,18 +346,22 @@ fn run(s: Session<'_>) {
         // Storage the engine has finished with comes back here to be dropped.
         housekeeping.recycler.take_borrowed().for_each(drop);
 
-        if let Some(settings) = settings_to_publish(controller, &queued) {
+        // Cleared once the engine has taken every step of the load, which it commits in
+        // the same callback that empties the channel.
+        loading &= !housekeeping.loader.ready();
+
+        if let Some(settings) = settings_to_publish(controller, &queued, loading) {
             io.publish_settings(settings);
         }
         queued.extend(controller.drain_commands());
-        send_commands(&mut queued, |command| io.send(command).is_ok());
+        send_commands(&mut queued, loading, |command| io.send(command).is_ok());
 
         // After the commands, and only once none are waiting. A load goes through its own
         // channel, which the audio side applies after the command ring: starting one while
         // a gesture is still queued would let the load land first.
         // Held here, so the ones not acted on this pass are still waiting on the next.
         asked.extend(controller.drain_requests());
-        while let Some(request) = next_to_act_on(&queued, &mut asked) {
+        while let Some(request) = next_to_act_on(&queued, &mut asked, loading) {
             match request {
                 Request::SaveSession(addr) => {
                     next_request = next_request.wrapping_add(1);
@@ -361,15 +369,20 @@ fn run(s: Session<'_>) {
                     let save = ask_for_snapshot(&mut queued, next_request, addr, controller, now);
                     pending_save = Some(save);
                 }
-                Request::LoadSession(addr) => load_session(
-                    store,
-                    addr,
-                    &mut housekeeping.loader,
-                    &negotiated,
-                    controller,
-                    config,
-                    now,
-                ),
+                Request::LoadSession(addr) => {
+                    load_session(
+                        store,
+                        addr,
+                        &mut housekeeping.loader,
+                        &negotiated,
+                        controller,
+                        config,
+                        now,
+                    );
+                    // Nothing more goes out until the engine has taken it. A load that
+                    // never reached the channel clears this on the next pass.
+                    loading = true;
+                }
             }
         }
 
@@ -945,8 +958,8 @@ fn publish_screen(slot: Option<&Mutex<Mode>>, mode: Mode, published: Option<Mode
 /// One at a time: a save leaves a snapshot in the queue, and a load behind it goes through
 /// its own channel, which the audio side applies after the commands. Taking the load now
 /// would land it first.
-fn next_to_act_on(queued: &[Command], asked: &mut Vec<Request>) -> Option<Request> {
-    if !queued.is_empty() || asked.is_empty() {
+fn next_to_act_on(queued: &[Command], asked: &mut Vec<Request>, loading: bool) -> Option<Request> {
+    if loading || !queued.is_empty() || asked.is_empty() {
         return None;
     }
     Some(asked.remove(0))
@@ -961,8 +974,9 @@ fn next_to_act_on(queued: &[Command], asked: &mut Vec<Request>) -> Option<Reques
 fn settings_to_publish(
     controller: &mut Controller,
     queued: &[Command],
+    loading: bool,
 ) -> Option<free_loop_core::Settings> {
-    if !queued.is_empty() {
+    if loading || !queued.is_empty() {
         return None;
     }
     controller.take_settings()
@@ -991,7 +1005,11 @@ fn ask_for_snapshot(
 ///
 /// Order is kept: a press toggles, so anything behind a command that did not fit waits for
 /// it. `send` reports whether the engine took the command.
-fn send_commands(queued: &mut Vec<Command>, mut send: impl FnMut(Command) -> bool) {
+fn send_commands(queued: &mut Vec<Command>, loading: bool, mut send: impl FnMut(Command) -> bool) {
+    // A load already handed over is applied after these, so they wait for it.
+    if loading {
+        return;
+    }
     let taken = queued.iter().take_while(|queued| send(**queued)).count();
     queued.drain(..taken);
 }
@@ -1175,7 +1193,7 @@ mod tests {
         // Room for the first only.
         let mut room = 1;
         let mut taken = Vec::new();
-        send_commands(&mut queued, |command| {
+        send_commands(&mut queued, false, |command| {
             if room == 0 {
                 return false;
             }
@@ -1192,7 +1210,7 @@ mod tests {
 
         // Room for the rest, in the order they were made.
         let mut rest = Vec::new();
-        send_commands(&mut queued, |command| {
+        send_commands(&mut queued, false, |command| {
             rest.push(command);
             true
         });
@@ -1210,8 +1228,64 @@ mod tests {
 
         // The first press is refused, so the second must not be applied on its own: two
         // presses are a record and a stop, one is a take left running.
-        send_commands(&mut queued, |_| false);
+        send_commands(&mut queued, false, |_| false);
         assert_eq!(queued.len(), 2, "both still waiting");
+    }
+
+    #[test]
+    fn a_save_waits_for_the_load_in_front_of_it_to_commit() {
+        let pad = pad(1, 2);
+        let mut asked = vec![Request::LoadSession(pad), Request::SaveSession(pad)];
+        let queued: Vec<Command> = Vec::new();
+
+        assert_eq!(
+            next_to_act_on(&queued, &mut asked, false),
+            Some(Request::LoadSession(pad))
+        );
+
+        // The load is in its own channel now, and the queue it left behind is empty. The
+        // audio side takes commands before it applies a load, so a snapshot asked for now
+        // would photograph the session the load is about to replace.
+        assert_eq!(next_to_act_on(&queued, &mut asked, true), None);
+        assert_eq!(asked.len(), 1, "and is not lost by being held back");
+
+        assert_eq!(
+            next_to_act_on(&queued, &mut asked, false),
+            Some(Request::SaveSession(pad)),
+            "once the engine has taken the load"
+        );
+    }
+
+    #[test]
+    fn a_command_on_a_later_pass_waits_for_the_load_too() {
+        let pad = pad(0, 0);
+        let mut queued = vec![Command::Press(pad)];
+
+        let mut taken = Vec::new();
+        send_commands(&mut queued, true, |command| {
+            taken.push(command);
+            true
+        });
+        assert!(taken.is_empty(), "sent in front of the load");
+        assert_eq!(queued, vec![Command::Press(pad)], "and still waiting");
+
+        send_commands(&mut queued, false, |command| {
+            taken.push(command);
+            true
+        });
+        assert_eq!(taken, vec![Command::Press(pad)]);
+        assert!(queued.is_empty());
+    }
+
+    #[test]
+    fn a_setting_waits_for_the_load_in_front_of_it() {
+        let mut controller = Controller::new(120.0, TimeSignature::FOUR_FOUR, true);
+
+        assert!(settings_to_publish(&mut controller, &[], true).is_none());
+        assert!(
+            settings_to_publish(&mut controller, &[], false).is_some(),
+            "and is still on offer once the load has been taken"
+        );
     }
 
     #[test]
@@ -1222,22 +1296,26 @@ mod tests {
 
         // The save goes first, and leaves its snapshot behind it.
         assert_eq!(
-            next_to_act_on(&queued, &mut asked),
+            next_to_act_on(&queued, &mut asked, false),
             Some(Request::SaveSession(pad))
         );
         queued.push(Command::Snapshot { request: 1 });
 
         // The load must not start its transaction while that is still waiting: the audio
         // side applies a load after the command ring, so it would commit first.
-        assert_eq!(next_to_act_on(&queued, &mut asked), None);
+        assert_eq!(next_to_act_on(&queued, &mut asked, false), None);
         assert_eq!(asked.len(), 1, "and is not lost by being passed over");
 
         queued.clear();
         assert_eq!(
-            next_to_act_on(&queued, &mut asked),
+            next_to_act_on(&queued, &mut asked, false),
             Some(Request::LoadSession(pad))
         );
-        assert_eq!(next_to_act_on(&queued, &mut asked), None, "nothing left");
+        assert_eq!(
+            next_to_act_on(&queued, &mut asked, false),
+            None,
+            "nothing left"
+        );
     }
 
     #[test]
@@ -1280,15 +1358,15 @@ mod tests {
         let backlog = vec![Command::Press(pad(0, 0))];
 
         // Dirty from construction, so there is something to hold back.
-        assert!(settings_to_publish(&mut controller, &backlog).is_none());
-        assert!(settings_to_publish(&mut controller, &backlog).is_none());
+        assert!(settings_to_publish(&mut controller, &backlog, false).is_none());
+        assert!(settings_to_publish(&mut controller, &backlog, false).is_none());
 
         assert!(
-            settings_to_publish(&mut controller, &[]).is_some(),
+            settings_to_publish(&mut controller, &[], false).is_some(),
             "still on offer once the backlog clears"
         );
         assert!(
-            settings_to_publish(&mut controller, &[]).is_none(),
+            settings_to_publish(&mut controller, &[], false).is_none(),
             "and only offered once"
         );
     }
