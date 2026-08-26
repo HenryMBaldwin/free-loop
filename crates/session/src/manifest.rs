@@ -29,14 +29,9 @@ pub struct ClipEntry {
     pub phase_frames: u64,
     /// Whether the pad was sounding.
     pub playing: bool,
-    /// The step on the gain ladder its track was playing at.
-    ///
-    /// Stored per clip although volume is set per track.
-    #[serde(default = "unity")]
-    pub gain_step: u8,
     /// How loud the loop plays within its track.
     #[serde(default = "unity")]
-    pub trim: u8,
+    pub gain_step: u8,
     /// How far the loop is nudged from where its track sits.
     #[serde(default = "centre")]
     pub pan: u8,
@@ -168,9 +163,6 @@ impl Manifest {
                 return Err("a clip's launch phase is outside its own length");
             }
             if usize::from(entry.gain_step) >= GAIN_STEPS {
-                return Err("a clip's level is off the ladder");
-            }
-            if usize::from(entry.trim) >= GAIN_STEPS {
                 return Err("a loop's trim is off the ladder");
             }
             if usize::from(entry.pan) >= PAN_STEPS {
@@ -253,7 +245,6 @@ mod tests {
                 playing: true,
                 capture_offset_frames: 2_348,
                 gain_step: 2,
-                trim: UNITY_STEP,
                 pan: CENTRE_STEP,
                 tail_frames: 0,
                 launch_phase_frames: Some(48),
