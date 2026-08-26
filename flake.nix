@@ -18,6 +18,7 @@
                     packages = [
                         rust
                         pkgs.cargo-workspaces
+                        pkgs.just
                         pkgs.prek
                         pkgs.nodejs
                         pkgs.commitlint
