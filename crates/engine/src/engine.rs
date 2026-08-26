@@ -734,8 +734,7 @@ impl Engine {
         self.emit_changes(&before, sink);
     }
 
-    /// Takes the latest whole-state settings, folding any track that has just left
-    /// [`Polyphony::Multiple`].
+    /// Takes the latest whole-state settings, folding every exclusive track to one loop.
     ///
     /// A take in progress keeps the input it started on, and a clip already sounding
     /// keeps the anchor it was launched with.

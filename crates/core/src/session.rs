@@ -94,8 +94,8 @@ impl SessionModel {
 
     /// Leaves one loop sounding on `track` and stops the rest on a bar boundary.
     ///
-    /// For a track leaving [`Polyphony::Multiple`]. A take in flight is the one kept and
-    /// the rest hand over to it; with no take the lowest-numbered survives.
+    /// A take in flight is the one kept and the rest hand over to it; with no take the
+    /// lowest-numbered survives.
     pub fn fold_to_one(
         &mut self,
         track: TrackId,
