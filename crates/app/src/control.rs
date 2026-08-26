@@ -669,15 +669,12 @@ impl Controller {
         self.mark_settings();
     }
 
-    /// Swaps between working on tracks and working on one loop at a time.
-    fn flip_halves(&mut self) {
-        self.mode = match self.mode {
-            Mode::Volume => Mode::LoopPick(Knob::Level),
-            Mode::Pan => Mode::LoopPick(Knob::Pan),
-            Mode::LoopPick(knob) | Mode::LoopSet(knob, _) => knob.trackwise(),
-            other => other,
-        };
-        self.dirty = true;
+    /// Which half of a mixing screen the row-or-column toggle is asking for.
+    fn mixing(&self, knob: Knob) -> Mode {
+        match self.chrome.axis {
+            Axis::Row => knob.trackwise(),
+            Axis::Column => Mode::LoopPick(knob),
+        }
     }
 
     /// Leaves the slider for the loop it belongs to, and the picker for the loops.
@@ -716,6 +713,11 @@ impl Controller {
     }
 
     fn set_mode(&mut self, wanted: Mode) {
+        let wanted = match wanted {
+            Mode::Volume => self.mixing(Knob::Level),
+            Mode::Pan => self.mixing(Knob::Pan),
+            other => other,
+        };
         self.input_held = None;
         self.mode = if self.mode == wanted {
             Mode::Perform
@@ -1000,11 +1002,20 @@ impl Controller {
             Role::Rewind => self.command(Command::Rewind),
             Role::Axis => {
                 self.chrome.axis = self.chrome.axis.flipped();
+                // A mixing screen follows the same toggle, on the way in and once open.
+                self.mode = match self.mode {
+                    Mode::Volume | Mode::LoopPick(Knob::Level) | Mode::LoopSet(Knob::Level, _) => {
+                        self.mixing(Knob::Level)
+                    }
+                    Mode::Pan | Mode::LoopPick(Knob::Pan) | Mode::LoopSet(Knob::Pan, _) => {
+                        self.mixing(Knob::Pan)
+                    }
+                    other => other,
+                };
                 self.dirty = true;
             }
             Role::NewSession => self.start_fresh(),
             Role::Open(mode) => self.set_mode(mode),
-            Role::Halves => self.flip_halves(),
             Role::Back => self.step_back(),
             _ => {}
         }
@@ -1446,11 +1457,15 @@ impl Controller {
             paint::loop_picker(&self.session, self.chrome)
         } else if let Mode::LoopSet(knob, addr) = self.mode {
             let (track, slot) = (addr.track.index(), addr.slot.index());
-            let (step, colour) = match knob {
-                Knob::Level => (self.chrome.loop_gains[track][slot], paint::LEVEL),
-                Knob::Pan => (self.chrome.loop_pans[track][slot], paint::PAN),
-            };
-            paint::loop_slider(usize::from(step), knob.steps(), colour, self.chrome)
+            match knob {
+                Knob::Level => paint::loop_level(
+                    usize::from(self.chrome.loop_gains[track][slot]),
+                    self.chrome,
+                ),
+                Knob::Pan => {
+                    paint::loop_pan(usize::from(self.chrome.loop_pans[track][slot]), self.chrome)
+                }
+            }
         } else if self.mode == Mode::Input {
             paint::inputs(self.chrome)
         } else if self.mode == Mode::Settings {
@@ -3523,13 +3538,33 @@ mod tests {
         assert_eq!(settings.pans[2], 0);
     }
 
-    /// Presses the top-row button that swaps a screen between its two halves.
+    /// Presses the row-or-column button, which is also the track-or-loop button.
     fn halves() -> SurfaceEvent {
         SurfaceEvent::ControlPressed(Control::Axis)
     }
 
     #[test]
-    fn the_halves_button_walks_between_track_and_loop_mixing() {
+    fn the_toggle_set_on_the_loops_decides_which_half_opens() {
+        let mut controller = controller();
+
+        // Flipped before the screen is opened, the way mute and solo take it.
+        controller.on_surface(halves(), T0);
+        controller.on_surface(side(VOLUME_SIDE), T0);
+        assert_eq!(controller.mode(), Mode::LoopPick(Knob::Level));
+
+        controller.on_surface(side(VOLUME_SIDE), T0);
+        controller.on_surface(side(PAN_SIDE), T0);
+        assert_eq!(controller.mode(), Mode::LoopPick(Knob::Pan), "and for pan");
+
+        // Back to the primary half, again from the loops.
+        controller.on_surface(side(PAN_SIDE), T0);
+        controller.on_surface(halves(), T0);
+        controller.on_surface(side(VOLUME_SIDE), T0);
+        assert_eq!(controller.mode(), Mode::Volume);
+    }
+
+    #[test]
+    fn the_toggle_swaps_the_halves_while_the_screen_is_open() {
         let mut controller = controller();
         controller.on_surface(side(VOLUME_SIDE), T0);
         assert_eq!(controller.mode(), Mode::Volume);
