@@ -1989,6 +1989,44 @@ mod tests {
     }
 
     #[test]
+    fn clearing_a_session_asks_first_and_no_means_no() {
+        let mut harness = Harness::new("empty-save-refused");
+        let stored = pad(2, 2);
+        harness.put_session(stored);
+        harness.pass();
+        harness.io.callback();
+
+        // An empty grid onto a stored session is the destructive one, and it asks.
+        choose_save(&mut harness, stored);
+        harness.pass();
+        assert_eq!(
+            harness.controller.mode(),
+            free_loop::Mode::ConfirmSave(stored),
+            "it asked before removing anything"
+        );
+
+        let no = pad(
+            u8::try_from(free_loop::paint::NO_PAD.0).unwrap(),
+            u8::try_from(free_loop::paint::NO_PAD.1).unwrap(),
+        );
+        harness.press(SurfaceEvent::PadPressed {
+            addr: no,
+            velocity: 100,
+        });
+        harness.press(SurfaceEvent::PadReleased { addr: no });
+        harness.pass();
+        harness.io.callback();
+        for _ in 0..4 {
+            harness.pass();
+        }
+
+        assert!(
+            harness.store.index().contains(&stored),
+            "the session is still there"
+        );
+    }
+
+    #[test]
     fn saving_an_empty_grid_onto_an_empty_pad_does_nothing() {
         let mut harness = Harness::new("empty-save-nothing");
         let free = pad(4, 4);
