@@ -107,6 +107,11 @@ pub enum Event {
         clips: u32,
         /// How many pads there were to publish. More than `clips` means some were lost.
         expected: u32,
+        /// Whether the grid held nothing at all, a take still being recorded included.
+        ///
+        /// A pad still recording publishes no clip, leaving a count of zero that is not
+        /// on its own proof there was nothing to save.
+        empty: bool,
     },
 }
 

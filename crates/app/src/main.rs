@@ -730,18 +730,19 @@ enum SaveOutcome {
 /// the engine will not send it again.
 fn resolve_save(
     pending: &mut Option<PendingSave>,
-    answered: Option<(u32, u32, u32)>,
+    answered: Option<Published>,
     now: Duration,
 ) -> SaveOutcome {
-    if let Some((request, clips, expected)) = answered
-        && pending.as_ref().is_some_and(|save| save.request == request)
+    if let Some(published) = answered
+        && pending
+            .as_ref()
+            .is_some_and(|save| save.request == published.request)
         && let Some(save) = pending.take()
     {
         return SaveOutcome::Answered(Answered {
             addr: save.addr,
             settings: save.settings,
-            clips,
-            expected,
+            published,
         });
     }
     match pending.take_if(|save| now >= save.deadline) {
@@ -756,10 +757,21 @@ struct Answered {
     addr: free_loop_core::SlotAddr,
     /// What was set when the snapshot was asked for.
     settings: SaveSettings,
+    /// What the engine published.
+    published: Published,
+}
+
+/// What the engine had to send when a snapshot was asked for.
+#[derive(Debug, Clone, Copy)]
+struct Published {
+    /// Which request this answers.
+    request: u32,
     /// Pads that arrived.
     clips: u32,
     /// Pads there were to send. More than `clips` means some were lost on the way.
     expected: u32,
+    /// Whether the grid held nothing at all, a take still being recorded included.
+    empty: bool,
 }
 
 /// Writes a save, or reports that not all of it arrived.
@@ -772,21 +784,27 @@ fn settle_save(
     controller: &mut Controller,
     now: Duration,
 ) {
-    if save.clips != save.expected {
+    if save.published.clips != save.published.expected {
         tracing::warn!(
             "save abandoned: {} of {} pads arrived",
-            save.clips,
-            save.expected
+            save.published.clips,
+            save.published.expected
         );
         controller.save_failed(now);
         return;
     }
     // An empty grid is not a session. Saving one clears the pad, or does nothing to a
     // pad that was already empty.
-    // An empty grid is not a session. Saving one clears the pad, or does nothing to a
-    // pad that was already empty.
-    if save.clips == 0 {
-        clear_session(store, save.addr, controller, now);
+    if save.published.clips == 0 {
+        // An empty grid is not a session, and saving one clears the pad. A count of zero
+        // with a take still running is not that: it has nothing finished to write yet.
+        if save.published.empty {
+            clear_session(store, save.addr, controller, now);
+        } else {
+            let (track, slot) = (save.addr.track.index(), save.addr.slot.index());
+            tracing::info!("nothing saved to {track}{slot}: every pad is still recording");
+            controller.save_skipped(now);
+        }
         return;
     }
     write_session(store, save, config, negotiated, snapshots, controller, now);
@@ -1047,7 +1065,7 @@ fn forward_clock(surface: &mut dyn ControlSurface, total: Option<u64>, sent: u64
 /// What one pass of the engine's reports added up to.
 struct Drained {
     /// The snapshot completion, if one arrived.
-    answered: Option<(u32, u32, u32)>,
+    answered: Option<Published>,
     /// The transport's running clock count, if it reported one.
     clock_total: Option<u64>,
     clipped: u32,
@@ -1068,7 +1086,15 @@ fn drain_engine<A: Audio>(io: &mut A, controller: &mut Controller, now: Duration
                 request,
                 clips,
                 expected,
-            } => drained.answered = Some((request, clips, expected)),
+                empty,
+            } => {
+                drained.answered = Some(Published {
+                    request,
+                    clips,
+                    expected,
+                    empty,
+                });
+            }
             Event::Clock { total } => drained.clock_total = Some(total),
             Event::Clipped { samples } => drained.clipped += samples,
             Event::Xrun { frames } => drained.short_frames += frames,
@@ -1921,6 +1947,48 @@ mod tests {
     }
 
     #[test]
+    fn a_grid_whose_only_take_is_still_recording_is_not_an_empty_grid() {
+        let mut harness = Harness::new("recording-not-empty");
+        let stored = pad(2, 2);
+        harness.put_session(stored);
+        harness.pass();
+        harness.io.callback();
+        assert!(harness.store.index().contains(&stored));
+
+        // Arm a take, which holds no finished audio for the snapshot to publish.
+        let take = pad(5, 5);
+        harness.press(SurfaceEvent::PadPressed {
+            addr: take,
+            velocity: 100,
+        });
+        harness.press(SurfaceEvent::PadReleased { addr: take });
+        harness.pass();
+        harness.io.callback();
+        harness.pass();
+        assert!(
+            harness.io.engine.state(take).is_recording(),
+            "the pad is armed or running"
+        );
+
+        choose_save(&mut harness, stored);
+        harness.press(SurfaceEvent::PadPressed {
+            addr: pad(0, 0),
+            velocity: 100,
+        });
+        harness.press(SurfaceEvent::PadReleased { addr: pad(0, 0) });
+        harness.pass();
+        harness.io.callback();
+        for _ in 0..4 {
+            harness.pass();
+        }
+
+        assert!(
+            harness.store.index().contains(&stored),
+            "a take in flight is not an empty grid"
+        );
+    }
+
+    #[test]
     fn saving_an_empty_grid_onto_an_empty_pad_does_nothing() {
         let mut harness = Harness::new("empty-save-nothing");
         let free = pad(4, 4);
@@ -2268,24 +2336,37 @@ mod tests {
         assert!(pending.is_some(), "still expecting its answer");
     }
 
+    /// What the engine answers with when every pad it had to send arrived.
+    fn published(request: u32, clips: u32) -> Published {
+        Published {
+            request,
+            clips,
+            expected: clips,
+            empty: clips == 0,
+        }
+    }
+
     #[test]
     fn an_answer_to_this_save_finishes_it() {
         let mut pending = Some(waiting(7));
-        let outcome = resolve_save(&mut pending, Some((7, 3, 3)), Duration::from_secs(1));
+        let outcome = resolve_save(&mut pending, Some(published(7, 3)), Duration::from_secs(1));
 
         let answered = match outcome {
             SaveOutcome::Answered(answered) => answered,
             other => unreachable!("expected an answer, got {other:?}"),
         };
         assert_eq!(answered.addr, pad(1, 2));
-        assert_eq!((answered.clips, answered.expected), (3, 3));
+        assert_eq!(
+            (answered.published.clips, answered.published.expected),
+            (3, 3)
+        );
         assert!(pending.is_none(), "no longer pending");
     }
 
     #[test]
     fn an_answer_to_a_superseded_save_is_not_this_one() {
         let mut pending = Some(waiting(9));
-        let outcome = resolve_save(&mut pending, Some((8, 3, 3)), Duration::from_secs(1));
+        let outcome = resolve_save(&mut pending, Some(published(8, 3)), Duration::from_secs(1));
 
         assert!(matches!(outcome, SaveOutcome::Waiting));
         assert!(pending.is_some(), "still expecting request nine");
@@ -2304,7 +2385,7 @@ mod tests {
     #[test]
     fn an_answer_arriving_on_the_deadline_still_wins() {
         let mut pending = Some(waiting(4));
-        let outcome = resolve_save(&mut pending, Some((4, 2, 2)), DEADLINE);
+        let outcome = resolve_save(&mut pending, Some(published(4, 2)), DEADLINE);
 
         assert!(
             matches!(outcome, SaveOutcome::Answered(_)),

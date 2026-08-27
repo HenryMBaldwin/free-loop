@@ -1941,6 +1941,7 @@ mod snapshots {
                 Event::SnapshotComplete {
                     request,
                     clips,
+                    empty: _,
                     expected,
                 } => Some((request, clips, expected)),
                 _ => None,
