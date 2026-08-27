@@ -403,6 +403,16 @@ mod tests {
     }
 
     #[test]
+    fn the_committed_example_is_the_one_the_binary_prints() {
+        // Compiled in: a missing file is a build error, not a failing test.
+        let committed = include_str!("../../../example.free-loop.toml");
+        assert_eq!(
+            committed, EXAMPLE,
+            "example.free-loop.toml has drifted from --print-config"
+        );
+    }
+
+    #[test]
     fn the_example_file_parses_and_matches_the_defaults() {
         let config = Config::parse(EXAMPLE).unwrap();
         let defaults = Config::default();

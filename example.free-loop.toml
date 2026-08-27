@@ -1,0 +1,50 @@
+# Free Loop configuration. Every setting shown at its default.
+
+[audio]
+# Substrings of the device names. Omit to use the system default devices.
+# input_device = "Scarlett"
+# output_device = "Scarlett"
+
+# Omit to take the device's preference.
+# sample_rate = 48000
+# buffer_frames = 256
+# channels = 2
+
+# The device input channel your instrument is in. Omit for the first stereo pair.
+# A Scarlett Solo's instrument jack is channel 1.
+# input_channel = 1
+
+# Blocks of capture buffered before playback starts consuming. More is safer, later.
+cushion_blocks = 2
+
+# Round-trip latency to compensate for, in frames. Omit to measure it from the driver,
+# which is right for almost every rig. Set it only if a driver reports badly.
+# capture_offset_frames = 512
+
+# Whether losing a device freezes the transport. Off carries on as soon as it is back.
+pause_on_disconnect = true
+
+[transport]
+tempo = 120.0
+beats_per_bar = 4
+beat_unit = 4
+# Whether launching a clip plays it from its start. Off drops into whatever part of it the
+# transport has reached, which keeps every loop locked to the same grid.
+restart_clips = false
+
+[engine]
+# About 1.4 s of stereo audio and half a megabyte each, shared across every pad. Allocated at
+# startup, so this is resident memory: 2048 is roughly 46 minutes for just over a gigabyte.
+# The ceiling on a whole session: loaded audio reserves the same capacity as recorded audio,
+# so lowering this can leave a session already on disk too large to load.
+segment_pool = 2048
+# Frames a level takes to travel the full gain range. 5 ms at 48 kHz.
+declick_frames = 240
+
+[click]
+enabled = true
+level = 0.35
+
+[gui]
+# Open a window with an emulated Launchpad X, usable with or without the hardware.
+enabled = false
