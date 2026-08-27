@@ -74,12 +74,18 @@ mod tests {
                 );
             }
         }
-        for control in Control::all() {
+        for control in Control::all().filter(|c| *c != Control::CaptureMidi) {
             assert!(
                 labels.get(control_pad(control.index())).is_some(),
                 "{control:?}"
             );
         }
+        assert!(
+            labels
+                .get(control_pad(Control::CaptureMidi.index()))
+                .is_none(),
+            "the reserved button is not named"
+        );
     }
 
     #[test]
@@ -127,7 +133,7 @@ mod tests {
         // A confirmation steps back to the picker that asked it, not out of saving.
         let confirm = for_mode(Mode::ConfirmSave(pad(1, 2)));
         assert_eq!(
-            confirm.get(control_pad(Control::SaveSession.index())),
+            confirm.get(control_pad(Control::Session.index())),
             Some("back to save")
         );
 

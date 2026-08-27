@@ -109,8 +109,9 @@ pub fn exits(mode: Mode) -> [Option<Button>; 2] {
         Mode::Settings => one(Button::Side(SETTINGS_SIDE)),
         Mode::Mute => one(Button::Side(MUTE_SIDE)),
         Mode::Solo => one(Button::Side(SOLO_SIDE)),
-        Mode::SavePicker | Mode::ConfirmSave(_) => one(Button::Top(Control::SaveSession)),
-        Mode::LoadPicker | Mode::ConfirmLoad(_) => one(Button::Top(Control::LoadSession)),
+        Mode::SavePicker | Mode::ConfirmSave(_) | Mode::LoadPicker | Mode::ConfirmLoad(_) => {
+            one(Button::Top(Control::Session))
+        }
         Mode::Subdivision => one(Button::Top(Control::ClickToggle)),
         // Both together, which is what opened it.
         Mode::TimeSignature => [
@@ -297,15 +298,15 @@ fn top(mode: Mode, control: Control) -> Role {
             | Mode::Volume
             | Mode::Pan
             | Mode::LoopPick(_)
-            | Mode::LoopSet(..),
+            | Mode::LoopSet(..)
+            | Mode::SavePicker
+            | Mode::LoadPicker,
             Control::Axis,
         ) => Role::Axis,
-        (Mode::Perform | Mode::SavePicker | Mode::ConfirmSave(_), Control::SaveSession) => {
-            Role::Open(Mode::SavePicker)
-        }
-        (Mode::Perform | Mode::LoadPicker | Mode::ConfirmLoad(_), Control::LoadSession) => {
+        (Mode::Perform | Mode::SavePicker | Mode::LoadPicker, Control::Session) => {
             Role::Open(Mode::LoadPicker)
         }
+        (Mode::ConfirmSave(_) | Mode::ConfirmLoad(_), Control::Session) => Role::Back,
         _ => Role::Inert,
     }
 }
@@ -446,11 +447,15 @@ mod tests {
 
     #[test]
     fn the_loops_screen_binds_every_button_it_uses() {
-        // Nothing on the loops is inert except the side buttons that were never bound.
+        // Nothing on the loops is inert except what has nothing on it yet.
         let bound = |button| role(Mode::Perform, button) != Role::Inert;
-        for control in Control::all() {
+        for control in Control::all().filter(|c| *c != Control::CaptureMidi) {
             assert!(bound(Button::Top(control)), "{control:?}");
         }
+        assert!(
+            !bound(Button::Top(Control::CaptureMidi)),
+            "the reserved button does nothing"
+        );
         for index in [
             VOLUME_SIDE,
             INPUT_SIDE,
