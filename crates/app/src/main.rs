@@ -125,7 +125,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if path.exists() {
         tracing::info!("config: {}", path.display());
     } else {
-        tracing::info!("config: {} not found, using defaults", path.display());
+        tracing::warn!("config: {} not found, using defaults", path.display());
     }
 
     let running = Arc::new(AtomicBool::new(true));
