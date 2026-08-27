@@ -781,7 +781,40 @@ fn settle_save(
         controller.save_failed(now);
         return;
     }
+    // An empty grid is not a session. Saving one clears the pad, or does nothing to a
+    // pad that was already empty.
+    // An empty grid is not a session. Saving one clears the pad, or does nothing to a
+    // pad that was already empty.
+    if save.clips == 0 {
+        clear_session(store, save.addr, controller, now);
+        return;
+    }
     write_session(store, save, config, negotiated, snapshots, controller, now);
+}
+
+/// Removes whatever the pad held, since there was nothing to write over it.
+fn clear_session(
+    store: &SessionStore,
+    addr: free_loop_core::SlotAddr,
+    controller: &mut Controller,
+    now: Duration,
+) {
+    let (track, slot) = (addr.track.index(), addr.slot.index());
+    if !store.exists(addr) {
+        tracing::info!("nothing saved to {track}{slot}: the grid is empty");
+        controller.save_skipped(now);
+        return;
+    }
+    match store.remove(addr) {
+        Ok(()) => {
+            tracing::info!("removed session {track}{slot}: the grid is empty");
+            controller.session_removed(addr, now);
+        }
+        Err(error) => {
+            tracing::error!("removing session {track}{slot} failed: {error}");
+            controller.save_failed(now);
+        }
+    }
 }
 
 /// A save waiting on the engine to publish its clips.
@@ -1647,7 +1680,7 @@ mod tests {
 
         // One poll: the load is chosen, then the transport is pressed.
         harness.press(SurfaceEvent::ControlPressed(
-            free_loop_surface::Control::LoadSession,
+            free_loop_surface::Control::Session,
         ));
         harness.press(SurfaceEvent::PadPressed {
             addr: session,
@@ -1685,7 +1718,7 @@ mod tests {
         harness.io.callback();
 
         harness.press(SurfaceEvent::ControlPressed(
-            free_loop_surface::Control::LoadSession,
+            free_loop_surface::Control::Session,
         ));
         harness.press(SurfaceEvent::PadPressed {
             addr: session,
@@ -1718,7 +1751,7 @@ mod tests {
 
         // Load one, so there is something on the grid worth saving.
         harness.press(SurfaceEvent::ControlPressed(
-            free_loop_surface::Control::LoadSession,
+            free_loop_surface::Control::Session,
         ));
         harness.press(SurfaceEvent::PadPressed {
             addr: source,
@@ -1731,7 +1764,10 @@ mod tests {
 
         // Save it somewhere else. An empty pad asks for no confirmation.
         harness.press(SurfaceEvent::ControlPressed(
-            free_loop_surface::Control::SaveSession,
+            free_loop_surface::Control::Axis,
+        ));
+        harness.press(SurfaceEvent::ControlPressed(
+            free_loop_surface::Control::Session,
         ));
         harness.press(SurfaceEvent::PadPressed {
             addr: target,
@@ -1771,7 +1807,7 @@ mod tests {
 
         // One poll: the load is chosen, then a pad is pressed.
         harness.press(SurfaceEvent::ControlPressed(
-            free_loop_surface::Control::LoadSession,
+            free_loop_surface::Control::Session,
         ));
         harness.press(SurfaceEvent::PadPressed {
             addr: session,
@@ -1814,7 +1850,7 @@ mod tests {
         harness.io.taken.clear();
 
         harness.press(SurfaceEvent::ControlPressed(
-            free_loop_surface::Control::LoadSession,
+            free_loop_surface::Control::Session,
         ));
         harness.press(SurfaceEvent::PadPressed {
             addr: session,
@@ -1840,6 +1876,70 @@ mod tests {
         );
     }
 
+    /// Opens the picker on its saving half, which the toggle chooses.
+    fn choose_save(harness: &mut Harness, target: free_loop_core::SlotAddr) {
+        harness.press(SurfaceEvent::ControlPressed(
+            free_loop_surface::Control::Axis,
+        ));
+        harness.press(SurfaceEvent::ControlPressed(
+            free_loop_surface::Control::Session,
+        ));
+        harness.press(SurfaceEvent::PadPressed {
+            addr: target,
+            velocity: 100,
+        });
+        harness.press(SurfaceEvent::PadReleased { addr: target });
+    }
+
+    #[test]
+    fn saving_an_empty_grid_removes_the_session_that_was_there() {
+        let mut harness = Harness::new("empty-save-removes");
+        let stored = pad(2, 2);
+        harness.put_session(stored);
+        harness.pass();
+        harness.io.callback();
+        assert!(harness.store.index().contains(&stored));
+
+        // Nothing was ever loaded: the grid is empty.
+        choose_save(&mut harness, stored);
+        harness.press(SurfaceEvent::PadPressed {
+            addr: pad(0, 0),
+            velocity: 100,
+        });
+        harness.press(SurfaceEvent::PadReleased { addr: pad(0, 0) });
+        harness.pass();
+        harness.io.callback();
+        for _ in 0..4 {
+            harness.pass();
+        }
+
+        assert!(
+            !harness.store.index().contains(&stored),
+            "an empty grid cleared the pad"
+        );
+        assert_eq!(harness.controller.current_session(), None);
+    }
+
+    #[test]
+    fn saving_an_empty_grid_onto_an_empty_pad_does_nothing() {
+        let mut harness = Harness::new("empty-save-nothing");
+        let free = pad(4, 4);
+        harness.pass();
+        harness.io.callback();
+
+        choose_save(&mut harness, free);
+        harness.pass();
+        harness.io.callback();
+        for _ in 0..4 {
+            harness.pass();
+        }
+
+        assert!(
+            harness.store.index().is_empty(),
+            "nothing was written to a pad that held nothing"
+        );
+    }
+
     #[test]
     fn a_save_the_engine_never_answers_gives_up_rather_than_waiting() {
         let mut harness = Harness::new("save-timeout");
@@ -1850,7 +1950,7 @@ mod tests {
         harness.io.callback();
 
         harness.press(SurfaceEvent::ControlPressed(
-            free_loop_surface::Control::LoadSession,
+            free_loop_surface::Control::Session,
         ));
         harness.press(SurfaceEvent::PadPressed {
             addr: source,
@@ -1862,7 +1962,10 @@ mod tests {
         harness.pass();
 
         harness.press(SurfaceEvent::ControlPressed(
-            free_loop_surface::Control::SaveSession,
+            free_loop_surface::Control::Axis,
+        ));
+        harness.press(SurfaceEvent::ControlPressed(
+            free_loop_surface::Control::Session,
         ));
         harness.press(SurfaceEvent::PadPressed {
             addr: target,

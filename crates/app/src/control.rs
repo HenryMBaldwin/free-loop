@@ -116,28 +116,6 @@ pub enum Mode {
     ConfirmLoad(SlotAddr),
 }
 
-impl Mode {
-    /// The button that opens a picker, if this mode is one.
-    fn button(self) -> Option<Control> {
-        match self {
-            Self::SavePicker | Self::ConfirmSave(_) => Some(Control::SaveSession),
-            Self::LoadPicker | Self::ConfirmLoad(_) => Some(Control::LoadSession),
-            // Mute and solo open from the side column, not the top row.
-            Self::Perform
-            | Self::Mute
-            | Self::Solo
-            | Self::Volume
-            | Self::Pan
-            | Self::LoopPick(_)
-            | Self::LoopSet(..)
-            | Self::Input
-            | Self::Settings
-            | Self::TimeSignature
-            | Self::Subdivision => None,
-        }
-    }
-}
-
 /// A tempo button being held down.
 #[derive(Debug, Clone, Copy)]
 struct TempoHold {
@@ -669,6 +647,14 @@ impl Controller {
         self.mark_settings();
     }
 
+    /// Which picker the row-or-column toggle is asking for.
+    fn picker(&self) -> Mode {
+        match self.chrome.axis {
+            Axis::Row => Mode::LoadPicker,
+            Axis::Column => Mode::SavePicker,
+        }
+    }
+
     /// Which half of a mixing screen the row-or-column toggle is asking for.
     fn mixing(&self, knob: Knob) -> Mode {
         match self.chrome.axis {
@@ -681,6 +667,8 @@ impl Controller {
     fn step_back(&mut self) {
         self.mode = match self.mode {
             Mode::LoopSet(knob, _) => Mode::LoopPick(knob),
+            Mode::ConfirmSave(_) => Mode::SavePicker,
+            Mode::ConfirmLoad(_) => Mode::LoadPicker,
             _ => Mode::Perform,
         };
         self.dirty = true;
@@ -722,6 +710,7 @@ impl Controller {
         let wanted = match wanted {
             Mode::Volume => self.mixing(Knob::Level),
             Mode::Pan => self.mixing(Knob::Pan),
+            Mode::LoadPicker | Mode::SavePicker => self.picker(),
             other => other,
         };
         self.input_held = None;
@@ -866,6 +855,22 @@ impl Controller {
         self.current = Some(addr);
         self.mode = Mode::Perform;
         self.show(LedColor::Green, now, None);
+    }
+
+    /// Forgets the session a pad held, and says so on the grid.
+    pub fn session_removed(&mut self, addr: SlotAddr, now: Duration) {
+        self.sessions &= !bit(addr);
+        if self.current == Some(addr) {
+            self.current = None;
+        }
+        self.mode = Mode::Perform;
+        self.show(LedColor::Amber, now, None);
+    }
+
+    /// Leaves the picker with nothing done, since there was nothing to do.
+    pub fn save_skipped(&mut self, now: Duration) {
+        self.mode = Mode::Perform;
+        self.show(LedColor::Amber, now, None);
     }
 
     /// Leaves the picker and says on the grid that nothing was written.
@@ -1016,6 +1021,7 @@ impl Controller {
                     Mode::Pan | Mode::LoopPick(Knob::Pan) | Mode::LoopSet(Knob::Pan, _) => {
                         self.mixing(Knob::Pan)
                     }
+                    Mode::LoadPicker | Mode::SavePicker => self.picker(),
                     other => other,
                 };
                 self.dirty = true;
@@ -1486,8 +1492,13 @@ impl Controller {
             paint::tempo_gauge(self.tempo, self.chrome)
         } else if matches!(self.mode, Mode::ConfirmSave(_) | Mode::ConfirmLoad(_)) {
             paint::confirm(self.chrome)
-        } else if let Some(button) = self.mode.button() {
-            paint::picker(self.sessions, self.current, self.chrome, button)
+        } else if matches!(self.mode, Mode::SavePicker | Mode::LoadPicker) {
+            paint::picker(
+                self.sessions,
+                self.current,
+                self.chrome,
+                self.mode == Mode::SavePicker,
+            )
         } else {
             paint::frame(&self.session, self.chrome)
         };
@@ -1796,10 +1807,10 @@ mod tests {
             ("input", |c| c.on_surface(side(INPUT_SIDE), T0)),
             ("settings", |c| c.on_surface(side(SETTINGS_SIDE), T0)),
             ("save", |c| {
-                c.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+                c.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
             }),
             ("load", |c| {
-                c.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+                c.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
             }),
             ("signature", open_signature),
             ("click rate", |c| {
@@ -1889,7 +1900,7 @@ mod tests {
 
         // Held down, then another finger opens a screen where this button means nothing.
         controller.on_surface(SurfaceEvent::ControlPressed(Control::TempoUp), T0);
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
         controller.on_surface(SurfaceEvent::ControlReleased(Control::TempoUp), T0);
 
         let settled = controller.tempo();
@@ -2083,7 +2094,7 @@ mod tests {
         controller.on_surface(side(VOLUME_SIDE), T0);
         commands(&mut controller);
 
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
         controller.on_surface(side(NEW_SIDE), T0);
 
         assert_eq!(controller.gains(), [UNITY_STEP; TRACK_COUNT]);
@@ -2116,7 +2127,7 @@ mod tests {
         controller.session_loaded(addr(2, 2), true);
         commands(&mut controller);
 
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
         controller.on_surface(side(NEW_SIDE), T0);
 
         assert_eq!(controller.mode(), Mode::Perform);
@@ -2142,7 +2153,7 @@ mod tests {
         assert_eq!(controller.tempo(), 121.0);
         commands(&mut controller);
 
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
         controller.on_surface(side(NEW_SIDE), T0);
 
         assert_eq!(controller.tempo(), 120.0);
@@ -2162,7 +2173,7 @@ mod tests {
         controller.on_surface(side(NEW_SIDE), T0);
         assert!(commands(&mut controller).is_empty(), "not while playing");
 
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        open_save(&mut controller);
         controller.on_surface(side(NEW_SIDE), T0);
         assert!(
             commands(&mut controller).is_empty(),
@@ -2181,12 +2192,12 @@ mod tests {
         );
         controller.on_surface(side(SOLO_SIDE), T0);
 
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
         assert_eq!(
             controller
                 .take_frame()
                 .unwrap()
-                .control(Control::SaveSession.index()),
+                .control(Control::Session.index()),
             Led::flash(SELECTED)
         );
     }
@@ -2306,21 +2317,24 @@ mod tests {
     }
 
     #[test]
-    fn the_save_button_toggles_the_picker() {
+    fn the_session_button_opens_the_picker_and_leaves_it() {
         let mut controller = controller();
         assert_eq!(controller.mode(), Mode::Perform);
 
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
-        assert_eq!(controller.mode(), Mode::SavePicker);
-
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        open_load(&mut controller);
+        assert_eq!(controller.mode(), Mode::LoadPicker);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
         assert_eq!(controller.mode(), Mode::Perform, "pressing again backs out");
-    }
 
+        open_save(&mut controller);
+        assert_eq!(controller.mode(), Mode::SavePicker);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
+        assert_eq!(controller.mode(), Mode::Perform, "from either half");
+    }
     #[test]
     fn a_pad_in_the_picker_asks_for_a_save_rather_than_playing() {
         let mut controller = controller();
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        open_save(&mut controller);
         press(&mut controller, addr(2, 3), T0);
 
         let (commands, _, requests) = work(&mut controller);
@@ -2334,7 +2348,7 @@ mod tests {
     #[test]
     fn a_picker_press_cannot_start_a_hold() {
         let mut controller = controller();
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
         press(&mut controller, addr(0, 0), T0);
         requests(&mut controller);
 
@@ -2348,32 +2362,30 @@ mod tests {
     #[test]
     fn the_load_button_opens_its_own_picker() {
         let mut controller = controller();
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
         assert_eq!(controller.mode(), Mode::LoadPicker);
 
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
         assert_eq!(controller.mode(), Mode::Perform);
     }
 
     #[test]
-    fn one_picker_is_left_before_the_other_opens() {
+    fn the_toggle_swaps_the_picker_between_loading_and_saving() {
         let mut controller = controller();
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
-
-        // The load button is not part of the save picker, so it does nothing there.
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
-        assert_eq!(controller.mode(), Mode::SavePicker);
-
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        open_load(&mut controller);
         assert_eq!(controller.mode(), Mode::LoadPicker);
-    }
 
+        controller.on_surface(halves(), T0);
+        assert_eq!(controller.mode(), Mode::SavePicker, "swapped in place");
+
+        controller.on_surface(halves(), T0);
+        assert_eq!(controller.mode(), Mode::LoadPicker, "and back");
+    }
     #[test]
     fn loading_an_empty_pad_asks_for_nothing() {
         let mut controller = controller();
         controller.set_sessions([addr(1, 1)]);
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
 
         press(&mut controller, addr(0, 0), T0);
         assert!(
@@ -2392,7 +2404,7 @@ mod tests {
     fn a_completed_load_leaves_the_picker_frozen() {
         let mut controller = controller();
         controller.set_sessions([addr(2, 2)]);
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
         controller.session_loaded(addr(2, 2), true);
 
         assert_eq!(controller.mode(), Mode::Perform);
@@ -2403,7 +2415,7 @@ mod tests {
     #[test]
     fn a_failed_request_still_leaves_the_picker() {
         let mut controller = controller();
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
         controller.cancel_picker();
         assert_eq!(controller.mode(), Mode::Perform);
     }
@@ -2420,7 +2432,7 @@ mod tests {
     fn saving_over_a_session_asks_first() {
         let mut controller = controller();
         controller.set_sessions([addr(1, 1)]);
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        open_save(&mut controller);
         press(&mut controller, addr(1, 1), T0);
 
         assert!(
@@ -2442,7 +2454,7 @@ mod tests {
         let mut controller = controller();
         controller.set_sessions([addr(1, 1)]);
 
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        open_save(&mut controller);
         press(&mut controller, addr(1, 1), T0);
         press(&mut controller, no(), T0);
         assert!(
@@ -2451,7 +2463,7 @@ mod tests {
         );
         assert_eq!(controller.mode(), Mode::Perform);
 
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
         press(&mut controller, addr(1, 1), T0);
         press(&mut controller, yes(), T0);
         assert_eq!(
@@ -2464,7 +2476,7 @@ mod tests {
     #[test]
     fn saving_onto_an_empty_pad_asks_nothing() {
         let mut controller = controller();
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        open_save(&mut controller);
         press(&mut controller, addr(3, 3), T0);
 
         assert_eq!(
@@ -2486,7 +2498,7 @@ mod tests {
             T0,
         );
 
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
         press(&mut controller, addr(1, 1), T0);
         assert!(requests(&mut controller).into_iter().next().is_none());
 
@@ -2501,7 +2513,7 @@ mod tests {
     fn loading_onto_an_empty_grid_asks_nothing() {
         let mut controller = controller();
         controller.set_sessions([addr(1, 1)]);
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
         press(&mut controller, addr(1, 1), T0);
 
         assert_eq!(
@@ -2514,7 +2526,7 @@ mod tests {
     #[test]
     fn a_completed_save_leaves_the_picker_and_marks_the_session() {
         let mut controller = controller();
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
         controller.session_saved(addr(1, 1), T0);
 
         assert_eq!(controller.mode(), Mode::Perform);
@@ -2536,7 +2548,7 @@ mod tests {
     #[test]
     fn a_failed_save_turns_the_grid_red_and_leaves_the_picker() {
         let mut controller = controller();
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
         controller.save_failed(T0);
 
         assert_eq!(controller.mode(), Mode::Perform);
@@ -2549,7 +2561,7 @@ mod tests {
     #[test]
     fn a_failed_load_scrolls_its_code_only_once_the_red_has_been_held() {
         let mut controller = controller();
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
         controller.load_failed(T0, Some("2600".to_owned()));
 
         assert_eq!(controller.mode(), Mode::Perform);
@@ -2669,7 +2681,7 @@ mod tests {
     fn the_picker_shows_the_sessions_it_was_told_about() {
         let mut controller = controller();
         controller.set_sessions([addr(0, 1), addr(3, 4)]);
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
 
         let frame = controller.take_frame().expect("the picker opened");
         assert!(frame.pad(addr(0, 1)).is_lit());
@@ -2689,7 +2701,7 @@ mod tests {
         );
         controller.take_frame();
 
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::SaveSession), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
         let frame = controller.take_frame().expect("the picker opened");
         assert!(
             !frame.pad(addr(0, 0)).is_lit(),
@@ -3555,6 +3567,17 @@ mod tests {
         );
     }
 
+    /// Opens the picker on its loading half, which is where the toggle starts.
+    fn open_load(controller: &mut Controller) {
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
+    }
+
+    /// Opens the picker on its saving half.
+    fn open_save(controller: &mut Controller) {
+        controller.on_surface(halves(), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
+    }
+
     /// Presses the row-or-column button, which is also the track-or-loop button.
     fn halves() -> SurfaceEvent {
         SurfaceEvent::ControlPressed(Control::Axis)
@@ -3817,7 +3840,7 @@ mod tests {
         controller.set_pans(pans);
         let _ = commands(&mut controller);
 
-        controller.on_surface(SurfaceEvent::ControlPressed(Control::LoadSession), T0);
+        controller.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
         controller.on_surface(side(NEW_SIDE), T0);
 
         assert_eq!(controller.launch_modes(), [LaunchMode::Follow; TRACK_COUNT]);

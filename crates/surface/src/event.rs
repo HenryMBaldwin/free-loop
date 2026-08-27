@@ -17,14 +17,14 @@ pub enum Control {
     Rewind,
     /// Switch mute and solo between rows and columns.
     Axis,
-    /// Open the session picker to load.
-    LoadSession,
+    /// Open the session picker, to load or to save.
+    Session,
     /// Turn the click on or off.
     ClickToggle,
     /// Stop everything.
     StopAll,
-    /// Open the session picker to save.
-    SaveSession,
+    /// Reserved for capturing MIDI. Does nothing yet.
+    CaptureMidi,
 }
 
 impl Control {
@@ -35,10 +35,10 @@ impl Control {
             Self::TempoDown => 1,
             Self::Rewind => 2,
             Self::Axis => 3,
-            Self::LoadSession => 4,
+            Self::Session => 4,
             Self::ClickToggle => 5,
             Self::StopAll => 6,
-            Self::SaveSession => 7,
+            Self::CaptureMidi => 7,
         }
     }
 
@@ -49,10 +49,10 @@ impl Control {
             1 => Some(Self::TempoDown),
             2 => Some(Self::Rewind),
             3 => Some(Self::Axis),
-            4 => Some(Self::LoadSession),
+            4 => Some(Self::Session),
             5 => Some(Self::ClickToggle),
             6 => Some(Self::StopAll),
-            7 => Some(Self::SaveSession),
+            7 => Some(Self::CaptureMidi),
             _ => None,
         }
     }
@@ -64,10 +64,10 @@ impl Control {
             Self::TempoDown,
             Self::Rewind,
             Self::Axis,
-            Self::LoadSession,
+            Self::Session,
             Self::ClickToggle,
             Self::StopAll,
-            Self::SaveSession,
+            Self::CaptureMidi,
         ]
         .into_iter()
     }

@@ -171,7 +171,9 @@ pub fn control(control: Control, chrome: Chrome) -> Led {
         Control::Rewind => Led::dim(LedColor::Green),
         // Carries the grouping colour, so the axis is readable without pressing anything.
         Control::Axis => Led::solid(chrome.axis.color()),
-        Control::LoadSession | Control::SaveSession => Led::dim(LedColor::White),
+        Control::Session => Led::dim(LedColor::White),
+        // Nothing on it yet.
+        Control::CaptureMidi => Led::OFF,
     }
 }
 
@@ -194,6 +196,12 @@ pub const SOLOED: LedColor = LedColor::Blue;
 
 /// Colour a level takes, matching the track volumes.
 pub const LEVEL: LedColor = LedColor::White;
+
+/// Colour a session pad takes when it holds nothing, or is only being read.
+pub const FREE: LedColor = LedColor::White;
+
+/// Colour a session pad takes when saving would write over what it holds.
+pub const OCCUPIED: LedColor = LedColor::Amber;
 
 /// Colour the pan row takes.
 pub const PAN: LedColor = LedColor::Green;
@@ -571,20 +579,19 @@ pub fn confirm(chrome: Chrome) -> LedFrame {
 /// `existing` has a bit set per pad that holds a session, indexed track-major. `current`
 /// is the session in use, shown differently. `active` is the button that opened the
 /// picker, flashed.
-pub fn picker(
-    existing: u64,
-    current: Option<SlotAddr>,
-    chrome: Chrome,
-    active: Control,
-) -> LedFrame {
+pub fn picker(existing: u64, current: Option<SlotAddr>, chrome: Chrome, saving: bool) -> LedFrame {
     let mut frame = LedFrame::new();
 
     for addr in SlotAddr::all() {
         let bit = 1_u64 << (addr.track.index() * SLOT_COUNT + addr.slot.index());
+        let holds = existing & bit != 0;
         let led = if current == Some(addr) {
             Led::solid(LedColor::Green)
-        } else if existing & bit != 0 {
-            Led::dim(LedColor::White)
+        } else if saving {
+            // Every pad can be written to, and the ones holding a session say so.
+            Led::dim(if holds { OCCUPIED } else { FREE })
+        } else if holds {
+            Led::dim(FREE)
         } else {
             Led::OFF
         };
@@ -594,10 +601,10 @@ pub fn picker(
     for button in Control::all() {
         frame.set_control(button.index(), control(button, chrome));
     }
-    frame.set_control(active.index(), Led::flash(SELECTED));
+    frame.set_control(Control::Session.index(), Led::flash(SELECTED));
     side_buttons(&mut frame, chrome);
-    if active == Control::LoadSession {
-        frame.set_side(NEW_SIDE, Led::dim(LedColor::White));
+    if !saving {
+        frame.set_side(NEW_SIDE, Led::dim(FREE));
     }
 
     frame
@@ -1260,7 +1267,7 @@ mod tests {
             bit(saved) | bit(current),
             Some(current),
             Chrome::default(),
-            Control::SaveSession,
+            false,
         );
 
         assert_eq!(painted.pad(saved), Led::dim(LedColor::White));
@@ -1275,20 +1282,49 @@ mod tests {
 
     #[test]
     fn the_picker_flashes_the_button_that_opened_it() {
-        let painted = picker(0, None, Chrome::default(), Control::SaveSession);
-        assert_eq!(
-            painted.control(Control::SaveSession.index()),
-            Led::flash(SELECTED)
+        for saving in [false, true] {
+            let painted = picker(0, None, Chrome::default(), saving);
+            assert_eq!(
+                painted.control(Control::Session.index()),
+                Led::flash(SELECTED),
+                "saving: {saving}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_picker_says_which_way_it_is_pointing() {
+        let held = 1 << (2 * SLOT_COUNT + 3);
+        let stored = SlotAddr::new(TrackId::new(2).unwrap(), SlotId::new(3).unwrap());
+        let free = SlotAddr::new(TrackId::new(5).unwrap(), SlotId::new(5).unwrap());
+
+        let loading = picker(held, None, Chrome::default(), false);
+        assert_eq!(loading.pad(stored), Led::dim(FREE));
+        assert!(
+            !loading.pad(free).is_lit(),
+            "nothing to load from an empty pad"
         );
-        assert_ne!(
-            painted.control(Control::LoadSession.index()),
-            Led::flash(SELECTED)
+        assert!(
+            loading.side(NEW_SIDE).is_lit(),
+            "a fresh session is offered"
+        );
+
+        let saving = picker(held, None, Chrome::default(), true);
+        assert_eq!(
+            saving.pad(stored),
+            Led::dim(OCCUPIED),
+            "this one would be written over"
+        );
+        assert_eq!(saving.pad(free), Led::dim(FREE), "and this one is free");
+        assert!(
+            !saving.side(NEW_SIDE).is_lit(),
+            "nothing fresh to start here"
         );
     }
 
     #[test]
     fn the_picker_keeps_the_transport_button() {
-        let painted = picker(0, None, Chrome::default(), Control::LoadSession);
+        let painted = picker(0, None, Chrome::default(), false);
         assert!(painted.side(PAUSE_SIDE).is_lit());
     }
 
