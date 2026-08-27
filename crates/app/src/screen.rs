@@ -218,7 +218,18 @@ pub fn name(mode: Mode, button: Button) -> Option<String> {
         (Role::Click, _) => "click on or off".to_owned(),
         (Role::StopAll, _) => "stop all".to_owned(),
         (Role::Rewind, _) => "rewind".to_owned(),
-        (Role::Axis, _) => "group by row or column".to_owned(),
+        // The one button, three meanings: what it does depends on the screen it is on.
+        (Role::Axis, _) => match mode {
+            Mode::SavePicker => "switch to loading".to_owned(),
+            Mode::LoadPicker => "switch to saving".to_owned(),
+            Mode::Volume | Mode::Pan => "one loop at a time".to_owned(),
+            Mode::LoopPick(knob) | Mode::LoopSet(knob, _) => {
+                format!("back to {}", title(knob.trackwise()))
+            }
+            _ => "group by row or column".to_owned(),
+        },
+        // Which picker it opens is the toggle's business, not this button's.
+        (Role::Open(Mode::LoadPicker | Mode::SavePicker), _) => "open sessions".to_owned(),
         (Role::Open(opens), _) => format!("open {}", title(opens)),
         // Inert, and grid roles on something that is not a pad, which cannot arise.
         _ => return None,

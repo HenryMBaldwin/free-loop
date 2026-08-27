@@ -114,6 +114,34 @@ mod tests {
     }
 
     #[test]
+    fn the_session_button_does_not_promise_a_verb_it_may_not_open() {
+        // Which picker opens is the toggle's business, and the label cannot see it.
+        let loops = for_mode(Mode::Perform);
+        assert_eq!(
+            loops.get(control_pad(Control::Session.index())),
+            Some("open sessions")
+        );
+    }
+
+    #[test]
+    fn the_toggle_is_named_for_what_it_does_on_the_screen_it_is_on() {
+        let axis = Control::Axis.index();
+        let named = |mode| for_mode(mode).get(control_pad(axis)).map(str::to_owned);
+
+        assert_eq!(named(Mode::LoadPicker).as_deref(), Some("switch to saving"));
+        assert_eq!(
+            named(Mode::SavePicker).as_deref(),
+            Some("switch to loading")
+        );
+        assert_eq!(
+            named(Mode::Mute).as_deref(),
+            Some("group by row or column"),
+            "and still means grouping where it groups"
+        );
+        assert_eq!(named(Mode::Volume).as_deref(), Some("one loop at a time"));
+    }
+
+    #[test]
     fn a_confirm_screen_names_the_answer_it_wants() {
         let labels = for_mode(Mode::ConfirmSave(pad(1, 2)));
         assert_eq!(labels.get(grid_pad(0, 0)), Some("yes"));

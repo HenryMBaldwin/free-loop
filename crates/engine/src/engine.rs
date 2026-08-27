@@ -1070,6 +1070,7 @@ impl Engine {
             request,
             clips: published,
             expected,
+            empty: SlotAddr::all().all(|addr| self.session.state(addr) == SlotState::Empty),
         });
     }
 
