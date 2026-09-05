@@ -97,6 +97,9 @@ pub struct TrackEntry {
     /// Where the track sits across the stereo field, as a step on the pan row.
     #[serde(default = "centre")]
     pub pan: u8,
+    /// Whether the track plays its input through as it arrives.
+    #[serde(default)]
+    pub passthrough: bool,
 }
 
 /// The format written today.
@@ -340,6 +343,7 @@ mod tests {
             gain_step: None,
             multiple: false,
             pan: CENTRE_STEP,
+            passthrough: false,
             input_channels: None,
         };
         broken.tracks = vec![entry.clone(), entry];
@@ -357,6 +361,7 @@ mod tests {
             gain_step: Some(200),
             multiple: false,
             pan: CENTRE_STEP,
+            passthrough: false,
             input_channels: None,
         }];
         assert_eq!(broken.validate(), Err("a track's level is off the ladder"));
@@ -375,6 +380,7 @@ mod tests {
                 gain_step: None,
                 multiple: false,
                 pan,
+                passthrough: false,
                 input_channels: None,
             }];
             assert_eq!(
@@ -396,6 +402,7 @@ mod tests {
             gain_step: None,
             multiple: false,
             pan: CENTRE_STEP,
+            passthrough: false,
             input_channels: None,
         }];
         assert!(broken.validate().is_err());
@@ -420,6 +427,7 @@ mod tests {
             gain_step: Some(3),
             multiple: false,
             pan: CENTRE_STEP,
+            passthrough: false,
             input_channels: None,
         }];
         let written = toml::to_string(&manifest).unwrap();

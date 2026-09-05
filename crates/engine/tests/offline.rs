@@ -3254,3 +3254,146 @@ fn a_loop_pan_nudges_its_track_rather_than_replacing_it() {
     assert!(left < 1e-4, "still hard right, got {left}");
     assert!(right > 0.0);
 }
+
+mod passthrough {
+    use super::*;
+    use free_loop_core::TrackInput;
+
+    /// What the input carries at `frame` on each channel, which the output should echo.
+    fn expected(frame: u64, channel: usize) -> f32 {
+        signal(frame, channel)
+    }
+
+    #[test]
+    fn nothing_is_heard_until_a_track_asks_for_it() {
+        let mut harness = Harness::new(128);
+        let out = harness.run_frames(256);
+        assert!(out.iter().all(|s| *s == 0.0), "silent by default");
+
+        harness.setting(|settings| settings.passthrough[0] = true);
+        let out = harness.run_frames(256);
+        assert!(out.iter().any(|s| *s != 0.0), "and heard once it is on");
+    }
+
+    #[test]
+    fn an_input_arrives_at_the_level_it_came_in_at() {
+        let mut harness = Harness::new(128);
+        harness.setting(|settings| settings.passthrough[0] = true);
+
+        let start = harness.position();
+        let out = harness.run_frames(64);
+        // The default input is the first pair, left on left and right on right.
+        for frame in 0..64 {
+            let at = start + frame as u64;
+            let got = &out[frame * CHANNELS..(frame + 1) * CHANNELS];
+            assert!(
+                (got[0] - expected(at, 0)).abs() < 1e-6,
+                "frame {frame} left"
+            );
+            assert!(
+                (got[1] - expected(at, 1)).abs() < 1e-6,
+                "frame {frame} right"
+            );
+        }
+    }
+
+    #[test]
+    fn two_tracks_sharing_an_input_hear_it_once() {
+        let mut harness = Harness::new(128);
+        harness.setting(|settings| settings.passthrough[0] = true);
+        let start = harness.position();
+        let alone = harness.run_frames(64);
+
+        // A second track on the same input is already heard.
+        harness.setting(|settings| settings.passthrough[3] = true);
+        let together = harness.run_frames(64);
+
+        for frame in 0..64 {
+            let at = start + 64 + frame as u64;
+            let got = together[frame * CHANNELS];
+            assert!(
+                (got - expected(at, 0)).abs() < 1e-6,
+                "frame {frame} was doubled: {got}"
+            );
+        }
+        assert!(alone.iter().any(|s| *s != 0.0), "the first one was heard");
+    }
+
+    #[test]
+    fn a_different_input_is_heard_beside_the_first() {
+        let mut harness = Harness::new(128);
+        harness.setting(|settings| {
+            settings.passthrough[0] = true;
+            settings.inputs[1] = TrackInput::Mono(1);
+            settings.passthrough[1] = true;
+        });
+
+        let start = harness.position();
+        let out = harness.run_frames(64);
+        for frame in 0..64 {
+            let at = start + frame as u64;
+            // The pair on both sides, and the mono channel added to each of them.
+            let want = expected(at, 0) + expected(at, 1);
+            let got = out[frame * CHANNELS];
+            assert!((got - want).abs() < 1e-6, "frame {frame}: {got} not {want}");
+        }
+    }
+
+    #[test]
+    fn a_mono_input_is_heard_on_both_sides() {
+        let mut harness = Harness::new(128);
+        harness.setting(|settings| {
+            settings.inputs[0] = TrackInput::Mono(1);
+            settings.passthrough[0] = true;
+        });
+
+        let start = harness.position();
+        let out = harness.run_frames(64);
+        for frame in 0..64 {
+            let at = start + frame as u64;
+            let got = &out[frame * CHANNELS..(frame + 1) * CHANNELS];
+            assert!(
+                (got[0] - expected(at, 1)).abs() < 1e-6,
+                "frame {frame} left"
+            );
+            assert!(
+                (got[1] - expected(at, 1)).abs() < 1e-6,
+                "frame {frame} right"
+            );
+        }
+    }
+
+    #[test]
+    fn passing_through_does_not_wait_for_the_transport() {
+        let mut harness = Harness::new(128);
+        harness.setting(|settings| settings.passthrough[0] = true);
+        harness.command(Command::SetPaused(true));
+        harness.run_frames(512);
+
+        let out = harness.run_frames(128);
+        assert!(
+            out.iter().any(|s| *s != 0.0),
+            "you hear yourself with the transport stopped"
+        );
+    }
+
+    #[test]
+    fn turning_it_off_fades_rather_than_cutting() {
+        let mut harness = Harness::with_declick(128, Frames(256));
+        harness.setting(|settings| settings.passthrough[0] = true);
+        harness.run_frames(512);
+
+        harness.setting(|settings| settings.passthrough[0] = false);
+        let out = harness.run_frames(128);
+        assert!(
+            out.iter().any(|s| *s != 0.0),
+            "still sounding while it falls away"
+        );
+
+        // The fade finishes inside this block; the one after it is the silent one.
+        harness.run_frames(512);
+        let out = harness.run_frames(512);
+        let peak = out.iter().fold(0.0_f32, |peak, s| peak.max(s.abs()));
+        assert!(peak < 1e-6, "and gone once the fade is over, got {peak}");
+    }
+}
