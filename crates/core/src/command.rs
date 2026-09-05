@@ -7,6 +7,10 @@ use crate::settings::Settings;
 use crate::time::{Subdivision, Tempo, TimeSignature};
 
 /// An instruction for the realtime side.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "whole-state settings cross by value, and boxing would free on the audio thread"
+)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Command {
     /// A pad was pressed. The meaning depends on what the slot is doing.

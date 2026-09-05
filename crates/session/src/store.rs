@@ -120,6 +120,8 @@ pub struct TrackSettings {
     pub multiple: bool,
     /// Where the track sits across the stereo field, as a step on the pan row.
     pub pan: u8,
+    /// Whether the track plays its input through as it arrives.
+    pub passthrough: bool,
 }
 
 impl Default for TrackSettings {
@@ -132,6 +134,7 @@ impl Default for TrackSettings {
             gain_step: UNITY_STEP,
             multiple: false,
             pan: CENTRE_STEP,
+            passthrough: false,
         }
     }
 }
@@ -312,6 +315,7 @@ impl LoadedSession {
                 slot.pickup = entry.pickup;
                 slot.multiple = entry.multiple;
                 slot.pan = entry.pan;
+                slot.passthrough = entry.passthrough;
                 if let Some(step) = entry.gain_step {
                     slot.gain_step = step;
                 }
@@ -510,6 +514,7 @@ impl SessionStore {
                     gain_step: Some(track.gain_step),
                     multiple: track.multiple,
                     pan: track.pan,
+                    passthrough: track.passthrough,
                 })
                 .collect(),
         };
@@ -1467,6 +1472,7 @@ mod tests {
                     gain_step: Some(3),
                     multiple: true,
                     pan: 5,
+                    passthrough: true,
                 }],
             },
             clips: Vec::new(),
@@ -1478,6 +1484,7 @@ mod tests {
         assert_eq!(tracks[7].gain_step, 3);
         assert!(tracks[7].multiple);
         assert_eq!(tracks[7].pan, 5);
+        assert!(tracks[7].passthrough);
         assert_eq!(tracks[0], TrackSettings::default(), "and only that track");
     }
 
@@ -1549,6 +1556,7 @@ mod tests {
                 gain_step: Some(1),
                 multiple: false,
                 pan: CENTRE_STEP,
+                passthrough: false,
             }]),
             clips: Vec::new(),
         };
@@ -1568,6 +1576,7 @@ mod tests {
                 gain_step: Some(1),
                 multiple: false,
                 pan: CENTRE_STEP,
+                passthrough: false,
             }]),
             clips: vec![loaded_clip(addr(2, 0), 5), loaded_clip(addr(2, 1), 7)],
         };
@@ -1591,6 +1600,7 @@ mod tests {
                 gain_step: None,
                 multiple: false,
                 pan: CENTRE_STEP,
+                passthrough: false,
             }]),
             clips: vec![loaded_clip(addr(2, 0), 5)],
         };

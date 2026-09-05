@@ -16,7 +16,8 @@ use free_loop_surface::{Control, Led, LedColor, LedFrame, SHADES, SIDE_COUNT, Su
 
 use crate::paint;
 use crate::paint::{
-    Axis, Chrome, NO_PAD, PICKUP_COLUMN, POLYPHONY_COLUMN, RESTART_COLUMN, SELECTED, YES_PAD,
+    Axis, Chrome, NO_PAD, PASSTHROUGH_COLUMN, PICKUP_COLUMN, POLYPHONY_COLUMN, RESTART_COLUMN,
+    SELECTED, YES_PAD,
 };
 use crate::screen::{self, Button, Role};
 
@@ -255,6 +256,7 @@ impl Controller {
             pans: [CENTRE_STEP; TRACK_COUNT],
             loop_gains: [[UNITY_STEP; SLOT_COUNT]; TRACK_COUNT],
             loop_pans: [[CENTRE_STEP; SLOT_COUNT]; TRACK_COUNT],
+            passthrough: [false; TRACK_COUNT],
             input_count: 2,
             beat: 0,
             beat_lit: true,
@@ -424,6 +426,9 @@ impl Controller {
             POLYPHONY_COLUMN => {
                 self.chrome.polyphony[track] = self.chrome.polyphony[track].toggled();
             }
+            PASSTHROUGH_COLUMN => {
+                self.chrome.passthrough[track] = !self.chrome.passthrough[track];
+            }
             _ => return,
         }
         self.mark_settings();
@@ -470,6 +475,18 @@ impl Controller {
     pub fn set_loop_mix(&mut self, mix: free_loop_session::LoopMix) {
         self.chrome.loop_gains = mix.gains;
         self.chrome.loop_pans = mix.pans;
+        self.mark_settings();
+        self.dirty = true;
+    }
+
+    /// Which tracks play their input through as it arrives.
+    pub fn passthrough(&self) -> [bool; TRACK_COUNT] {
+        self.chrome.passthrough
+    }
+
+    /// Takes the passthrough settings a loaded session came with.
+    pub fn set_passthrough(&mut self, passthrough: [bool; TRACK_COUNT]) {
+        self.chrome.passthrough = passthrough;
         self.mark_settings();
         self.dirty = true;
     }
@@ -571,6 +588,7 @@ impl Controller {
         self.chrome.launch_modes = [self.default_launch_mode; TRACK_COUNT];
         self.chrome.pickups = [0; TRACK_COUNT];
         self.chrome.polyphony = [Polyphony::Single; TRACK_COUNT];
+        self.chrome.passthrough = [false; TRACK_COUNT];
         self.chrome.pans = [CENTRE_STEP; TRACK_COUNT];
         self.chrome.loop_gains = [[UNITY_STEP; SLOT_COUNT]; TRACK_COUNT];
         self.chrome.loop_pans = [[CENTRE_STEP; SLOT_COUNT]; TRACK_COUNT];
@@ -1394,6 +1412,7 @@ impl Controller {
             pans: self.chrome.pans,
             loop_gains: self.chrome.loop_gains,
             loop_pans: self.chrome.loop_pans,
+            passthrough: self.chrome.passthrough,
         }
     }
 
@@ -3497,6 +3516,51 @@ mod tests {
     }
 
     #[test]
+    fn the_fourth_settings_column_toggles_passthrough() {
+        let mut controller = controller();
+        controller.on_surface(side(SETTINGS_SIDE), T0);
+        let column = u8::try_from(PASSTHROUGH_COLUMN).unwrap();
+        let pad = SlotAddr::new(TrackId::new(2).unwrap(), SlotId::new(column).unwrap());
+        let press = SurfaceEvent::PadPressed {
+            addr: pad,
+            velocity: 127,
+        };
+
+        assert!(!controller.passthrough()[2], "off to begin with");
+        controller.on_surface(press, T0);
+        assert!(controller.passthrough()[2]);
+        controller.on_surface(press, T0);
+        assert!(!controller.passthrough()[2]);
+        assert!(!controller.passthrough()[3], "and only that track");
+    }
+
+    #[test]
+    fn passthrough_reaches_the_engine() {
+        let mut controller = controller();
+        controller.on_surface(side(SETTINGS_SIDE), T0);
+        controller.on_surface(
+            SurfaceEvent::PadPressed {
+                addr: SlotAddr::new(
+                    TrackId::new(5).unwrap(),
+                    SlotId::new(u8::try_from(PASSTHROUGH_COLUMN).unwrap()).unwrap(),
+                ),
+                velocity: 127,
+            },
+            T0,
+        );
+
+        let settings = controller
+            .drain_work()
+            .filter_map(|work| match work {
+                Work::Command(Command::SetSettings(settings)) => Some(settings),
+                _ => None,
+            })
+            .next_back()
+            .expect("the change was published");
+        assert!(settings.passthrough[5]);
+    }
+
+    #[test]
     fn a_pan_pad_puts_its_track_where_the_column_says() {
         let mut controller = controller();
         controller.on_surface(side(PAN_SIDE), T0);
@@ -3838,6 +3902,9 @@ mod tests {
         let mut pans = [CENTRE_STEP; TRACK_COUNT];
         pans[7] = 0;
         controller.set_pans(pans);
+        let mut heard = [false; TRACK_COUNT];
+        heard[7] = true;
+        controller.set_passthrough(heard);
         let _ = commands(&mut controller);
 
         controller.on_surface(SurfaceEvent::ControlPressed(Control::Session), T0);
@@ -3848,6 +3915,7 @@ mod tests {
         assert_eq!(controller.pickups(), [0; TRACK_COUNT]);
         assert_eq!(controller.polyphony(), [Polyphony::Single; TRACK_COUNT]);
         assert_eq!(controller.pans(), [CENTRE_STEP; TRACK_COUNT]);
+        assert_eq!(controller.passthrough(), [false; TRACK_COUNT]);
     }
 
     #[test]
