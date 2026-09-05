@@ -9,9 +9,9 @@ use free_loop_surface::Control;
 
 use crate::control::{Knob, Mode};
 use crate::paint::{
-    self, INPUT_SIDE, MUTE_SIDE, NEW_SIDE, NO_PAD, PAN_SIDE, PAUSE_SIDE, PICKUP_COLUMN,
-    POLYPHONY_COLUMN, RESTART_COLUMN, SETTINGS_SIDE, SOLO_SIDE, SignaturePart, VOLUME_SIDE,
-    YES_PAD,
+    self, INPUT_SIDE, MUTE_SIDE, NEW_SIDE, NO_PAD, PAN_SIDE, PASSTHROUGH_COLUMN, PAUSE_SIDE,
+    PICKUP_COLUMN, POLYPHONY_COLUMN, RESTART_COLUMN, SETTINGS_SIDE, SOLO_SIDE, SignaturePart,
+    VOLUME_SIDE, YES_PAD,
 };
 use free_loop_core::{CENTRE_STEP, PAN_STEPS};
 
@@ -200,6 +200,7 @@ pub fn name(mode: Mode, button: Button) -> Option<String> {
             (track, RESTART_COLUMN) => format!("track {track} restart"),
             (track, PICKUP_COLUMN) => format!("track {track} pickup"),
             (track, POLYPHONY_COLUMN) => format!("track {track} single or multiple"),
+            (track, PASSTHROUGH_COLUMN) => format!("track {track} play input through"),
             _ => return None,
         },
         (Role::Beats(beats), _) => {

@@ -64,7 +64,7 @@ impl Ramp {
         clippy::cast_precision_loss,
         reason = "block lengths are far below f32's exact range"
     )]
-    fn at(self, frame: usize) -> f32 {
+    pub fn at(self, frame: usize) -> f32 {
         self.start + self.step * frame as f32
     }
 

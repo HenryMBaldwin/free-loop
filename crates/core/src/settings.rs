@@ -29,6 +29,8 @@ pub struct Settings {
     pub loop_gains: [[u8; SLOT_COUNT]; TRACK_COUNT],
     /// How far each loop is nudged from where its track sits, as a step on the pan row.
     pub loop_pans: [[u8; SLOT_COUNT]; TRACK_COUNT],
+    /// Which tracks play their input through as it arrives.
+    pub passthrough: [bool; TRACK_COUNT],
 }
 
 impl Settings {
@@ -45,6 +47,7 @@ impl Settings {
             pans: [CENTRE_STEP; TRACK_COUNT],
             loop_gains: [[UNITY_STEP; SLOT_COUNT]; TRACK_COUNT],
             loop_pans: [[CENTRE_STEP; SLOT_COUNT]; TRACK_COUNT],
+            passthrough: [false; TRACK_COUNT],
         }
     }
 }

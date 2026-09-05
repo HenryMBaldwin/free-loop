@@ -49,6 +49,8 @@ pub struct Chrome {
     pub loop_gains: [[u8; SLOT_COUNT]; TRACK_COUNT],
     /// How far each loop is nudged from where its track sits.
     pub loop_pans: [[u8; SLOT_COUNT]; TRACK_COUNT],
+    /// Which tracks play their input through as it arrives.
+    pub passthrough: [bool; TRACK_COUNT],
     /// Input channels the device offers.
     pub input_count: usize,
 }
@@ -118,6 +120,7 @@ impl Default for Chrome {
             pans: [CENTRE_STEP; TRACK_COUNT],
             loop_gains: [[UNITY_STEP; SLOT_COUNT]; TRACK_COUNT],
             loop_pans: [[CENTRE_STEP; SLOT_COUNT]; TRACK_COUNT],
+            passthrough: [false; TRACK_COUNT],
             input_count: 2,
         }
     }
@@ -235,6 +238,9 @@ pub const PICKUP_COLUMN: usize = 1;
 
 /// The settings column holding whether a track's loops sound together.
 pub const POLYPHONY_COLUMN: usize = 2;
+
+/// The settings column holding whether a track plays its input through.
+pub const PASSTHROUGH_COLUMN: usize = 3;
 
 /// The right-hand column button that runs the transport.
 pub const PAUSE_SIDE: usize = 4;
@@ -533,8 +539,8 @@ pub fn inputs(chrome: Chrome) -> LedFrame {
 /// Paints each row as one track's settings, one setting per column.
 ///
 /// Column zero is whether launching a clip restarts it, column one how many beats it
-/// opens from its tail for, column two whether its loops sound together. The rest are
-/// unused for now.
+/// opens from its tail for, column two whether its loops sound together, column three
+/// whether its input is played through. The rest are unused for now.
 ///
 /// A setting with degrees grades its brightness, dimmest for off.
 pub fn settings(chrome: Chrome) -> LedFrame {
@@ -546,6 +552,7 @@ pub fn settings(chrome: Chrome) -> LedFrame {
             RESTART_COLUMN => u8::from(chrome.launch_modes[track].restarts()) * (SHADES - 1),
             PICKUP_COLUMN => chrome.pickups[track].min(SHADES - 1),
             POLYPHONY_COLUMN => u8::from(!chrome.polyphony[track].is_exclusive()) * (SHADES - 1),
+            PASSTHROUGH_COLUMN => u8::from(chrome.passthrough[track]) * (SHADES - 1),
             _ => continue,
         };
         frame.set_pad(addr, Led::shade(SETTING, step + 1));
@@ -1443,10 +1450,10 @@ mod tests {
     }
 
     #[test]
-    fn the_settings_grid_holds_three_columns_for_now() {
+    fn the_settings_grid_holds_four_columns_for_now() {
         let painted = settings(Chrome::default());
         let row = TrackId::new(0).unwrap();
-        for column in 3..u8::try_from(SLOT_COUNT).unwrap() {
+        for column in 4..u8::try_from(SLOT_COUNT).unwrap() {
             let addr = SlotAddr::new(row, SlotId::new(column).unwrap());
             assert!(
                 !painted.pad(addr).is_lit(),

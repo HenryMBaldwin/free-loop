@@ -481,6 +481,10 @@ pub struct Engine {
     loop_gains: [[u8; SLOT_COUNT]; TRACK_COUNT],
     /// How far each loop is nudged from where its track sits.
     loop_pans: [[u8; SLOT_COUNT]; TRACK_COUNT],
+    /// Which tracks play their input through as it arrives.
+    passthrough: [bool; TRACK_COUNT],
+    /// How loud each track's passthrough is mixing, which slides toward where it should be.
+    pass_now: [f32; TRACK_COUNT],
     /// The pan each pad is mixing at, which slides toward where it should be.
     pan_now: [[Pan; SLOT_COUNT]; TRACK_COUNT],
     /// The gain each pad is mixing at, which slides toward what it should be.
@@ -566,6 +570,8 @@ impl Engine {
             pans: [CENTRE_STEP; TRACK_COUNT],
             loop_gains: [[UNITY_STEP; SLOT_COUNT]; TRACK_COUNT],
             loop_pans: [[CENTRE_STEP; SLOT_COUNT]; TRACK_COUNT],
+            passthrough: [false; TRACK_COUNT],
+            pass_now: [0.0; TRACK_COUNT],
             pan_now: [[Pan::CENTRE; SLOT_COUNT]; TRACK_COUNT],
             levels: [[0.0; SLOT_COUNT]; TRACK_COUNT],
             declick: as_usize(config.declick.0),
@@ -671,6 +677,79 @@ impl Engine {
             (level - most).max(target)
         };
         (Ramp::new(level, reached, run), reached)
+    }
+
+    /// Adds every input a track is monitoring straight into the mix.
+    ///
+    /// Each distinct input is added once however many tracks ask for it, at the loudest
+    /// of their levels. Nothing is delayed to line up with the loops.
+    fn pass_through(&mut self, out: &mut [f32], captured: &[f32], available: usize, run: usize) {
+        let mut from = [0.0; TRACK_COUNT];
+        let mut to = [0.0; TRACK_COUNT];
+        for track in 0..TRACK_COUNT {
+            let target = if self.passthrough[track] { 1.0 } else { 0.0 };
+            let start = if self.declick == 0 {
+                target
+            } else {
+                self.pass_now[track]
+            };
+            let (_, reached) = self.ramp_to(start, target, run);
+            from[track] = start;
+            to[track] = reached;
+            self.pass_now[track] = reached;
+        }
+
+        if available == 0 {
+            return;
+        }
+
+        let mut done: [Option<TrackInput>; TRACK_COUNT] = [None; TRACK_COUNT];
+        for track in 0..TRACK_COUNT {
+            if from[track] == 0.0 && to[track] == 0.0 {
+                continue;
+            }
+            let input = self.audio.inputs[track];
+            if done.iter().flatten().any(|seen| *seen == input) {
+                continue;
+            }
+            done[track] = Some(input);
+
+            let loudest = |levels: &[f32; TRACK_COUNT]| {
+                (0..TRACK_COUNT)
+                    .filter(|other| self.audio.inputs[*other] == input)
+                    .fold(0.0_f32, |most, other| most.max(levels[other]))
+            };
+            let ramp = Ramp::new(loudest(&from), loudest(&to), run);
+            self.add_input(out, captured, available, input, ramp);
+        }
+    }
+
+    /// Adds one input's channels across the output, a mono one on every channel.
+    fn add_input(
+        &self,
+        out: &mut [f32],
+        captured: &[f32],
+        available: usize,
+        input: TrackInput,
+        ramp: Ramp,
+    ) {
+        let picks = input.channels();
+        let picks = picks.as_slice();
+        for frame in 0..available {
+            let gain = ramp.at(frame);
+            if gain == 0.0 {
+                continue;
+            }
+            let taken =
+                &captured[frame * self.capture_channels..(frame + 1) * self.capture_channels];
+            let landing = &mut out[frame * self.channels..(frame + 1) * self.channels];
+            for (channel, sample) in landing.iter_mut().enumerate() {
+                let pick = picks[channel % picks.len()];
+                if let Some(source) = taken.get(usize::from(pick)) {
+                    *sample += source * gain;
+                }
+            }
+        }
     }
 
     /// How each track's pan moves over `run` frames, advancing where they have reached.
@@ -790,6 +869,7 @@ impl Engine {
         self.pans = settings.pans;
         self.loop_gains = settings.loop_gains;
         self.loop_pans = settings.loop_pans;
+        self.passthrough = settings.passthrough;
 
         // Every exclusive track, not only one that has just become exclusive: a loaded
         // session can arrive with several loops sounding on one.
@@ -1168,12 +1248,16 @@ impl Engine {
         // A frozen transport holds its position, so nothing sounds, nothing is captured
         // and no bar line arrives. Input is dropped rather than buffered: it belongs to a
         // moment the transport is not at.
+        let frames = output.len() / self.channels;
+        let input_frames = input.len() / self.capture_channels;
+        // Monitoring is the sound of playing, which a frozen transport does not stop.
+        self.pass_through(output, input, input_frames.min(frames), frames);
+
         if self.paused {
+            limit(output, sink);
             return;
         }
 
-        let frames = output.len() / self.channels;
-        let input_frames = input.len() / self.capture_channels;
         if input_frames < frames {
             sink.event(Event::Xrun {
                 frames: as_u64(frames - input_frames),
